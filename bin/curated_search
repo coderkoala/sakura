@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""curated_search <domain|persona> <query...> — search only that domain's curated authoritative sites."""
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "mcp", "sakura-web"))
+import webkit
+if len(sys.argv) < 3:
+    sys.exit("usage: curated_search <domain|persona> <query>")
+try:
+    print(webkit.curated_search(sys.argv[1], " ".join(sys.argv[2:])))
+except Exception as e:
+    sys.exit(f"curated_search failed: {e}")

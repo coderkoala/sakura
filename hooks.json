@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 __SAKURA_DIR__/hooks/web_ground.py",
+            "timeout": 25,
+            "statusMessage": "checking the web"
+          }
+        ]
+      }
+    ]
+  }
+}

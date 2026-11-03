@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""wikipedia <query...> — current Wikipedia summary with the article URL, for citing."""
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "mcp", "sakura-web"))
+import webkit
+if len(sys.argv) < 2:
+    sys.exit("usage: wikipedia <query>")
+try:
+    print(webkit.wikipedia(" ".join(sys.argv[1:])))
+except Exception as e:
+    sys.exit(f"wikipedia failed: {e}")

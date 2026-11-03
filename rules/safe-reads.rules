@@ -83,3 +83,8 @@ prefix_rule(pattern=["docker", "inspect"], decision="allow", justification="read
 prefix_rule(pattern=["systemctl", "status"], decision="allow", justification="read-only")
 prefix_rule(pattern=["kubectl", "get"], decision="allow", justification="read-only")
 prefix_rule(pattern=["kubectl", "describe"], decision="allow", justification="read-only")
+
+# Sakura web-knowledge CLIs (read-only: they fetch and print, never mutate the machine).
+prefix_rule(pattern=["web_search"], decision="allow", justification="read-only web query")
+prefix_rule(pattern=["wikipedia"], decision="allow", justification="read-only web query")
+prefix_rule(pattern=["fetch_url"], decision="allow", justification="read-only web fetch")

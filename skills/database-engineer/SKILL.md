@@ -12,3 +12,9 @@ user explicitly authorises a change, and always pair a change with a verified ba
 
 Install on demand (ask me with `j`): postgresql-client (psql), redis-tools, sqlite3, default-mysql-client, duckdb (release binary to ~/.local/bin).
 Check `command -v` first; prefer apt, then `uv tool install`, then a release binary into ~/.local/bin.
+
+## Curated sources (live, cited)
+You are online. For current or specific facts, don't guess — search your curated authoritative sources and cite the URLs:
+- `curated_search database-engineer "<query>"` — scopes DuckDuckGo to: postgresql.org, dev.mysql.com, sqlite.org, mariadb.com, use-the-index-luke.com, stackoverflow.com …
+- `web_search "<query>"`, `wikipedia "<topic>"`, `fetch_url "<url>"` for anything wider.
+Prefer the curated sources for domain facts; never invent a URL, CVE, version or figure.

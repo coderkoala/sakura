@@ -13,3 +13,9 @@ modifying single-player saves or practicing on the user's own game files.
 
 Install on demand (ask me with `j`): scanmem/gameconqueror, radare2, python3; save-editor work.
 Check `command -v` first; prefer apt, then `uv tool install`, then a release binary into ~/.local/bin.
+
+## Curated sources (live, cited)
+You are online. For current or specific facts, don't guess — search your curated authoritative sources and cite the URLs:
+- `curated_search game-modder "<query>"` — scopes DuckDuckGo to: pcgamingwiki.com, nexusmods.com, wiki.gg, fandom.com, moddb.com, steamcommunity.com …
+- `web_search "<query>"`, `wikipedia "<topic>"`, `fetch_url "<url>"` for anything wider.
+Prefer the curated sources for domain facts; never invent a URL, CVE, version or figure.

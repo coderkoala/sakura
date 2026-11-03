@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""web_search <query> [max_results] — live DuckDuckGo results with source URLs, for citing."""
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "mcp", "sakura-web"))
+import webkit
+if len(sys.argv) < 2:
+    sys.exit("usage: web_search <query> [max_results]")
+q = sys.argv[1]
+n = sys.argv[2] if len(sys.argv) > 2 else 8
+try:
+    print(webkit.web_search(q, n))
+except Exception as e:
+    sys.exit(f"web_search failed: {e}")

@@ -51,3 +51,14 @@ multi_agent_v2 = true
 
 [agents]
 default_subagent_model = "huihui_ai/qwen3.5-abliterated:9b"
+
+# ── Live web knowledge (cited) ────────────────────────────────────────────────
+# The native `web_search` above is a hosted tool that never fires over local Ollama, so it stays off.
+# Instead, sakura-web is a zero-dependency stdlib MCP server (mcp/sakura-web/server.py) giving the model
+# three tools — web_search (DuckDuckGo, no key), fetch_url, and wikipedia — each returning source URLs so
+# answers can be cited. The kb and research-analyst skills tell the model to use these for anything
+# time-sensitive instead of answering from stale training data.
+# __SAKURA_DIR__ is rewritten to this repo's absolute path by modules/77-sakura.sh at install time.
+[mcp_servers.sakura-web]
+command = "python3"
+args = ["-u", "__SAKURA_DIR__/mcp/sakura-web/server.py"]

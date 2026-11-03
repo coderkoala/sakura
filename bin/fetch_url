@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""fetch_url <url> [max_chars] — fetch a page and print readable text (HTML stripped)."""
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "mcp", "sakura-web"))
+import webkit
+if len(sys.argv) < 2:
+    sys.exit("usage: fetch_url <url> [max_chars]")
+u = sys.argv[1]
+n = sys.argv[2] if len(sys.argv) > 2 else 20000
+try:
+    print(webkit.fetch_url(u, n))
+except Exception as e:
+    sys.exit(f"fetch_url failed: {e}")
