@@ -20,14 +20,20 @@ def log(*a):
     print("[sakura-web]", *a, file=sys.stderr, flush=True)
 
 
-def _get(url, timeout=20, data=None, headers=None):
-    h = {"User-Agent": UA, "Accept": "text/html,application/json,*/*"}
+def _get_full(url, timeout=20, data=None, headers=None):
+    """Fetch a URL, following redirects. Returns (text, final_url, content_type)."""
+    h = {"User-Agent": UA, "Accept": "text/html,application/xml,application/json,*/*"}
     if headers:
         h.update(headers)
     req = urllib.request.Request(url, data=data, headers=h)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         charset = r.headers.get_content_charset() or "utf-8"
-        return r.read().decode(charset, "replace")
+        ctype = (r.headers.get_content_type() or "").lower()
+        return r.read().decode(charset, "replace"), r.geturl(), ctype
+
+
+def _get(url, timeout=20, data=None, headers=None):
+    return _get_full(url, timeout=timeout, data=data, headers=headers)[0]
 
 
 class _Text(HTMLParser):
@@ -144,15 +150,108 @@ def curated_search(domain, query, max_results=8):
     return f"Curated '{domain}' sources: {', '.join(sites[:12])}\n\n" + out
 
 
+def _discover_feed(html, base_url):
+    """Return an absolute RSS/Atom feed URL advertised in an HTML <head>, or None."""
+    for m in re.finditer(r"<link\b[^>]*>", html[:20000], re.I):
+        tag = m.group(0)
+        if "alternate" in tag.lower() and re.search(r"type\s*=\s*['\"]?application/(rss|atom)\+xml", tag, re.I):
+            href = re.search(r"href\s*=\s*['\"]([^'\"]+)['\"]", tag, re.I)
+            if href:
+                return urllib.parse.urljoin(base_url, unescape(href.group(1)))
+    return None
+
+
+def _looks_like_feed(text, ctype):
+    if any(k in ctype for k in ("xml", "rss", "atom")):
+        return True
+    head = text.lstrip()[:200].lower()
+    return head.startswith("<?xml") or "<rss" in head or "<feed" in head
+
+
+def _render_feed(xml_text, url, max_items=30):
+    """Render an RSS 2.0 or Atom feed as structured, readable entries."""
+    import xml.etree.ElementTree as ET
+
+    def strip_ns(t):
+        return t.split("}", 1)[1] if "}" in t else t
+
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return None  # not parseable as XML; let the caller fall back to text
+
+    def find_text(node, *names):
+        for child in node:
+            if strip_ns(child.tag) in names and child.text:
+                return child.text.strip()
+        return ""
+
+    def link_of(node):
+        for child in node:
+            if strip_ns(child.tag) == "link":
+                return (child.get("href") or child.text or "").strip()
+        return ""
+
+    tag = strip_ns(root.tag).lower()
+    channel = next((c for c in root if strip_ns(c.tag) == "channel"), root)
+    title = find_text(channel, "title")
+    desc = find_text(channel, "description", "subtitle")
+    items = [c for c in channel if strip_ns(c.tag) in ("item", "entry")]
+    # Not actually a feed (some other XML that merely parsed): let fetch_url fall back to text.
+    if tag not in ("rss", "feed") and not items:
+        return None
+
+    lines = [f"Feed: {title}".rstrip()]
+    if desc:
+        lines.append(desc)
+    lines.append(f"{len(items)} entries\n")
+    for it in items[:max_items]:
+        t = find_text(it, "title") or "(untitled)"
+        link = link_of(it)
+        date = find_text(it, "pubDate", "updated", "published", "date")
+        summary = find_text(it, "description", "summary", "content")
+        summary = re.sub(r"<[^>]+>", "", unescape(summary)).strip()
+        if len(summary) > 500:
+            summary = summary[:500].rstrip() + "…"
+        block = f"## {t}"
+        if date:
+            block += f"\n_{date}_"
+        if link:
+            block += f"\n{link}"
+        if summary:
+            block += f"\n\n{summary}"
+        lines.append(block)
+    extra = f"\n\n[{len(items) - max_items} more entries not shown]" if len(items) > max_items else ""
+    return f"Source: {url} (RSS/Atom feed)\n\n" + "\n\n".join(lines) + extra
+
+
 def fetch_url(url, max_chars=20000):
     if not re.match(r"^https?://", url):
         return "Error: url must start with http:// or https://"
     max_chars = max(500, min(int(max_chars or 20000), 50000))
-    raw = _get(url, timeout=25)
-    text = html_to_text(raw) if "<" in raw[:2000] else raw
+    raw, final_url, ctype = _get_full(url, timeout=25)
+
+    # A feed (direct, or a page that is really XML) renders as structured entries.
+    if _looks_like_feed(raw, ctype):
+        rendered = _render_feed(raw, final_url)
+        if rendered:
+            clipped = rendered[:max_chars]
+            suffix = "" if len(rendered) <= max_chars else f"\n\n[truncated at {max_chars} chars]"
+            return clipped + suffix
+
+    is_html = "<" in raw[:2000]
+    text = html_to_text(raw) if is_html else raw
     clipped = text[:max_chars]
     suffix = "" if len(text) <= max_chars else f"\n\n[truncated at {max_chars} chars]"
-    return f"Source: {url}\n\n{clipped}{suffix}"
+
+    # Point the model at the feed when the page advertises one: one fetch reads every entry,
+    # which is what a JS-rendered (SPA) blog or news index needs — the HTML body is often thin.
+    hint = ""
+    if is_html:
+        feed = _discover_feed(raw, final_url)
+        if feed:
+            hint = f"\n\n[This page advertises a feed: {feed} — fetch_url it to read all entries at once.]"
+    return f"Source: {final_url}\n\n{clipped}{suffix}{hint}"
 
 
 def wikipedia(query, sentences=6):
