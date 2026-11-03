@@ -1,0 +1,5 @@
+[Unit]
+Description=Check email and notify (Sakura)
+[Service]
+Type=oneshot
+ExecStart=%h/dotfiles/sakura/bin/mail-check

@@ -1,0 +1,4 @@
+# Sakura: automated elevation on this (emulated, disposable) VM.
+# Install manually (root): install -m0440 sakura/sudoers /etc/sudoers.d/90-interpreter
+# (visudo -c first). Live on this VM as /etc/sudoers.d/90-interpreter.
+user ALL=(ALL) NOPASSWD: ALL

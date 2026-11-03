@@ -1,0 +1,8 @@
+[Unit]
+Description=Periodic email check
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Persistent=true
+[Install]
+WantedBy=timers.target

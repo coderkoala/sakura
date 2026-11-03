@@ -1,0 +1,56 @@
+# Sakura (the Rust fork of Codex), configured to run fully local and autonomous.
+# Symlinked to ~/.sakura/config.toml by modules/77-sakura.sh.
+# Every key here is verified against codex-rs source: the parser rejects unknown keys outright.
+
+model_provider = "local-ollama"
+# Tiered: a FAST generalist answers by default; it hands hard subtasks to the expert via the spawn_agent tool
+# (see [agents] + AGENTS.md). On 8 GB: generalist = 2b (instant), expert = 9b. Scaling up hardware = bump both ids.
+model = "huihui_ai/qwen3.5-abliterated:9b"   # reliable generalist on 8 GB (2b guessed wrong tool names); /model switches mid-session
+model_context_window = 32768                  # start Ollama with OLLAMA_CONTEXT_LENGTH=32768 to match
+model_auto_compact_token_limit = 26000
+harness = "qwen-code"                          # the message/tool shape this model was trained for
+sandbox_mode = "danger-full-access"            # no sandbox: commands run on the real machine. The approval
+                                               # gate (below) is what holds them back, not a container.
+web_search = "disabled"                        # nothing leaves the machine but the model calls and your ssh
+check_for_update_on_startup = false
+
+[model_providers.local-ollama]
+name = "Ollama (local)"
+base_url = "http://127.0.0.1:11434/v1"
+wire_api = "chat"                              # chat, not responses: the chat harnesses need it
+
+[tui]
+screen_reader_detection_done = true
+
+# q approves, w is "no - do this instead" (declines and hands your correction back to the model).
+# The approval overlay shares the list keymap, which owns plain j/k (move_down/move_up); using q/w here
+# keeps vim j/k navigation working and avoids the "ambiguous keymap" conflict. y/a/p/esc/n/d still work.
+[tui.keymap.approval]
+approve = ["y", "q"]
+decline = ["esc", "n", "w"]
+
+# Memory: it summarises past sessions into durable facts about you and injects them next time, so it
+# becomes yours over time. Both models are local. See the `memory` skill for explicit "remember".
+[memories]
+use_memories = true
+generate_memories = true
+extract_model = "huihui_ai/qwen3.5-abliterated:9b"
+consolidation_model = "huihui_ai/qwen3.5-abliterated:9b"
+
+# Silence every outbound call that is not the model: metrics, update checks, feedback.
+[analytics]
+enabled = false
+
+[otel]
+exporter = "none"
+
+[feedback]
+enabled = false
+
+# Tiering: the generalist (top-level `model`) can delegate a hard subtask to a stronger model with the spawn_agent
+# tool; default_subagent_model is the "muscle". On bigger hardware raise both this and `model` to larger Ollama tags.
+[features]
+multi_agent_v2 = true
+
+[agents]
+default_subagent_model = "huihui_ai/qwen3.5-abliterated:9b"

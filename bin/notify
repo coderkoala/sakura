@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# notify "title" "body" — desktop notification, plus ntfy push when NTFY_TOPIC is set.
+title="${1:-Notice}"; body="${2:-}"
+command -v notify-send >/dev/null 2>&1 && notify-send -- "$title" "$body"
+if [ -n "${NTFY_TOPIC:-}" ]; then
+    curl -fsS -H "Title: $title" -d "$body" "${NTFY_SERVER:-https://ntfy.sh}/$NTFY_TOPIC" >/dev/null 2>&1 || true
+fi
