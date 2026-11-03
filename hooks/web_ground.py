@@ -62,8 +62,10 @@ def main():
     except Exception:
         leader = None
     if leader:
-        inject("This asks for a current office-holder. An authoritative Wikidata lookup was run for "
-               "you; answer from it directly and cite the source. Do not contradict it from memory.\n\n" + leader)
+        inject("A current office-holder was looked up for you (authoritative Wikidata). Reply with ONLY this "
+               "fact and its source, in one or two sentences. Add NOTHING from your own memory — no extra "
+               "names, no election results, no dates, no successors: your training is stale and any such "
+               "detail you add will be wrong. Just relay this:\n\n" + leader)
         return
 
     # 2a. "What is the latest/current version of <tool>" — answer from the authoritative package
@@ -74,8 +76,9 @@ def main():
     except Exception:
         latest = None
     if latest:
-        inject("This asks for a tool's current version. An authoritative registry lookup was run for you — "
-               "answer from it and cite the source; do NOT curl a docs site or answer from memory.\n\n" + latest)
+        inject("A tool's current version was looked up for you (authoritative registry). Reply with ONLY this "
+               "version and its source. Add NOTHING from memory — no release dates, no version history, no "
+               "'LTS' guesses: those will be wrong. Do NOT curl a docs site. Just relay this:\n\n" + latest)
         return
 
     # 2b. Version grounding — runs for tech/coding prompts too (the CODEY gate below would skip them).
