@@ -88,3 +88,4 @@ prefix_rule(pattern=["kubectl", "describe"], decision="allow", justification="re
 prefix_rule(pattern=["web_search"], decision="allow", justification="read-only web query")
 prefix_rule(pattern=["wikipedia"], decision="allow", justification="read-only web query")
 prefix_rule(pattern=["fetch_url"], decision="allow", justification="read-only web fetch")
+prefix_rule(pattern=["consult"], decision="allow", justification="read-only one-shot query to a local specialist model")
