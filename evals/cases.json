@@ -1,0 +1,45 @@
+{
+  "_doc": "Sakura eval cases. Expectations marked 'live' are computed at run time from authoritative sources, independently of Sakura's own lookup code. Placeholders: {work} = fresh temp dir per case.",
+  "cases": [
+    {"id": "fact-nepal-pm", "tags": ["fact"], "prompt": "who is the prime minister of nepal",
+     "expect": [{"live": "wikidata", "entity": "Q837", "prop": "P6"}]},
+    {"id": "fact-france-president", "tags": ["fact"], "prompt": "who is the current president of france",
+     "expect": [{"live": "wikidata", "entity": "Q142", "prop": "P35"}]},
+    {"id": "fact-japan-pm-phrasing", "tags": ["fact", "phrasing"], "prompt": "who's running japan's government right now? name the PM",
+     "expect": [{"live": "wikidata", "entity": "Q17", "prop": "P6"}]},
+    {"id": "fact-uk-monarch", "tags": ["fact", "phrasing"], "prompt": "name the reigning british monarch",
+     "expect": [{"live": "wikidata", "entity": "Q145", "prop": "P35"}]},
+
+    {"id": "ver-laravel-lts", "tags": ["version"], "prompt": "what is the current LTS version for laravel", "cwd": "~",
+     "expect": [{"live": "packagist", "name": "laravel/framework", "match": "major"}]},
+    {"id": "ver-vue-newest", "tags": ["version"], "prompt": "what's the newest vue release?", "cwd": "~",
+     "expect": [{"live": "npm", "name": "vue", "match": "minor"}]},
+    {"id": "ver-django", "tags": ["version"], "prompt": "latest django version", "cwd": "~",
+     "expect": [{"live": "pypi", "name": "django", "match": "minor"}]},
+    {"id": "ver-pnpm-untabled", "tags": ["version", "generality"], "prompt": "what is the latest version of pnpm", "cwd": "~",
+     "expect": [{"live": "npm", "name": "pnpm", "match": "major"}]},
+    {"id": "ver-ruff-untabled", "tags": ["version", "generality"], "prompt": "which ruff version is current on pypi?", "cwd": "~",
+     "expect": [{"live": "pypi", "name": "ruff", "match": "minor"}]},
+    {"id": "ver-project-laravel", "tags": ["version", "project"], "prompt": "what laravel version does this project use?", "cwd": "~/mis",
+     "expect": [{"regex": "\\b13\\b"}], "forbid": [{"regex": "(?i)laravel\\s*(8|9|10|11)\\b"}]},
+
+    {"id": "read-blog-index", "tags": ["process", "web"], "prompt": "summarize https://nobeldahal.com.np/writing/ in 3 short bullets, naming real post titles", "cwd": "~",
+     "expect": [{"live": "feed_titles", "url": "https://nobeldahal.com.np/feed.xml", "min": 1}],
+     "forbid_cmd": [{"regex": "(^|\\s)(curl|wget)\\b(?!.*\\s-I\\b)"}, {"regex": "xdg-open"}]},
+
+    {"id": "code-fizzbuzz", "tags": ["code"], "cwd": "{work}",
+     "prompt": "in the current directory, write fizzbuzz.py that prints FizzBuzz for 1..15 (one per line), then run it",
+     "check": "test \"$(python3 fizzbuzz.py | sed -n 15p)\" = FizzBuzz && test \"$(python3 fizzbuzz.py | sed -n 3p)\" = Fizz"},
+    {"id": "code-fix-bug", "tags": ["code"], "cwd": "{work}",
+     "setup": "printf 'def add(a, b):\\n    return a - b\\n' > calc.py",
+     "prompt": "calc.py has a bug: add() should add. fix it, then prove it with python3 -c 'import calc; print(calc.add(2,3))'",
+     "check": "test \"$(python3 -c 'import calc; print(calc.add(2,3))')\" = 5"},
+
+    {"id": "chain-local", "tags": ["chain"], "cwd": "{work}",
+     "prompt": "do these in order, checking each: 1) create a directory named build-test here, 2) write the output of `python3 --version` into build-test/version.txt, 3) make build-test.tar.gz from that directory, 4) list the archive contents",
+     "check": "test -f build-test.tar.gz && tar -xzOf build-test.tar.gz build-test/version.txt | grep -q Python"},
+
+    {"id": "chat-quick", "tags": ["speed"], "prompt": "say hi in one word", "cwd": "~", "max_seconds": 40,
+     "expect": [{"regex": "(?i)\\b(hi|hello|hey)\\b"}]}
+  ]
+}
