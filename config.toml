@@ -8,6 +8,12 @@ model_provider = "local-ollama"
 model = "huihui_ai/qwen3.5-abliterated:9b"   # reliable generalist on 8 GB (2b guessed wrong tool names); /model switches mid-session
 model_context_window = 32768                  # start Ollama with OLLAMA_CONTEXT_LENGTH=32768 to match
 model_auto_compact_token_limit = 26000
+# codex-rs ships no metadata for these Ollama slugs, so without a catalog it warns at startup
+# ("Model metadata not found … degrade performance") and assumes a 272k context window. models.json
+# states the real metadata (context 32768, same base prompt as the fallback) so the warning is gone
+# and the window is honest. Regenerate after a sakura bump: tools/gen-model-catalog.py. __SAKURA_DIR__
+# is rewritten to this repo's absolute path by modules/77-sakura.sh.
+model_catalog_json = "__SAKURA_DIR__/models.json"
 harness = "qwen-code"                          # the message/tool shape this model was trained for
 sandbox_mode = "danger-full-access"            # no sandbox: commands run on the real machine. The approval
                                                # gate (below) is what holds them back, not a container.
