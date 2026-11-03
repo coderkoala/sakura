@@ -25,6 +25,14 @@ name = "Ollama (local)"
 base_url = "http://127.0.0.1:11434/v1"
 wire_api = "chat"                              # chat, not responses: the chat harnesses need it
 
+# No OpenAI/ChatGPT/Codex upsell tips. The upstream TUI rotates "Try the Desktop app"
+# (chatgpt.com), "/fast for our fastest inference", GPT-model promos and the like through
+# the welcome/footer tip slots; none of that belongs in a local uncensored agent. Turning
+# tooltips off disables the whole subsystem. (The openai.com announcement fetch is already
+# dead in this fork — lib.rs "[oi-fork] no network at startup".)
+[tui]
+show_tooltips = false
+
 # q approves, w is "no - do this instead" (declines and hands your correction back to the model).
 # The approval overlay shares the list keymap, which owns plain j/k (move_down/move_up); using q/w here
 # keeps vim j/k navigation working and avoids the "ambiguous keymap" conflict. y/a/p/esc/n/d still work.
