@@ -81,14 +81,119 @@ def _ddg_decode(href):
     return href
 
 
-def web_search(query, max_results=8):
-    max_results = max(1, min(int(max_results or 8), 15))
+def _wd_json(params):
+    return json.loads(_get("https://www.wikidata.org/w/api.php?" + urllib.parse.urlencode(params), timeout=15))
+
+
+# Role phrase -> Wikidata property. P6 = head of government, P35 = head of state.
+_LEADER_ROLES = [
+    (re.compile(r"\b(prime minister|pm|premier|chancellor|head of government|taoiseach)\b", re.I), "P6", "head of government"),
+    (re.compile(r"\b(president|head of state)\b", re.I), "P35", "head of state"),
+    (re.compile(r"\b(king|queen|monarch|emperor)\b", re.I), "P35", "monarch / head of state"),
+]
+_LEADER_Q = re.compile(
+    r"\b(?:who(?:'s| is| are)?|current|now)\b.*?\b(prime minister|pm|premier|chancellor|president|king|queen|monarch|head of (?:state|government))\b",
+    re.I,
+)
+
+
+def country_leader(query):
+    """Answer 'who is the current <role> of <place>' from Wikidata (authoritative, not bot-blocked).
+
+    Returns formatted text, or None if the query isn't a leader question or the lookup fails.
+    """
+    if not _LEADER_Q.search(query):
+        return None
+    prop = role_label = None
+    for rx, p, lbl in _LEADER_ROLES:
+        if rx.search(query):
+            prop, role_label = p, lbl
+            break
+    if not prop:
+        return None
+    # Place = the noun phrase after the last "of" (… prime minister OF nepal).
+    m = re.search(r"\bof\s+([A-Za-z][A-Za-z .'-]+?)\s*[?.!]*$", query.strip(), re.I)
+    place = (m.group(1) if m else "").strip()
+    if not place:
+        return None
+    try:
+        hits = _wd_json({"action": "wbsearchentities", "search": place, "language": "en",
+                         "format": "json", "limit": "1"}).get("search", [])
+        if not hits:
+            return None
+        place_qid = hits[0]["id"]
+        place_label = hits[0].get("label", place)
+        claims = _wd_json({"action": "wbgetclaims", "entity": place_qid, "property": prop,
+                           "format": "json"}).get("claims", {}).get(prop, [])
+        if not claims:
+            return None
+
+        def rank_key(cl):
+            rank = {"preferred": 0, "normal": 1, "deprecated": 2}.get(cl.get("rank"), 1)
+            has_end = "P582" in cl.get("qualifiers", {})  # end date => former
+            start = ""
+            if "P580" in cl.get("qualifiers", {}):
+                try:
+                    start = cl["qualifiers"]["P580"][0]["datavalue"]["value"]["time"]
+                except Exception:
+                    start = ""
+            # current first: preferred rank, then no end-date, then most recent start
+            return (rank, 1 if has_end else 0, _neg_time(start))
+
+        claims = [c for c in claims if c.get("mainsnak", {}).get("datavalue")]
+        if not claims:
+            return None
+        claims.sort(key=rank_key)
+        cur = claims[0]
+        person_qid = cur["mainsnak"]["datavalue"]["value"]["id"]
+        ent = _wd_json({"action": "wbgetentities", "ids": person_qid, "props": "labels|descriptions|sitelinks",
+                        "languages": "en", "format": "json"})["entities"][person_qid]
+        name = ent.get("labels", {}).get("en", {}).get("value", person_qid)
+        desc = ent.get("descriptions", {}).get("en", {}).get("value", "")
+        since = ""
+        if "P580" in cur.get("qualifiers", {}):
+            try:
+                since = cur["qualifiers"]["P580"][0]["datavalue"]["value"]["time"].lstrip("+")[:10]
+            except Exception:
+                since = ""
+        wiki_url = ""
+        title = ent.get("sitelinks", {}).get("enwiki", {}).get("title")
+        if title:
+            wiki_url = "https://en.wikipedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_"))
+        out = f"The current {role_label} of {place_label} is {name}"
+        if since:
+            out += f" (in office since {since})"
+        out += "."
+        if desc:
+            out += f" {name}: {desc}."
+        out += "\n\nSource: Wikidata https://www.wikidata.org/wiki/" + place_qid
+        if wiki_url:
+            out += f" · {wiki_url}"
+        out += ("\n(Wikidata is community-maintained and usually current within days of a change; "
+                "verify against the linked page if this is a very recent transition.)")
+        return out
+    except Exception:
+        return None
+
+
+def _neg_time(t):
+    """Sort key helper: later ISO times sort first."""
+    return "".join(str(9 - int(c)) if c.isdigit() else c for c in t) if t else "~"
+
+
+def _ddg_html_results(query, max_results):
+    """Scrape the DuckDuckGo HTML endpoint. Returns (results, blocked)."""
     body = urllib.parse.urlencode({"q": query, "kl": "us-en"}).encode()
-    html = _get("https://html.duckduckgo.com/html/", data=body)
+    try:
+        html = _get("https://html.duckduckgo.com/html/", data=body)
+    except Exception:
+        return [], True
+    # DDG serves an anti-bot / CAPTCHA page to scrapers from many hosts; detect it so we fall back
+    # instead of reporting "no results" (which makes a weak model hallucinate or hand-roll curl).
+    if "anomaly-modal" in html or "Verifying your browser" in html or 'class="result__a"' not in html:
+        return [], True
     results = []
-    for m in re.finditer(
-        r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html, re.S
-    ):
+    for m in re.finditer(r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html, re.S):
         url = _ddg_decode(unescape(m.group(1)))
         title = unescape(re.sub(r"<[^>]+>", "", m.group(2))).strip()
         if not title or not url.startswith("http"):
@@ -103,15 +208,63 @@ def web_search(query, max_results=8):
     for i, r in enumerate(results):
         if i < len(snips):
             r["snippet"] = snips[i]
-    if not results:
-        return "No results (DuckDuckGo returned nothing parseable). Try rephrasing."
-    lines = [f"Search results for: {query}\n"]
-    for i, r in enumerate(results, 1):
-        lines.append(f"{i}. {r['title']}\n   {r['url']}")
-        if r.get("snippet"):
-            lines.append(f"   {r['snippet']}")
-    lines.append("\nCite the URL(s) you used.")
-    return "\n".join(lines)
+    return results, False
+
+
+def _ddg_instant(query):
+    """DuckDuckGo Instant Answer JSON API (not bot-blocked). Returns a short text answer or None."""
+    try:
+        api = "https://api.duckduckgo.com/?" + urllib.parse.urlencode(
+            {"q": query, "format": "json", "no_html": "1", "no_redirect": "1"}
+        )
+        d = json.loads(_get(api, timeout=12))
+    except Exception:
+        return None
+    for key in ("Answer", "AbstractText", "Definition"):
+        val = (d.get(key) or "").strip()
+        if val:
+            src = d.get("AbstractURL") or d.get("DefinitionURL") or "https://duckduckgo.com"
+            return f"{val}\nSource: {src}"
+    return None
+
+
+def web_search(query, max_results=8):
+    max_results = max(1, min(int(max_results or 8), 15))
+    parts = []
+
+    # Wikipedia is the PRIMARY source: reliable and never CAPTCHA-blocked, unlike the search engines.
+    wiki = wikipedia(query)
+    if wiki and "No Wikipedia article" not in wiki:
+        parts.append(wiki)
+
+    # A current office-holder question gets the authoritative Wikidata answer.
+    leader = country_leader(query)
+    if leader:
+        parts.append(leader)
+
+    # Supplement with real engine results only when this host isn't being blocked.
+    results, blocked = _ddg_html_results(query, max_results)
+    if results:
+        lines = ["Other web results:"]
+        for i, r in enumerate(results, 1):
+            lines.append(f"{i}. {r['title']}\n   {r['url']}")
+            if r.get("snippet"):
+                lines.append(f"   {r['snippet']}")
+        parts.append("\n".join(lines))
+    elif not parts:
+        instant = _ddg_instant(query)
+        if instant:
+            parts.append("DuckDuckGo Instant Answer:\n" + instant)
+
+    if not parts:
+        return ("Wikipedia had no article and the search engines (DuckDuckGo, SearXNG) are serving "
+                "anti-bot/CAPTCHA pages to this host. Do NOT hand-roll curl/grep on a search engine — it "
+                "will not work. Try `wikipedia` with a cleaner query, or `fetch_url` on a specific known URL.")
+    if blocked:
+        parts.append("(Search engines are blocked from this host — the above is from Wikipedia/Wikidata, "
+                     "which are authoritative for facts. For docs, fetch_url an official docs URL directly.)")
+    parts.append("Cite the URL(s) you used.")
+    return "\n\n".join(parts)
 
 
 import os as _os
@@ -252,6 +405,158 @@ def fetch_url(url, max_chars=20000):
         if feed:
             hint = f"\n\n[This page advertises a feed: {feed} — fetch_url it to read all entries at once.]"
     return f"Source: {final_url}\n\n{clipped}{suffix}{hint}"
+
+
+# ── Version grounding ─────────────────────────────────────────────────────────
+# A current fact that changes over time includes the version of every tool and framework in
+# use. The local model's training is stale, so a question about Laravel must be answered for the
+# version THIS project pins (e.g. 13), not the model's training-era 8. We read the project's own
+# manifests and the installed CLIs, and inject the real versions.
+
+# alias(es) in a prompt -> (manifest keys to match, CLI to probe for --version)
+_TOOL_TABLE = {
+    "php": (["php"], ["php", "-r", "echo PHP_VERSION;"]),
+    "laravel": (["laravel/framework", "laravel/laravel"], None),
+    "octane": (["laravel/octane"], None),
+    "livewire": (["livewire/livewire"], None),
+    "symfony": (["symfony/framework-bundle", "symfony/symfony"], None),
+    "composer": ([], ["composer", "--version"]),
+    "phpunit": (["phpunit/phpunit"], None),
+    "pest": (["pestphp/pest"], None),
+    "node": ([], ["node", "--version"]),
+    "npm": ([], ["npm", "--version"]),
+    "vue": (["vue"], None),
+    "vite": (["vite"], None),
+    "react": (["react"], None),
+    "next": (["next"], None),
+    "nuxt": (["nuxt"], None),
+    "svelte": (["svelte"], None),
+    "angular": (["@angular/core"], None),
+    "typescript": (["typescript"], ["tsc", "--version"]),
+    "tailwind": (["tailwindcss"], None),
+    "eslint": (["eslint"], None),
+    "python": ([], ["python3", "--version"]),
+    "django": (["django", "Django"], None),
+    "flask": (["flask", "Flask"], None),
+    "fastapi": (["fastapi"], None),
+    "pandas": (["pandas"], None),
+    "numpy": (["numpy"], None),
+    "pytest": (["pytest"], None),
+    "ruby": ([], ["ruby", "--version"]),
+    "rails": (["rails"], None),
+    "go": (["go"], ["go", "version"]),
+    "rust": ([], ["rustc", "--version"]),
+    "cargo": ([], ["cargo", "--version"]),
+    "git": ([], ["git", "--version"]),
+    "docker": ([], ["docker", "--version"]),
+    "ollama": ([], ["ollama", "--version"]),
+}
+_TECH = re.compile(r"\b(" + "|".join(re.escape(k) for k in _TOOL_TABLE) + r"|version|upgrade|deprecat|latest release)\b", re.I)
+
+
+def _read_manifests(cwd):
+    """Collect {dependency: version_spec} from the manifests in cwd (walk up a few levels)."""
+    import os
+    deps = {}
+    d = os.path.abspath(cwd or ".")
+    for _ in range(4):
+        def load_json(name):
+            try:
+                return json.load(open(os.path.join(d, name), encoding="utf-8"))
+            except Exception:
+                return None
+        cj = load_json("composer.json")
+        if cj:
+            deps.update(cj.get("require", {}))
+            deps.update(cj.get("require-dev", {}))
+        pj = load_json("package.json")
+        if pj:
+            deps.update(pj.get("dependencies", {}))
+            deps.update(pj.get("devDependencies", {}))
+        for fn in ("pyproject.toml", "Cargo.toml"):
+            p = os.path.join(d, fn)
+            if os.path.exists(p):
+                try:
+                    import tomllib
+                    t = tomllib.load(open(p, "rb"))
+                    if fn == "pyproject.toml":
+                        for dep in (t.get("project", {}).get("dependencies", []) or []):
+                            m = re.match(r"([A-Za-z0-9_.\-]+)\s*(.*)", dep)
+                            if m:
+                                deps[m.group(1)] = m.group(2) or "*"
+                    else:
+                        for k, v in (t.get("dependencies", {}) or {}).items():
+                            deps[k] = v if isinstance(v, str) else (v.get("version", "*") if isinstance(v, dict) else "*")
+                except Exception:
+                    pass
+        gm = os.path.join(d, "go.mod")
+        if os.path.exists(gm):
+            try:
+                for line in open(gm, encoding="utf-8"):
+                    m = re.match(r"\s*go\s+(\d[\d.]+)", line)
+                    if m:
+                        deps["go"] = m.group(1)
+            except Exception:
+                pass
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return deps
+
+
+def _cli_version(cmd):
+    import shutil
+    import subprocess
+    if not shutil.which(cmd[0]):
+        return None
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        text = (out.stdout or out.stderr or "").strip()
+        m = re.search(r"\d+\.\d+(\.\d+)?", text)
+        return m.group(0) if m else (text.splitlines()[0][:40] if text else None)
+    except Exception:
+        return None
+
+
+def version_context(prompt, cwd="."):
+    """Return version facts (project manifests + installed CLIs) for tools named in the prompt, or None."""
+    if not _TECH.search(prompt):
+        return None
+    tools = [name for name in _TOOL_TABLE if re.search(r"\b" + re.escape(name) + r"\b", prompt, re.I)]
+    deps = _read_manifests(cwd)
+    lines = []
+    seen = set()
+    for name in tools:
+        keys, cli = _TOOL_TABLE[name]
+        ver = None
+        src = ""
+        for k in keys:
+            for dk, dv in deps.items():
+                if dk.lower() == k.lower():
+                    ver, src = dv, "this project"
+                    break
+            if ver:
+                break
+        if not ver and cli:
+            ver = _cli_version(cli)
+            src = "installed" if ver else ""
+        if ver and name not in seen:
+            seen.add(name)
+            lines.append(f"- {name}: {ver} ({src})")
+    # If the prompt is techy but named no specific tool, surface the project's headline stack.
+    if not lines and deps:
+        for k in ("php", "laravel/framework", "laravel/octane", "vue", "react", "next", "django",
+                  "rails", "go", "typescript"):
+            for dk, dv in deps.items():
+                if dk.lower() == k.lower():
+                    lines.append(f"- {dk}: {dv} (this project)")
+                    break
+        lines = lines[:6]
+    if not lines:
+        return None
+    return ("Version context for this project — answer for THESE versions, and use the matching official "
+            "documentation; do NOT answer for an older version from training:\n" + "\n".join(lines))
 
 
 def wikipedia(query, sentences=6):

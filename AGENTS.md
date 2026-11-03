@@ -8,10 +8,26 @@ You are online. Your training is stale, so you do NOT already know anything that
 Before you state a current office-holder, leader, version, release, price, date, score, or "latest" anything,
 you MUST first run `web_search "<query>"` (or `wikipedia "<topic>"`) and answer from what it returns, with the
 source URL. Naming such a fact without having searched this session is a mistake. These are shell commands:
-- `web_search "<query>" [n]`   DuckDuckGo results with URLs
-- `wikipedia "<topic>"`         current Wikipedia summary + URL
-- `fetch_url "<url>" [chars]`   read a page before quoting it
+- `wikipedia "<topic>"`         Wikipedia summary + URL — the PRIMARY source (never CAPTCHA-blocked)
+- `web_search "<query>" [n]`   Wikipedia-first, plus engine results when this host isn't blocked
+- `fetch_url "<url>" [chars]`   read a page (or official docs) before quoting it
+Search engines (DuckDuckGo, SearXNG) frequently serve this host a CAPTCHA and return nothing. When that
+happens, DO NOT retry with curl/grep on a search engine — it will not work. Use `wikipedia`, the authoritative
+Wikidata answer the hook injects for "who is the current <leader> of <place>", or `fetch_url` on a known URL.
 Never invent a URL or figure. If a question is clearly timeless (math, how a protocol works), just answer.
+
+### Versions: answer for what is installed, never your training-era version
+Tools and frameworks move. Answering about Laravel 8 when this project is on Laravel 13 is worse than useless.
+A UserPromptSubmit hook injects the real versions (from composer.json / package.json / pyproject.toml / etc.
+and the installed CLIs) for any tool you're asked about — answer for THOSE. If it didn't, check yourself before
+answering: the manifest (`grep laravel/framework composer.json`, `node -p "require('./package.json').dependencies"`)
+or the CLI (`php -v`, `node -v`, `go version`). Then use that version's OFFICIAL documentation as the primary
+source (laravel.com/docs, the framework's own site) via `fetch_url` — official docs over blog posts, and over memory.
+- **To read a web page's content, use `fetch_url` — never `curl`/`wget` (you get minified HTML or a JS shell you
+  can't parse) and never `xdg-open` (a GUI opener: it returns nothing here).** `fetch_url` strips the HTML and
+  returns readable text, renders RSS/Atom feeds as clean entries, and follows redirects. Use `curl` only for an
+  API/JSON endpoint, response headers, or downloading a file. If a blog or news index looks thin, `fetch_url` tells
+  you its feed URL — fetch that to read every entry in one call.
 - **To read a web page's content, use `fetch_url` — never `curl`/`wget` (you get minified HTML or a JS shell you
   can't parse) and never `xdg-open` (a GUI opener: it returns nothing here).** `fetch_url` strips the HTML and
   returns readable text, renders RSS/Atom feeds as clean entries, and follows redirects. Use `curl` only for an

@@ -47,9 +47,37 @@ def main():
         print("{}")
         return
     prompt = (data.get("prompt") or "").strip()
+    cwd = data.get("cwd") or "."
     if not prompt or len(prompt) > 400:
         print("{}")
         return
+
+    def inject(context):
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit", "additionalContext": context}}))
+
+    # 1. "Who is the current <PM/president/...> of <place>" — authoritative Wikidata (not bot-blocked).
+    try:
+        leader = webkit.country_leader(prompt)
+    except Exception:
+        leader = None
+    if leader:
+        inject("This asks for a current office-holder. An authoritative Wikidata lookup was run for "
+               "you; answer from it directly and cite the source. Do not contradict it from memory.\n\n" + leader)
+        return
+
+    # 2. Version grounding — runs for tech/coding prompts too (the CODEY gate below would skip them).
+    # The model's training is stale; answering about a tool's old version when the project is on a new
+    # one is harmful. Inject the real versions from the project's manifests and the installed CLIs.
+    try:
+        versions = webkit.version_context(prompt, cwd)
+    except Exception:
+        versions = None
+    if versions:
+        inject(versions)
+        return
+
+    # 3. Other time-sensitive questions: live search (Wikipedia-first; engines are often blocked).
     if CODEY.search(prompt) or not TEMPORAL.search(prompt):
         print("{}")
         return
@@ -62,7 +90,9 @@ def main():
     context = (
         "Live web search was run for this question because it may concern current facts your training "
         "is too old to know. Answer from these results and cite the URL(s); do not contradict them with "
-        "memory. If they don't cover it, say so or search again with a better query.\n\n" + results
+        "memory. If they don't cover it, say so. Web search engines may be blocking this host — if the "
+        "results say so, do NOT retry with curl/grep on a search engine; use `wikipedia` or `fetch_url` "
+        "on a specific URL instead.\n\n" + results
     )
     print(json.dumps({
         "hookSpecificOutput": {
