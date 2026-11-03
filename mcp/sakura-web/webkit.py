@@ -535,6 +535,108 @@ def _cli_version(cmd):
         return None
 
 
+# tool -> (registry, identifier) for the LATEST published version. Authoritative, keyless, not CAPTCHA'd.
+_REGISTRY = {
+    "laravel": ("packagist", "laravel/framework"),
+    "symfony": ("packagist", "symfony/symfony"),
+    "livewire": ("packagist", "livewire/livewire"),
+    "composer": ("gh", "composer/composer"),
+    "php": ("gh", "php/php-src"),
+    "vue": ("npm", "vue"),
+    "react": ("npm", "react"),
+    "next": ("npm", "next"),
+    "nuxt": ("npm", "nuxt"),
+    "svelte": ("npm", "svelte"),
+    "angular": ("npm", "@angular/core"),
+    "typescript": ("npm", "typescript"),
+    "tailwind": ("npm", "tailwindcss"),
+    "eslint": ("npm", "eslint"),
+    "vite": ("npm", "vite"),
+    "node": ("gh", "nodejs/node"),
+    "npm": ("npm", "npm"),
+    "django": ("pypi", "django"),
+    "flask": ("pypi", "flask"),
+    "fastapi": ("pypi", "fastapi"),
+    "pandas": ("pypi", "pandas"),
+    "numpy": ("pypi", "numpy"),
+    "python": ("gh", "python/cpython"),
+    "ruby": ("gh", "ruby/ruby"),
+    "rails": ("gh", "rails/rails"),
+    "go": ("goweb", ""),
+    "golang": ("goweb", ""),
+    "rust": ("gh", "rust-lang/rust"),
+    "cargo": ("gh", "rust-lang/cargo"),
+    "serde": ("crates", "serde"),
+    "tokio": ("crates", "tokio"),
+    "docker": ("gh", "moby/moby"),
+    "kubernetes": ("gh", "kubernetes/kubernetes"),
+    "k8s": ("gh", "kubernetes/kubernetes"),
+    "ollama": ("gh", "ollama/ollama"),
+    "postgres": ("gh", "postgres/postgres"),
+    "postgresql": ("gh", "postgres/postgres"),
+    "redis": ("gh", "redis/redis"),
+    "nginx": ("gh", "nginx/nginx"),
+}
+_LATEST_Q = re.compile(r"\b(latest|current|newest|recent|up[- ]?to[- ]?date|lts|stable|which version|what version|version of)\b", re.I)
+
+
+def _registry_latest(kind, ident):
+    try:
+        if kind == "packagist":
+            d = json.loads(_get(f"https://repo.packagist.org/p2/{ident}.json", timeout=12))
+            vers = [p["version"] for p in d["packages"][ident]]
+            stable = [v for v in vers if not re.search(r"(dev|alpha|beta|rc)", v, re.I)]
+            v = (stable or vers)[0]
+            return v, f"https://packagist.org/packages/{ident}"
+        if kind == "npm":
+            d = json.loads(_get(f"https://registry.npmjs.org/{urllib.parse.quote(ident, safe='@/')}/latest", timeout=12))
+            return d["version"], f"https://www.npmjs.com/package/{ident}"
+        if kind == "pypi":
+            d = json.loads(_get(f"https://pypi.org/pypi/{ident}/json", timeout=12))
+            return d["info"]["version"], f"https://pypi.org/project/{ident}/"
+        if kind == "crates":
+            d = json.loads(_get(f"https://crates.io/api/v1/crates/{ident}", timeout=12))
+            return d["crate"]["max_stable_version"], f"https://crates.io/crates/{ident}"
+        if kind == "gh":
+            try:
+                d = json.loads(_get(f"https://api.github.com/repos/{ident}/releases/latest", timeout=12))
+                tag = d.get("tag_name")
+                if tag:
+                    return tag, f"https://github.com/{ident}/releases/latest"
+            except Exception:
+                pass
+            d = json.loads(_get(f"https://api.github.com/repos/{ident}/tags?per_page=20", timeout=12))
+            tags = [t["name"] for t in d]
+            stable = [t for t in tags if not re.search(r"(dev|alpha|beta|rc|pre)", t, re.I)]
+            if stable or tags:
+                return (stable or tags)[0], f"https://github.com/{ident}/tags"
+        if kind == "goweb":
+            txt = _get("https://go.dev/VERSION?m=text", timeout=12).splitlines()[0]
+            return txt, "https://go.dev/dl/"
+    except Exception:
+        return None, None
+    return None, None
+
+
+def latest_version(prompt):
+    """For 'what is the latest/current version of <tool>', return the authoritative published version."""
+    if not _LATEST_Q.search(prompt):
+        return None
+    tool = next((name for name in _REGISTRY if re.search(r"\b" + re.escape(name) + r"\b", prompt, re.I)), None)
+    if not tool:
+        return None
+    kind, ident = _REGISTRY[tool]
+    ver, url = _registry_latest(kind, ident)
+    if not ver:
+        return None
+    note = ""
+    if re.search(r"\blts\b", prompt, re.I):
+        note = (" (Note: not every project has a separate 'LTS' line — many just have fixed support windows per "
+                "release; check the project's support policy page for dates.)")
+    return (f"The latest published version of {tool} is {ver} (authoritative registry, fetched just now). "
+            f"Answer from this, not from training.{note}\nSource: {url}")
+
+
 def version_context(prompt, cwd="."):
     """Return version facts (project manifests + installed CLIs) for tools named in the prompt, or None."""
     if not _TECH.search(prompt):

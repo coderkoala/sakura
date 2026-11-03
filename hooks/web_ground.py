@@ -66,7 +66,19 @@ def main():
                "you; answer from it directly and cite the source. Do not contradict it from memory.\n\n" + leader)
         return
 
-    # 2. Version grounding — runs for tech/coding prompts too (the CODEY gate below would skip them).
+    # 2a. "What is the latest/current version of <tool>" — answer from the authoritative package
+    # registry (Packagist/npm/PyPI/crates/GitHub), which is keyless and not CAPTCHA-blocked. This is
+    # the fix for the model curling laravel.com and hallucinating "Laravel 11".
+    try:
+        latest = webkit.latest_version(prompt)
+    except Exception:
+        latest = None
+    if latest:
+        inject("This asks for a tool's current version. An authoritative registry lookup was run for you — "
+               "answer from it and cite the source; do NOT curl a docs site or answer from memory.\n\n" + latest)
+        return
+
+    # 2b. Version grounding — runs for tech/coding prompts too (the CODEY gate below would skip them).
     # The model's training is stale; answering about a tool's old version when the project is on a new
     # one is harmful. Inject the real versions from the project's manifests and the installed CLIs.
     try:
