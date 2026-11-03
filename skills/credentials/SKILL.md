@@ -17,3 +17,7 @@ Use:
 Convention: email creds at `email/<account>` with lines `password: ...`, `imap_host: ...`, `smtp_host: ...`.
 Never print a secret into chat or a file; pass it directly to the tool that needs it. The `email` and mail-check
 tools read from here.
+
+## Specialist model
+Only qwen3.5 drives this session (it's the one model here that tool-calls). For a hard sub-problem, pull a specialist one-shot and act on its answer yourself — you keep the tools:
+- `consult security "<question>"` — an exploitation technique, payload, or security phrasing.

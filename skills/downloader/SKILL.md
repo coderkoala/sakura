@@ -16,3 +16,7 @@ explicit robots.txt/ToS mention from the operator; otherwise this is their own f
 
 Install on demand (ask me with `j`): curl wget yt-dlp (uv tool install yt-dlp), aria2.
 Check `command -v` first; prefer apt, then `uv tool install`, then a release binary into ~/.local/bin.
+
+## Specialist model
+Only qwen3.5 drives this session (it's the one model here that tool-calls). For a hard sub-problem, pull a specialist one-shot and act on its answer yourself — you keep the tools:
+- `consult coder-fast "<question>"` — a quick snippet or one-off command.

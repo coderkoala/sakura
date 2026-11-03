@@ -29,3 +29,7 @@ Use (`-o json` for anything you need to parse):
 
 Reading/searching mail is routine; sending is outward-facing — show me the full draft and get my `j` before
 `send`. Never dump raw passwords; the passwd.cmd keeps them in pass.
+
+## Specialist model
+Only qwen3.5 drives this session (it's the one model here that tool-calls). For a hard sub-problem, pull a specialist one-shot and act on its answer yourself — you keep the tools:
+- `consult coder-fast "<question>"` — a quick snippet or one-off command.

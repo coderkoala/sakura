@@ -12,3 +12,7 @@ Local RAG: embeddings from Ollama `qwen3-embedding:0.6b` (already pulled), store
 Use it when a persona needs reference the model doesn't carry: kb/research questions, "where did I write X",
 grounding an answer in the user's actual docs. Always cite the file path you used; say so when nothing matches
 rather than inventing. Re-index after big doc changes.
+
+## Specialist model
+Only qwen3.5 drives this session (it's the one model here that tool-calls). For a hard sub-problem, pull a specialist one-shot and act on its answer yourself — you keep the tools:
+- `consult coder "<question>"` — hard code, algorithms or a tricky API.

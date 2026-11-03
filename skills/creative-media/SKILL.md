@@ -15,3 +15,7 @@ Check `command -v` first; prefer apt, then `uv tool install`, then a release bin
 ## Image generation
 Use the `image` skill: local, on the GPU. ffmpeg/imagemagick handle
 audio/video/stills editing; actual text-to-image generation goes through stable-diffusion.cpp at ~/.local/share/sd.
+
+## Specialist model
+Only qwen3.5 drives this session (it's the one model here that tool-calls). For a hard sub-problem, pull a specialist one-shot and act on its answer yourself — you keep the tools:
+- `consult prose "<question>"` — long-form writing or narrative.

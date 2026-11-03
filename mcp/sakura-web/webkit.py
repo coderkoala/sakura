@@ -292,15 +292,31 @@ def curated_sites(domain):
 
 
 def curated_search(domain, query, max_results=8):
-    """web_search scoped to a domain's (or persona's) curated authoritative sites."""
+    """Search a domain's curated authoritative sites. Uses the engine when reachable; when engines are
+    CAPTCHA-blocked it hands back the authoritative URLs to fetch_url directly (those sites aren't blocked)."""
     sites = curated_sites(domain)
     if not sites:
         avail = ", ".join(sorted(_SOURCES.get("domains", {})))
         return f"No curated sources for '{domain}'. Available domains: {avail}. Falling back to a plain web_search:\n\n" + web_search(query, max_results)
     scope = " OR ".join(f"site:{s}" for s in sites[:12])
-    scoped = f"({scope}) {query}"
-    out = web_search(scoped, max_results)
-    return f"Curated '{domain}' sources: {', '.join(sites[:12])}\n\n" + out
+    results, blocked = _ddg_html_results(f"({scope}) {query}", max_results)
+    header = f"Curated '{domain}' sources: {', '.join(sites[:12])}\n\n"
+    if results:
+        lines = [f"Scoped search results for: {query}"]
+        for i, r in enumerate(results, 1):
+            lines.append(f"{i}. {r['title']}\n   {r['url']}")
+            if r.get("snippet"):
+                lines.append(f"   {r['snippet']}")
+        lines.append("\nCite the URL(s) you used.")
+        return header + "\n".join(lines)
+    # Engines are blocking this host: these authoritative sites are NOT blocked — fetch them directly.
+    sites_list = "\n".join(f"- https://{s}" for s in sites[:12])
+    wiki = wikipedia(query)
+    wiki_block = ("" if "No Wikipedia article" in wiki else "\nWikipedia (for background):\n" + wiki + "\n")
+    return (header + "Web search engines are CAPTCHA-blocking this host, so a scoped search can't run. "
+            "These authoritative sources are NOT blocked — `fetch_url` the most relevant one directly "
+            f"for \"{query}\" (try the site's /search or /docs path, or a likely doc URL):\n" + sites_list
+            + "\n" + wiki_block + "\nDo NOT curl/grep a search engine — it will not work.")
 
 
 def _discover_feed(html, base_url):

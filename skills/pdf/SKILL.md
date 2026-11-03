@@ -26,3 +26,7 @@ keeps list items and table rows intact by default and is much faster than LaTeX.
 
 Verify the PDF was written (page count via `pdfinfo` from `poppler-utils`) and report the path. For an existing PDF
 that already splits badly, re-render from its source; don't try to re-paginate a finished PDF.
+
+## Specialist model
+Only qwen3.5 drives this session (it's the one model here that tool-calls). For a hard sub-problem, pull a specialist one-shot and act on its answer yourself — you keep the tools:
+- `consult coder "<question>"` — hard code, algorithms or a tricky API.

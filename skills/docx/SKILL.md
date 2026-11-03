@@ -19,3 +19,7 @@ Two jobs: produce/edit Word files, and proofread the user's writing interactivel
   and apply it on the user's approval (that is what `j`/`k` are for) before moving to the next. Do not silently
   rewrite the whole document. Explain each correction in a few words so the user learns.
 - Keep the user's voice; fix errors, don't restyle their writing unless asked.
+
+## Specialist model
+Only qwen3.5 drives this session (it's the one model here that tool-calls). For a hard sub-problem, pull a specialist one-shot and act on its answer yourself — you keep the tools:
+- `consult coder "<question>"` — hard code, algorithms or a tricky API.

@@ -22,3 +22,7 @@ Notes:
   discrete GPU.
 - After it writes the file, confirm the path and (if asked) open it. Report the real output path, nothing invented.
 - For other styles the user can drop more `.safetensors` checkpoints into `~/.local/share/sd/models/`.
+
+## Specialist model
+Only qwen3.5 drives this session (it's the one model here that tool-calls). For a hard sub-problem, pull a specialist one-shot and act on its answer yourself — you keep the tools:
+- `consult prose "<question>"` — long-form writing or narrative.

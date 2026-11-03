@@ -18,3 +18,7 @@ Common jobs:
 
 After writing, report the path and a one-line summary (sheets, rows, columns). Open it only if asked. Never fabricate
 cell values from the source — read the real CSV/file.
+
+## Specialist model
+Only qwen3.5 drives this session (it's the one model here that tool-calls). For a hard sub-problem, pull a specialist one-shot and act on its answer yourself — you keep the tools:
+- `consult coder "<question>"` — hard code, algorithms or a tricky API.

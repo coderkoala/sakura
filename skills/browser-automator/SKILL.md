@@ -19,3 +19,7 @@ own before continuing.
 
 Install on demand (ask me with `j`): playwright (uv tool install playwright && playwright install chromium) or patchright; headless Chromium.
 Check `command -v` first; prefer apt, then `uv tool install`, then a release binary into ~/.local/bin.
+
+## Specialist model
+Only qwen3.5 drives this session (it's the one model here that tool-calls). For a hard sub-problem, pull a specialist one-shot and act on its answer yourself — you keep the tools:
+- `consult coder "<question>"` — hard code, algorithms or a tricky API.
