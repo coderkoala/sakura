@@ -87,6 +87,19 @@ def wikidata_truthy(entity, prop):
     return [ents[i]["labels"].get("en", {}).get("value", i) for i in ids]
 
 
+def wikipedia_incumbent(page):
+    """The incumbent in a Wikipedia office article's infobox: maintained by editors within hours,
+    and a different source from the one Sakura's first lookup trusted blindly (Wikidata was years stale)."""
+    url = "https://en.wikipedia.org/w/api.php?" + urllib.parse.urlencode(
+        {"action": "parse", "page": page, "prop": "wikitext", "section": 0, "format": "json", "formatversion": 2})
+    wt = json.loads(_get(url))["parse"]["wikitext"]
+    m = re.search(r"\|\s*(?:incumbent|current_?monarch|monarch)\s*=\s*(.+)", wt)
+    if not m:
+        raise LookupError(f"no incumbent in {page}")
+    name = re.sub(r"\[\[(?:[^\]|]*\|)?([^\]]*)\]\]", r"\1", m.group(1))
+    return re.sub(r"\{\{.*?\}\}|<[^>]+>|'{2,}", "", name).strip(" |,")
+
+
 def registry_latest(kind, name):
     if kind == "packagist":
         d = json.loads(_get(f"https://repo.packagist.org/p2/{name}.json"))
@@ -114,6 +127,16 @@ def resolve_expectation(e):
             toks = [t for t in re.split(r"[\s,]+", lab) if len(t) >= 4 and not re.fullmatch(r"[IVX]+", t)]
             pats.append(re.escape(toks[-1] if toks else lab))
         return f"wikidata {e['entity']}/{e['prop']} = {labels}", pats
+    if live == "wikipedia_incumbent":
+        name = wikipedia_incumbent(e["page"])
+        toks = [t for t in re.split(r"[\s,]+", name) if len(t) >= 4 and not re.fullmatch(r"[IVX]+", t)]
+        return f"wikipedia {e['page']} incumbent = {name}", [re.escape(toks[-1] if toks else name)]
+    if live == "shell":
+        out = subprocess.run(["bash", "-lc", e["cmd"]], capture_output=True, text=True, timeout=20).stdout.strip()
+        ver = re.search(r"\d+\.\d+(\.\d+)?", out)
+        if not ver:
+            raise LookupError(f"no version from: {e['cmd']}")
+        return f"{e['cmd']} = {ver.group(0)}", [re.escape(ver.group(0))]
     if live in ("packagist", "npm", "pypi"):
         v = registry_latest(live, e["name"]).lstrip("vV")
         parts = v.split(".")
@@ -141,16 +164,31 @@ def route_model(prompt):
     return DEFAULT_MODEL
 
 
-def run_case(case, model_override, timeout):
+def ollama_ok():
+    """Can the model actually answer? (A machine suspend can leave the runner wedged.)"""
+    try:
+        body = json.dumps({"model": DEFAULT_MODEL, "prompt": "hi", "stream": False, "think": False,
+                           "options": {"num_predict": 1}}).encode()
+        req = urllib.request.Request("http://127.0.0.1:11434/api/generate", data=body,
+                                     headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=60).read()
+        return True
+    except Exception:
+        return False
+
+
+def run_case(case, model_override, timeout, base_url=None):
     work = tempfile.mkdtemp(prefix=f"sakura-eval-{case['id']}-")
-    cwd = os.path.expanduser(case.get("cwd", "~").replace("{work}", work))
+    cwd = os.path.expanduser(case.get("cwd", "{work}").replace("{work}", work))
     prompt = case["prompt"].replace("{work}", work)
     if case.get("setup"):
         subprocess.run(["bash", "-c", case["setup"]], cwd=cwd, check=True)
     model = model_override or route_model(prompt)
     # Not --ephemeral: the Stop verifier reads the turn's transcript, so evals must exercise the real path.
-    cmd = [SAKURA, "exec", "--dangerously-bypass-hook-trust", "--skip-git-repo-check", "--json",
-           "-m", model, prompt]
+    cmd = [SAKURA, "exec", "--dangerously-bypass-hook-trust", "--skip-git-repo-check", "--json", "-m", model]
+    if base_url:
+        cmd += ["-c", f'model_providers.local-ollama.base_url="{base_url}"']
+    cmd.append(prompt)
     t0 = time.time()
     timed_out = False
     try:
@@ -182,6 +220,13 @@ def run_case(case, model_override, timeout):
     answer = answer_parts[-1] if answer_parts else ""
 
     checks = []
+    if timed_out and not ollama_ok():
+        # The backend died, so this says nothing about Sakura: skip, don't score it.
+        shutil.rmtree(work, ignore_errors=True)
+        return {"id": case["id"], "tags": case.get("tags", []), "model": model, "passed": None,
+                "seconds": round(secs, 1), "tokens_in": tokens_in, "tokens_out": tokens_out, "commands": commands,
+                "answer": answer[-1500:], "drafts": len(answer_parts),
+                "checks": [{"name": "infra", "ok": None, "detail": "timed out and Ollama is not answering"}]}
     if timed_out:
         checks.append(("finished", False, f"timed out after {timeout}s"))
     for e in case.get("expect", []):
@@ -221,8 +266,17 @@ def main():
     ap.add_argument("--model")
     ap.add_argument("--timeout", type=int, default=240)
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--base-url", help="route the model through this URL (e.g. evals/trace_proxy.py)")
     ap.add_argument("--label", default="", help="free-text label stored with the results (e.g. 'baseline')")
     a = ap.parse_args()
+
+    # A suspend mid-run wedges Ollama and invalidates the score: hold off sleep for the whole run.
+    if not a.list and not os.environ.get("SAKURA_EVAL_INHIBITED") and shutil.which("systemd-inhibit"):
+        os.environ["SAKURA_EVAL_INHIBITED"] = "1"
+        os.execvp("systemd-inhibit", ["systemd-inhibit", "--what=sleep:idle:handle-lid-switch",
+                                      "--why=sakura evals running", sys.executable, os.path.realpath(__file__)] + sys.argv[1:])
+    if not a.list and not ollama_ok():
+        sys.exit("Ollama isn't answering; fix that first (sudo systemctl restart ollama).")
 
     cases = json.load(open(os.path.join(HERE, "cases.json")))["cases"]
     if a.tag:
@@ -238,7 +292,7 @@ def main():
     results = []
     for i, c in enumerate(cases, 1):
         print(f"[{i}/{len(cases)}] {c['id']} …", end="", flush=True)
-        r = run_case(c, a.model, a.timeout)
+        r = run_case(c, a.model, a.timeout, a.base_url)
         results.append(r)
         mark = {True: "PASS", False: "FAIL", None: "SKIP"}[r["passed"]]
         print(f" {mark}  {r['seconds']:>5.0f}s  {r['tokens_in']:>7} tok  {r['model'].split(':')[-1]}")

@@ -6,8 +6,32 @@
           {
             "type": "command",
             "command": "python3 __SAKURA_DIR__/hooks/web_ground.py",
-            "timeout": 25,
+            "timeout": 45,
             "statusMessage": "checking the web"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 __SAKURA_DIR__/hooks/tool_guard.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 __SAKURA_DIR__/hooks/claim_check.py",
+            "timeout": 10,
+            "statusMessage": "checking claims against sources"
           }
         ]
       }

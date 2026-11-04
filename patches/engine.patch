@@ -1,0 +1,280 @@
+diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
+index beab5351b..75d48c6fc 100644
+--- a/codex-rs/core/src/config/mod.rs
++++ b/codex-rs/core/src/config/mod.rs
+@@ -3681,7 +3681,7 @@ impl Config {
+                 } else if active_project.is_untrusted() {
+                     AskForApproval::UnlessTrusted
+                 } else {
+-                    AskForApproval::default()
++                    AskForApproval::UnlessTrusted  // [oi-fork] prompt everywhere by default; trusted projects opt into OnRequest
+                 }
+             });
+         if !approval_policy_was_explicit
+diff --git a/codex-rs/core/src/harness/qwen_code.rs b/codex-rs/core/src/harness/qwen_code.rs
+index d11fe2b77..fcc0e3e71 100644
+--- a/codex-rs/core/src/harness/qwen_code.rs
++++ b/codex-rs/core/src/harness/qwen_code.rs
+@@ -2,6 +2,9 @@ use crate::client_common::Prompt;
+ use chrono::Local;
+ use codex_chat_wire_compat::ToolKinds;
+ use codex_chat_wire_compat::ToolOutputKind;
++use codex_protocol::items::parse_hook_prompt_fragment;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::ResponseItem;
+ use codex_protocol::openai_models::ModelInfo;
+ use serde_json::Value;
+ use serde_json::json;
+@@ -10,6 +13,8 @@ use std::path::Path;
+ 
+ const QWEN_CODE_DEFAULT_MAX_TOKENS: u32 = 8_000;
+ const QWEN_CODE_SYSTEM_PROMPT: &str = include_str!("qwen_code_prompt.md");
++/// Marks turn-scoped evidence injected by Sakura's grounding hook.
++const LOOKUP_MARKER: &str = "<lookup>";
+ 
+ pub(crate) fn build_request(
+     prompt: &Prompt,
+@@ -29,7 +34,8 @@ pub(crate) fn build_request(
+             "content": "Got it. Thanks for the context!",
+         }),
+     ];
+-    messages.extend(build_qwen_messages(prompt.get_formatted_input())?);
++    let input = normalize_input_items(prompt.get_formatted_input());
++    messages.extend(build_qwen_messages(&input)?);
+     let tools = super::kimi_cli::build_tools(&prompt.tools)?;
+     let tool_kinds = prompt
+         .tools
+@@ -41,6 +47,9 @@ pub(crate) fn build_request(
+         "model": model_info.slug,
+         "messages": messages,
+         "max_tokens": QWEN_CODE_DEFAULT_MAX_TOKENS,
++        // [sakura] Thinking models can put the whole final answer in the `reasoning` field, which is
++        // not shown as the answer: a correct reply reached the user as silence.
++        "reasoning_effort": "none",
+         "stream": true,
+         "stream_options": {
+             "include_usage": true,
+@@ -114,6 +123,38 @@ fn render_folder_listing(cwd: &Path) -> String {
+     lines.join("\n")
+ }
+ 
++/// [sakura] Adapts recorded items for a model that only sees the chat messages:
++/// - A `<lookup>` developer message becomes a user message in place. Left in the system prompt, the
++///   fact sat ~30k characters from the question and the model re-ran the lookup instead of using it.
++/// - A Stop hook prompt becomes plain user text. The message builder skips hook prompts as contextual,
++///   so the model never received them and answered a conversation ending on its own message.
++fn normalize_input_items(items: &[ResponseItem]) -> Vec<ResponseItem> {
++    items
++        .iter()
++        .cloned()
++        .map(|mut item| {
++            if let ResponseItem::Message { role, content, .. } = &mut item {
++                let is_lookup = role == "developer"
++                    && content.iter().any(|part| {
++                        matches!(part, ContentItem::InputText { text } if text.contains(LOOKUP_MARKER))
++                    });
++                if is_lookup {
++                    *role = "user".to_string();
++                } else if role == "user" {
++                    for part in content.iter_mut() {
++                        if let ContentItem::InputText { text } = part
++                            && let Some(fragment) = parse_hook_prompt_fragment(text)
++                        {
++                            *text = fragment.text;
++                        }
++                    }
++                }
++            }
++            item
++        })
++        .collect()
++}
++
+ fn build_qwen_messages(
+     items: &[codex_protocol::models::ResponseItem],
+ ) -> Result<Vec<Value>, serde_json::Error> {
+@@ -252,7 +293,8 @@ fn build_system_prompt(prompt: &Prompt) -> String {
+             }
+             _ => None,
+         })
+-        .filter(|text| !text.trim().is_empty())
++        // [sakura] Lookups travel with their question; see normalize_input_items.
++        .filter(|text| !text.trim().is_empty() && !text.contains(LOOKUP_MARKER))
+         .collect::<Vec<_>>()
+         .join("\n\n");
+     if !developer_instructions.is_empty() {
+@@ -265,3 +307,59 @@ fn build_system_prompt(prompt: &Prompt) -> String {
+     }
+     rendered
+ }
++
++#[cfg(test)]
++mod sakura_tests {
++    use super::*;
++    use codex_protocol::items::HookPromptFragment;
++    use codex_protocol::items::build_hook_prompt_message;
++
++    fn message(role: &str, text: &str) -> ResponseItem {
++        ResponseItem::Message {
++            id: None,
++            role: role.to_string(),
++            content: vec![ContentItem::InputText { text: text.to_string() }],
++            phase: None,
++            internal_chat_message_metadata_passthrough: None,
++        }
++    }
++
++    fn roles_and_text(items: &[ResponseItem]) -> Vec<(String, String)> {
++        items
++            .iter()
++            .filter_map(|item| match item {
++                ResponseItem::Message { role, content, .. } => match content.first() {
++                    Some(ContentItem::InputText { text }) => Some((role.clone(), text.clone())),
++                    _ => None,
++                },
++                _ => None,
++            })
++            .collect()
++    }
++
++    #[test]
++    fn lookup_moves_beside_the_question_and_other_developer_text_stays() {
++        let items = vec![
++            message("developer", "skills index"),
++            message("user", "newest vue?"),
++            message("developer", "<lookup>vue 3.5.44</lookup>"),
++        ];
++        let got = roles_and_text(&normalize_input_items(&items));
++        assert_eq!(got[0].0, "developer");
++        assert_eq!(got[2], ("user".to_string(), "<lookup>vue 3.5.44</lookup>".to_string()));
++    }
++
++    #[test]
++    fn stop_hook_prompt_reaches_the_model_as_a_user_message() {
++        let hook = build_hook_prompt_message(&[HookPromptFragment {
++            text: "Do it now.".to_string(),
++            hook_run_id: "stop:1".to_string(),
++        }])
++        .expect("hook prompt");
++        let input = normalize_input_items(&[message("user", "fix it"), hook]);
++        let sent: Vec<Value> = build_qwen_messages(&input).expect("messages");
++        let last = sent.last().expect("a message");
++        assert_eq!(last["role"], "user");
++        assert!(last.to_string().contains("Do it now."), "got {last}");
++    }
++}
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index b6efe1d68..56dd9a7aa 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -365,8 +365,6 @@ use codex_protocol::protocol::DeprecationNoticeEvent;
+ use codex_protocol::protocol::Event;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::ExecApprovalRequestEvent;
+-use codex_protocol::protocol::ModelRerouteEvent;
+-use codex_protocol::protocol::ModelRerouteReason;
+ use codex_protocol::protocol::ModelVerification;
+ use codex_protocol::protocol::ModelVerificationEvent;
+ use codex_protocol::protocol::NetworkApprovalContext;
+@@ -503,8 +501,6 @@ pub(crate) fn resolve_multi_agent_version(
+ 
+ pub(crate) const INITIAL_SUBMIT_ID: &str = "";
+ pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
+-const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
+-const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
+ 
+ impl Session {
+     /// Spawn and initialize a new session.
+@@ -3920,28 +3916,13 @@ impl Session {
+ 
+         warn!("server reported model {server_model} while requested model was {requested_model}");
+ 
+-        let warning_message = format!(
+-            "Your account was flagged for potentially high-risk cyber activity and this request was routed to gpt-5.2 as a fallback. To regain access to gpt-5.3-codex, apply for trusted access: {CYBER_VERIFY_URL} or learn more: {CYBER_SAFETY_URL}"
+-        );
+-
+-        self.send_event(
+-            turn_context,
+-            EventMsg::ModelReroute(ModelRerouteEvent {
+-                from_model: requested_model.clone(),
+-                to_model: server_model.clone(),
+-                reason: ModelRerouteReason::HighRiskCyberActivity,
+-            }),
+-        )
+-        .await;
+-
+-        self.send_event(
+-            turn_context,
+-            EventMsg::Warning(WarningEvent {
+-                message: warning_message.clone(),
+-            }),
+-        )
+-        .await;
+-        true
++        // [sakura] Lobotomised. Upstream emitted an OpenAI cyber-safety banner here — "your account was
++        // flagged for potentially high-risk cyber activity … routed to a fallback … apply for trusted
++        // access" — plus a model-reroute event. Sakura runs local models on Ollama, where the server's
++        // reported slug can differ from the requested one harmlessly (name normalisation). That banner is
++        // irrelevant noise and against the point of this tool, so log the mismatch and emit nothing.
++        let _ = (turn_context, &requested_model, &server_model);
++        false
+     }
+ 
+     pub(crate) async fn emit_model_verification(
+diff --git a/codex-rs/exec/src/main.rs b/codex-rs/exec/src/main.rs
+index 61eaecdd0..5784372c9 100644
+--- a/codex-rs/exec/src/main.rs
++++ b/codex-rs/exec/src/main.rs
+@@ -1,3 +1,4 @@
++#![recursion_limit = "256"]
+ //! Entry-point for the `codex-exec` binary.
+ //!
+ //! When this CLI is invoked normally, it parses the standard `codex-exec` CLI
+diff --git a/codex-rs/product-info/src/lib.rs b/codex-rs/product-info/src/lib.rs
+index 178b4c2f2..8d66dc6f3 100644
+--- a/codex-rs/product-info/src/lib.rs
++++ b/codex-rs/product-info/src/lib.rs
+@@ -1,6 +1,6 @@
+ pub const OPEN_INTERPRETER_BRAND_ENV_VAR: &str = "OPEN_INTERPRETER_BRAND";
+-pub const OPEN_INTERPRETER_DISPLAY_NAME: &str = "Open Interpreter";
+-pub const OPEN_INTERPRETER_COMMAND_NAME: &str = "interpreter";
++pub const OPEN_INTERPRETER_DISPLAY_NAME: &str = "Sakura";
++pub const OPEN_INTERPRETER_COMMAND_NAME: &str = "sakura";
+ pub const OPEN_INTERPRETER_NON_INTERACTIVE_ENV_VAR: &str = "OPEN_INTERPRETER_NONINTERACTIVE";
+ 
+ /// Codex service compatibility profile validated for Open Interpreter.
+@@ -188,7 +188,7 @@ pub fn is_open_interpreter_argv0() -> bool {
+                 .and_then(|name| name.to_str())
+                 .map(str::to_owned)
+         })
+-        .is_some_and(|name| name.starts_with("interpreter") || name == "i")
++        .is_some_and(|name| name.starts_with("interpreter") || name == "i" || name.starts_with("sakura") || name == "?")
+ }
+ 
+ /// Whether the running executable lives inside an installed Open Interpreter
+diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
+index a4a95a8e4..4ad98cc32 100644
+--- a/codex-rs/tui/src/lib.rs
++++ b/codex-rs/tui/src/lib.rs
+@@ -1106,7 +1106,7 @@ async fn run_ratatui_app(
+     let workload_identity_selected = is_workload_identity_selected();
+     color_eyre::install()?;
+ 
+-    tooltips::announcement::prewarm(initial_config.http_client_factory());
++    // [oi-fork] no network at startup: tooltips::announcement::prewarm(initial_config.http_client_factory());
+ 
+     // Forward panic reports through tracing so they appear in the UI status
+     // line, but do not swallow the default/color-eyre panic handler.
+diff --git a/codex-rs/utils/home-dir/src/lib.rs b/codex-rs/utils/home-dir/src/lib.rs
+index 578023ba6..dfc7b2112 100644
+--- a/codex-rs/utils/home-dir/src/lib.rs
++++ b/codex-rs/utils/home-dir/src/lib.rs
+@@ -83,7 +83,7 @@ fn env_override(name: &str) -> Option<String> {
+ 
+ fn default_home_dir_name() -> &'static str {
+     if is_open_interpreter() {
+-        ".openinterpreter"
++        ".sakura"
+     } else {
+         ".codex"
+     }

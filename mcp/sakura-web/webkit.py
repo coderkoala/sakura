@@ -104,74 +104,14 @@ def country_leader(query):
     """
     if not _LEADER_Q.search(query):
         return None
-    prop = role_label = None
-    for rx, p, lbl in _LEADER_ROLES:
-        if rx.search(query):
-            prop, role_label = p, lbl
-            break
-    if not prop:
-        return None
-    # Place = the noun phrase after the last "of" (… prime minister OF nepal).
+    role = _LEADER_Q.search(query).group(1)
     m = re.search(r"\bof\s+([A-Za-z][A-Za-z .'-]+?)\s*[?.!]*$", query.strip(), re.I)
     place = (m.group(1) if m else "").strip()
     if not place:
         return None
     try:
-        hits = _wd_json({"action": "wbsearchentities", "search": place, "language": "en",
-                         "format": "json", "limit": "1"}).get("search", [])
-        if not hits:
-            return None
-        place_qid = hits[0]["id"]
-        place_label = hits[0].get("label", place)
-        claims = _wd_json({"action": "wbgetclaims", "entity": place_qid, "property": prop,
-                           "format": "json"}).get("claims", {}).get(prop, [])
-        if not claims:
-            return None
-
-        def rank_key(cl):
-            rank = {"preferred": 0, "normal": 1, "deprecated": 2}.get(cl.get("rank"), 1)
-            has_end = "P582" in cl.get("qualifiers", {})  # end date => former
-            start = ""
-            if "P580" in cl.get("qualifiers", {}):
-                try:
-                    start = cl["qualifiers"]["P580"][0]["datavalue"]["value"]["time"]
-                except Exception:
-                    start = ""
-            # current first: preferred rank, then no end-date, then most recent start
-            return (rank, 1 if has_end else 0, _neg_time(start))
-
-        claims = [c for c in claims if c.get("mainsnak", {}).get("datavalue")]
-        if not claims:
-            return None
-        claims.sort(key=rank_key)
-        cur = claims[0]
-        person_qid = cur["mainsnak"]["datavalue"]["value"]["id"]
-        ent = _wd_json({"action": "wbgetentities", "ids": person_qid, "props": "labels|descriptions|sitelinks",
-                        "languages": "en", "format": "json"})["entities"][person_qid]
-        name = ent.get("labels", {}).get("en", {}).get("value", person_qid)
-        desc = ent.get("descriptions", {}).get("en", {}).get("value", "")
-        since = ""
-        if "P580" in cur.get("qualifiers", {}):
-            try:
-                since = cur["qualifiers"]["P580"][0]["datavalue"]["value"]["time"].lstrip("+")[:10]
-            except Exception:
-                since = ""
-        wiki_url = ""
-        title = ent.get("sitelinks", {}).get("enwiki", {}).get("title")
-        if title:
-            wiki_url = "https://en.wikipedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_"))
-        out = f"The current {role_label} of {place_label} is {name}"
-        if since:
-            out += f" (in office since {since})"
-        out += "."
-        if desc:
-            out += f" {name}: {desc}."
-        out += "\n\nSource: Wikidata https://www.wikidata.org/wiki/" + place_qid
-        if wiki_url:
-            out += f" · {wiki_url}"
-        out += ("\n(Wikidata is community-maintained and usually current within days of a change; "
-                "verify against the linked page if this is a very recent transition.)")
-        return out
+        import lookups
+        return lookups.officeholder(place, role)
     except Exception:
         return None
 
@@ -637,14 +577,28 @@ def latest_version(prompt):
             f"Answer from this, not from training.{note}\nSource: {url}")
 
 
-def version_context(prompt, cwd="."):
-    """Return version facts (project manifests + installed CLIs) for tools named in the prompt, or None."""
-    if not _TECH.search(prompt):
+def version_context(prompt, cwd=".", extra_tools=None):
+    """Return version facts (project manifests + installed CLIs) for tools named in the prompt, or None.
+
+    extra_tools: tool names the intent router extracted. Tools outside _TOOL_TABLE are matched
+    against manifest keys by name (e.g. "pnpm" -> package.json "pnpm", "filament" -> "filament/filament").
+    """
+    extra = [t.lower() for t in (extra_tools or []) if t]
+    if not extra and not _TECH.search(prompt):
         return None
     tools = [name for name in _TOOL_TABLE if re.search(r"\b" + re.escape(name) + r"\b", prompt, re.I)]
+    tools += [t for t in extra if t in _TOOL_TABLE and t not in tools]
     deps = _read_manifests(cwd)
     lines = []
     seen = set()
+    for t in extra:
+        if t in _TOOL_TABLE:
+            continue
+        for dk, dv in deps.items():
+            if dk.lower() == t or dk.lower().split("/")[-1] == t:
+                lines.append(f"- {dk}: {dv} (this project)")
+                seen.add(t)
+                break
     for name in tools:
         keys, cli = _TOOL_TABLE[name]
         ver = None
@@ -677,17 +631,24 @@ def version_context(prompt, cwd="."):
             "documentation; do NOT answer for an older version from training:\n" + "\n".join(lines))
 
 
+def _wm_json(url):
+    """Wikimedia GET: descriptive UA, backoff on 429, 6 h disk cache (lookups.get_json)."""
+    try:
+        import lookups
+        return lookups.get_json(url)
+    except ImportError:
+        return json.loads(_get(url))
+
+
 def wikipedia(query, sentences=6):
     api = "https://en.wikipedia.org/w/api.php?" + urllib.parse.urlencode(
         {"action": "query", "list": "search", "srsearch": query, "format": "json", "srlimit": 1}
     )
-    hits = json.loads(_get(api)).get("query", {}).get("search", [])
+    hits = _wm_json(api).get("query", {}).get("search", [])
     if not hits:
         return f"No Wikipedia article found for: {query}"
     title = hits[0]["title"]
-    summ = json.loads(
-        _get("https://en.wikipedia.org/api/rest_v1/page/summary/" + urllib.parse.quote(title))
-    )
+    summ = _wm_json("https://en.wikipedia.org/api/rest_v1/page/summary/" + urllib.parse.quote(title))
     extract = summ.get("extract", "")
     if sentences:
         parts = re.split(r"(?<=[.!?])\s+", extract)

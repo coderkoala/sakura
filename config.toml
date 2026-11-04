@@ -10,8 +10,8 @@ model_context_window = 32768                  # start Ollama with OLLAMA_CONTEXT
 model_auto_compact_token_limit = 26000
 # codex-rs ships no metadata for these Ollama slugs, so without a catalog it warns at startup
 # ("Model metadata not found … degrade performance") and assumes a 272k context window. models.json
-# states the real metadata (context 32768, same base prompt as the fallback) so the warning is gone
-# and the window is honest. Regenerate after a sakura bump: tools/gen-model-catalog.py. __SAKURA_DIR__
+# states the real metadata (context 32768) and carries Sakura's own base prompt (prompts/base.md)
+# so the warning is gone. Regenerate after editing the prompt: tools/gen-model-catalog.py. __SAKURA_DIR__
 # is rewritten to this repo's absolute path by modules/77-sakura.sh.
 model_catalog_json = "__SAKURA_DIR__/models.json"
 harness = "qwen-code"                          # the message/tool shape this model was trained for

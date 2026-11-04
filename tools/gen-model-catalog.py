@@ -9,13 +9,17 @@ warning goes away and the context window is stated correctly (32768, matching
 OLLAMA_CONTEXT_LENGTH) instead of guessed.
 
 The entries mirror the values codex-rs itself uses for an unknown local slug
-(shell_type=default, web_search=text, no reasoning levels, truncation bytes/10000) so
-behaviour is identical to the fallback — only the context window and the "known" flag
-change. `base_instructions` is embedded from the same prompt.md the fallback uses, so
-the system prompt is byte-identical.
+(shell_type=default, web_search=text, no reasoning levels, truncation bytes/10000).
 
-Regenerate after a sakura version bump (prompt.md may change):
-    python3 tools/gen-model-catalog.py ~/sakura-src/codex-rs/models-manager/prompt.md > models.json
+`base_instructions` is Sakura's own prompt (prompts/base.md). With harness = "qwen-code" the
+harness supplies the tool-usage prompt and appends base_instructions LAST as "Session
+Instructions", so this is the final, overriding word — Nobel's philosophy and the local model's
+failure modes, ~1.1k tokens. (It used to embed Codex's 20 KB prompt.md: a second, conflicting
+agent prompt teaching tools this harness doesn't expose.) If you ever switch the harness off,
+this short prompt would be the ONLY system prompt — regenerate from prompt.md instead.
+
+Regenerate after editing the prompt:
+    python3 tools/gen-model-catalog.py prompts/base.md > models.json
 """
 import json
 import os
@@ -56,14 +60,14 @@ def entry(slug, name, base_instructions):
 
 
 def main():
-    prompt_path = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser(
-        "~/sakura-src/codex-rs/models-manager/prompt.md"
+    prompt_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+        os.path.dirname(os.path.realpath(__file__)), "..", "prompts", "base.md"
     )
     try:
         base = open(prompt_path, encoding="utf-8").read()
     except OSError as e:
-        sys.exit(f"cannot read prompt.md at {prompt_path}: {e}\n"
-                 f"pass the path to your sakura source's models-manager/prompt.md as arg 1.")
+        sys.exit(f"cannot read the base prompt at {prompt_path}: {e}\n"
+                 f"pass a prompt file path as arg 1 (default: prompts/base.md).")
     catalog = {"models": [entry(s, n, base) for s, n in MODELS]}
     json.dump(catalog, sys.stdout, indent=1, ensure_ascii=False)
     sys.stdout.write("\n")
