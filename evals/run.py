@@ -177,7 +177,7 @@ def ollama_ok():
         return False
 
 
-def run_case(case, model_override, timeout, base_url=None):
+def run_case(case, model_override, timeout, base_url=None, catalog=None):
     work = tempfile.mkdtemp(prefix=f"sakura-eval-{case['id']}-")
     cwd = os.path.expanduser(case.get("cwd", "{work}").replace("{work}", work))
     prompt = case["prompt"].replace("{work}", work)
@@ -188,6 +188,8 @@ def run_case(case, model_override, timeout, base_url=None):
     cmd = [SAKURA, "exec", "--dangerously-bypass-hook-trust", "--skip-git-repo-check", "--json", "-m", model]
     if base_url:
         cmd += ["-c", f'model_providers.local-ollama.base_url="{base_url}"']
+    if catalog:
+        cmd += ["-c", f'model_catalog_json="{catalog}"']
     cmd.append(prompt)
     t0 = time.time()
     timed_out = False
@@ -220,7 +222,7 @@ def run_case(case, model_override, timeout, base_url=None):
     answer = answer_parts[-1] if answer_parts else ""
 
     checks = []
-    if timed_out and not ollama_ok():
+    if timed_out and not base_url and not ollama_ok():
         # The backend died, so this says nothing about Sakura: skip, don't score it.
         shutil.rmtree(work, ignore_errors=True)
         return {"id": case["id"], "tags": case.get("tags", []), "model": model, "passed": None,
@@ -267,6 +269,7 @@ def main():
     ap.add_argument("--timeout", type=int, default=240)
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--base-url", help="route the model through this URL (e.g. evals/trace_proxy.py)")
+    ap.add_argument("--catalog", help="model catalog JSON, for a --model outside sakura/models.json")
     ap.add_argument("--label", default="", help="free-text label stored with the results (e.g. 'baseline')")
     a = ap.parse_args()
 
@@ -275,7 +278,7 @@ def main():
         os.environ["SAKURA_EVAL_INHIBITED"] = "1"
         os.execvp("systemd-inhibit", ["systemd-inhibit", "--what=sleep:idle:handle-lid-switch",
                                       "--why=sakura evals running", sys.executable, os.path.realpath(__file__)] + sys.argv[1:])
-    if not a.list and not ollama_ok():
+    if not a.list and not a.base_url and not ollama_ok():
         sys.exit("Ollama isn't answering; fix that first (sudo systemctl restart ollama).")
 
     cases = json.load(open(os.path.join(HERE, "cases.json")))["cases"]
@@ -292,7 +295,7 @@ def main():
     results = []
     for i, c in enumerate(cases, 1):
         print(f"[{i}/{len(cases)}] {c['id']} …", end="", flush=True)
-        r = run_case(c, a.model, a.timeout, a.base_url)
+        r = run_case(c, a.model, a.timeout, a.base_url, a.catalog)
         results.append(r)
         mark = {True: "PASS", False: "FAIL", None: "SKIP"}[r["passed"]]
         print(f" {mark}  {r['seconds']:>5.0f}s  {r['tokens_in']:>7} tok  {r['model'].split(':')[-1]}")

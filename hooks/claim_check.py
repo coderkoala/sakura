@@ -18,6 +18,7 @@ Contract: Stop JSON on stdin (transcript_path, last_assistant_message, stop_hook
 prints {"decision":"block","reason":…} or nothing. Self-test: python3 claim_check.py --selftest
 """
 import json
+import os
 import re
 import sys
 
@@ -71,7 +72,8 @@ def turn_evidence(transcript_path):
     for i, p in enumerate(items):
         if p.get("type") == "message" and p.get("role") == "user":
             t = text_of(p.get("content"))
-            if not t.lstrip().startswith(("# AGENTS.md", "<environment_context", "<user_instructions")):
+            # Hook prompts are recorded as user messages; the turn's prompt is what the user actually wrote.
+            if not t.lstrip().startswith(("# AGENTS.md", "<environment_context", "<user_instructions", "<hook_prompt", "<lookup>")):
                 start, prompt = i, t
     evidence, grounded, fact = [], False, False
     for p in items[start + 1:]:
@@ -87,6 +89,23 @@ def turn_evidence(transcript_path):
         elif typ in ("function_call", "custom_tool_call"):
             evidence.append(text_of(p.get("arguments")) + " " + str(p.get("input", "")))
     return prompt, "\n".join(evidence), grounded, fact
+
+
+def used_tools(transcript_path):
+    """Did this turn make any tool call? (True when unknown, so a read failure never blocks an answer.)"""
+    try:
+        items = [json.loads(l) for l in open(transcript_path, encoding="utf-8")]
+    except Exception:
+        return True
+    items = [d.get("payload", {}) for d in items if d.get("type") == "response_item"]
+    last_user = max((i for i, p in enumerate(items) if p.get("type") == "message" and p.get("role") == "user"), default=-1)
+    # Hook prompts are user messages too, so look back through the whole turn from the real prompt.
+    for i in range(last_user, -1, -1):
+        p = items[i]
+        if p.get("type") == "message" and p.get("role") == "user" and "hook_prompt" not in text_of(p.get("content"))[:20]:
+            last_user = i
+            break
+    return any(p.get("type") in ("function_call", "custom_tool_call") for p in items[last_user + 1:])
 
 
 def unsupported_claims(answer, prompt, evidence, check_names):
@@ -150,8 +169,26 @@ ANNOUNCE = re.compile(
 MAX_CONTINUES = 3  # per turn: never trap the model in a loop
 
 
-def continuation_reason(answer):
-    """Block an empty final message or one that only announces work it never did."""
+# A progress note, not an ending: "Now creating the archive.", "Step 2 done.", "**2. Write the version:**"
+PROGRESS = re.compile(r"(?:\bnow\s+\w+ing\b|\bnext\b[,:]?\s|\bstep\s+\d+\b|^\w+ing\s+(?:it|that|this)\b)", re.I)
+
+
+def steps_in(prompt):
+    """How many steps the user numbered: "1) do x, 2) do y" -> 2. Zero if they didn't number them."""
+    nums = [int(n) for n in re.findall(r"(?:^|[\s,;:(])(\d{1,2})[).]\s", prompt or "")]
+    return max(nums) if len(nums) >= 2 and sorted(nums) == list(range(1, max(nums) + 1)) else 0
+
+
+def stopped_at_step(answer, total):
+    """The last step this message reports, when it stops before the user's last step, else None."""
+    if not total:
+        return None
+    seen = [int(n) for n in re.findall(r"(?:\bstep\s+|(?:^|\n)[\s*_#]*)(\d{1,2})\b[).:\s]", answer, re.I)]
+    return max(seen) if seen and max(seen) < total else None
+
+
+def continuation_reason(answer, prompt=""):
+    """Block an empty final message, one that only announces work, or one that stops partway through."""
     a = (answer or "").strip()
     if not a:
         return ("You ended the turn without writing an answer. Write the answer now, from the tool output above "
@@ -160,12 +197,19 @@ def continuation_reason(answer):
     if len(a) < 400 and (a.endswith(":") or ANNOUNCE.search(last) or ANNOUNCE.search(a)):
         return (f"You ended the turn announcing a step instead of doing it (“{a[:120]}”). Do it now — make the "
                 "tool call, check its output — and end with the actual result, not a plan.")
+    total = steps_in(prompt)
+    at = stopped_at_step(a, total)
+    if at:
+        return (f"You stopped at step {at} of the {total} the user asked for. Carry on with step {at + 1} now, make the "
+                "tool calls for every remaining step, and only then give the final result.")
+    if total and len(a) < 400 and PROGRESS.search(last):
+        return ("That's a progress note, and the user asked for several steps. Finish every remaining step with tool "
+                "calls, then give the final result.")
     return None
 
 
 def _bump(turn_id):
     """Count continuations for this turn; returns the new count."""
-    import os
     d = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "sakura-hooks")
     try:
         os.makedirs(d, exist_ok=True)
@@ -185,8 +229,13 @@ def main():
     except Exception:
         return
     answer = data.get("last_assistant_message") or ""
-    # 1. Continuation: empty or announce-only endings get sent back, at most MAX_CONTINUES per turn.
-    cont = continuation_reason(answer)
+    path = data.get("transcript_path")
+    prompt, evidence, grounded, fact = turn_evidence(path) if path else ("", "", False, False)
+    # 1. Continuation: empty, announce-only or partway endings get sent back, at most MAX_CONTINUES per turn.
+    cont = continuation_reason(answer, prompt)
+    if not cont and steps_in(prompt) and not used_tools(path):
+        cont = ("You listed the steps without doing them. If they are work to carry out, do them now with tool calls, "
+                "then give the result. If the user only asked for an explanation, restate your answer.")
     if cont:
         if _bump(data.get("turn_id")) <= MAX_CONTINUES:
             print(json.dumps({"decision": "block", "reason": cont}))
@@ -194,8 +243,6 @@ def main():
     # 2. Claims: checked once per turn (stop_hook_active means we already sent it back once).
     if data.get("stop_hook_active"):
         return
-    path = data.get("transcript_path")
-    prompt, evidence, grounded, fact = turn_evidence(path) if path else ("", "", False, False)
     reason = decide(answer, prompt, evidence, grounded, fact)
     if reason:
         print(json.dumps({"decision": "block", "reason": reason}))
@@ -227,6 +274,19 @@ def selftest():
              ("The output has a leading space. Let me fix that:", True), ("Step 3: Creating the tar.gz archive.", True),
              ("The latest Laravel is v13.39.0, per Packagist.", False), ("Fixed: add() now returns a + b; it printed 5.", False),
              ("hi", False)]
+    chain = "do these in order: 1) make a dir, 2) write a file, 3) tar it, 4) list it"
+    for ans, want in [("2) Version written.", True), ("Step 2 done — Python 3.14.4 written.", True),
+                      ("Directory created.\n\n**2. Write python3 version output:**", True),
+                      ("Step 2 done. Now writing that to version.txt.", True),
+                      ("add() returns a - b instead of adding. Fixing it.", True),
+                      ("All done. The archive contains build-test/version.txt.", False),
+                      ("1. Created it\n2. Wrote it\n3. Tarred it\n4. Listed: build-test/version.txt", False)]:
+        if (continuation_reason(ans, chain) is not None) != want:
+            bad += 1
+            print(f"chain {'SHOULD BLOCK' if want else 'SHOULD PASS'}: {ans!r}")
+    if steps_in("fix calc.py in 2 hours") or steps_in("python 3.14 and node 26.") or steps_in("use v1. then 2.") > 2:
+        bad += 1
+        print("steps_in misread prose as steps")
     for ans, want in conts:
         if (continuation_reason(ans) is not None) != want:
             bad += 1
@@ -239,7 +299,17 @@ def selftest():
             print(f"{'SHOULD BLOCK' if want else 'SHOULD PASS'}: {ans[:70]}")
             if got:
                 print("   reason:", decide(ans, pr, ev, g, f)[:120])
-    total = len(cases) + cases_total
+    total = len(cases) + cases_total + 8
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+        for role, text in (("user", "do: 1) a, 2) b"), ("assistant", "Step 1 done."), ("user", "<hook_prompt hook_run_id=\"x\">go on</hook_prompt>")):
+            f.write(json.dumps({"type": "response_item", "payload": {"type": "message", "role": role,
+                                                                     "content": [{"type": "input_text", "text": text}]}}) + "\n")
+    if turn_evidence(f.name)[0] != "do: 1) a, 2) b":
+        bad += 1
+        print("turn_evidence took a hook prompt for the user's prompt")
+    total += 1
+    os.unlink(f.name)
     print(f"claim_check selftest: {total - bad}/{total} ok")
     sys.exit(1 if bad else 0)
 

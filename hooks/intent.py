@@ -92,7 +92,27 @@ def _excerpt(prompt, limit=1600):
     return prompt[: limit // 2] + "\n[…]\n" + prompt[-limit // 2:]
 
 
+def _classify_openai(base, prompt, model, timeout):
+    """Same call over an OpenAI-compatible server (a driver not on Ollama, where the card can't hold both)."""
+    body = json.dumps({
+        "model": model or "default", "stream": False, "temperature": 0, "max_tokens": 200, "reasoning_effort": "none",
+        "response_format": {"type": "json_schema", "json_schema": {"name": "route", "strict": True, "schema": SCHEMA}},
+        "messages": [{"role": "system", "content": INSTRUCTIONS},
+                     {"role": "user", "content": "<request>\n" + _excerpt(prompt) + "\n</request>"}],
+    }).encode()
+    req = urllib.request.Request(base.rstrip("/") + "/chat/completions", data=body, headers={"Content-Type": "application/json"})
+    r = json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+    return json.loads(r["choices"][0]["message"]["content"])
+
+
 def classify(prompt, model=None, timeout=20):
+    router = os.environ.get("SAKURA_ROUTER_URL")
+    if router:
+        try:
+            out = _classify_openai(router, prompt, model, timeout)
+        except Exception:
+            return None
+        return out if out.get("intent") in SCHEMA["properties"]["intent"]["enum"] else None
     body = json.dumps({
         "model": model or DEFAULT_MODEL,
         "stream": False,

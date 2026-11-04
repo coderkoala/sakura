@@ -84,6 +84,27 @@ flowchart TD
 - **Opinionated Linux stack.** `pass` (credentials), `himalaya` (email IMAP/SMTP), `notify-send` + `ntfy`
   (notifications), systemd `--user` timers (cron).
 
+## Which model runs
+
+`sakura-model plan` says what this machine runs and why. Where the hardware allows, `?` drives with Qwen3.6-35B-A3B
+(abliterated, Q3_K_M): a Mixture-of-Experts model whose dense part and an expert cache sit in VRAM and whose other
+experts stay in RAM, served by the `llama-server` that ships with Ollama. The VRAM budget is read from the machine, so
+a desktop whose display holds VRAM gets a smaller cache. Anything else stays on the 9b on Ollama.
+
+Run `sakura-model pull` once per device (15.6 GB, checksum verified): nothing downloads it for you. Without it, or if
+the server can't start, `?` falls back to the 9b.
+
+Measured on an RTX 4060 Laptop with 32 GB RAM, RAM and budget as noted (`evals/bench_server.py`, `evals/run.py`):
+
+| | 9b | Qwen3.6, 5.3 GB VRAM | Qwen3.6, 7.3 GB VRAM |
+| --- | ---: | ---: | ---: |
+| Writing, warm | 43 tok/s | 50 tok/s | 72 tok/s |
+| Writing after a 26K prompt | | 31 tok/s | 37 tok/s |
+| Reading a long prompt | ~2,000 tok/s | 503 tok/s | 584 tok/s |
+
+The lower budget stands in for a 6 GB card by limiting the cache; it hasn't run on a real one. Other models loaded by
+`consult` compete for the same VRAM while this server is awake (it sleeps after 30 idle minutes).
+
 ## Roadmap
 
 - Wire the RAG MCP (sqlite-vec + local embeddings) live — scaffolded, not yet serving.

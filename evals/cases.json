@@ -384,6 +384,31 @@
      "regex": "(?i)(delete request completed|successfully deleted)"
     }
    ]
+  },
+  {
+   "id": "chain-git-fix",
+   "tags": [
+    "chain"
+   ],
+   "cwd": "{work}",
+   "setup": "git init -q -b main . && git config user.email t@t && git config user.name t && printf 'def add(a, b):\\n    return a - b\\n' > calc.py && git add . && git commit -qm init",
+   "prompt": "in this repo, do all of these in order: 1) create a branch named fix-add, 2) fix add() in calc.py so it really adds, 3) prove it with python3 -c 'import calc; print(calc.add(2,3))', 4) commit the fix with the message 'fix add', 5) show the last commit with git log --oneline -1",
+   "check": "test \"$(git branch --show-current)\" = fix-add && test \"$(python3 -c 'import calc; print(calc.add(2,3))')\" = 5 && git log -1 --format=%s | grep -q 'fix add' && test -z \"$(git status --porcelain -- calc.py)\""
+  },
+  {
+   "id": "chain-deploy",
+   "tags": [
+    "chain"
+   ],
+   "cwd": "{work}",
+   "setup": "printf '2.7.1\\n' > VERSION; printf '#!/bin/sh\\n[ -n \"$1\" ] || { echo usage: deploy.sh VERSION; exit 2; }\\necho \"deployed $1\" > deployed.txt\\necho done\\n' > deploy.sh; chmod +x deploy.sh",
+   "prompt": "read the VERSION file, then run ./deploy.sh with that version, then check deployed.txt and tell me what it says",
+   "expect": [
+    {
+     "regex": "2\\.7\\.1"
+    }
+   ],
+   "check": "grep -qx 'deployed 2.7.1' deployed.txt"
   }
  ]
 }

@@ -29,6 +29,7 @@ import sys
 MODELS = [
     ("huihui_ai/qwen3.5-abliterated:9b", "Qwen3.5 Abliterated 9B"),
     ("huihui_ai/qwen3.5-abliterated:2b", "Qwen3.5 Abliterated 2B"),
+    ("qwen36-q3", "Qwen3.6 35B-A3B Abliterated Q3"),  # bin/sakura-model, on devices that qualify
 ]
 CONTEXT_WINDOW = 32768  # keep in step with OLLAMA_CONTEXT_LENGTH and config.toml model_context_window
 

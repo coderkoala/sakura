@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""sakura-model — run Sakura's big local driver when this machine can, with a budget read from the hardware.
+
+Qwen3.6-35B-A3B (abliterated, Q3_K_M) is a 15.6 GB Mixture-of-Experts model: about 3B parameters are active
+per token, so the dense part and a cache of experts sit in VRAM and the rest stays in RAM. It was measured on
+an RTX 4060 Laptop, 32 GB RAM, against the 9b it replaces: 72 tok/s writing at a 7.3 GB budget and 50 tok/s at
+5.3 GB (9b: 43), reading prompts about 3-4x slower, real tool calls, same eval score.
+
+The VRAM budget comes from what's free on THIS machine, because devices differ: a laptop whose iGPU drives the
+display has nearly all of the card, while a desktop with no iGPU loses what its display holds. Anything that
+doesn't qualify keeps the 9b on Ollama; `up` failing is not an error for the caller, just the signal to fall back.
+
+  sakura-model plan     what this machine would run, and why
+  sakura-model up       start the server (no-op if running). Exit 0 only when it answers
+  sakura-model down     stop it and free the VRAM
+  sakura-model status   is it up, and what does it hold
+  sakura-model pull     download the model (15.6 GB), resumable, checksum verified
+"""
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+
+PORT = 8091
+URL = f"http://127.0.0.1:{PORT}"
+UNIT = "sakura-model"
+SLUG = "qwen36-q3"
+REPO = "mradermacher/Huihui-Qwen3.6-35B-A3B-abliterated-i1-GGUF"
+REVISION = "860d616938187b0a7fb2dfcb24d07911b6364904"
+FILENAME = "Huihui-Qwen3.6-35B-A3B-abliterated.i1-Q3_K_M.gguf"
+SIZE = 16764765344
+SHA256 = "a73d0d6e38be6c72745f3a60c311c8bfc4e4aea84a617651fb2b4d27e7ffc3a8"
+MODEL_DIR = os.environ.get("SAKURA_MODEL_DIR", os.path.expanduser("~/.local/share/sakura/models"))
+MODEL = os.path.join(MODEL_DIR, FILENAME)
+ENGINE_DIR = os.environ.get("SAKURA_ENGINE_DIR", "/usr/local/lib/ollama")
+ENGINE = os.path.join(ENGINE_DIR, "llama-server")
+CUDA = os.path.join(ENGINE_DIR, "cuda_v13")
+
+DENSE_MIB = 2140        # measured: VRAM in use minus the expert cache, at 32K context
+HEADROOM_MIB = 800      # measured: leaves the 5200 MiB cache that ran 26 eval cases at 7.3 GB on an 8 GB card
+MIN_BUDGET_MIB = 5000   # below this too few experts fit; lower budgets were not evaluated
+MAX_CACHE_MIB = 15000   # the experts' own size: more VRAM than this buys nothing
+MIN_RAM_GIB = 28        # 15.6 GB of model stays mapped beside the desktop
+IDLE_SLEEP_SECONDS = 1800
+
+
+def vram():
+    """(total, used) MiB of the first NVIDIA GPU, or None."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.total,memory.used", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=10).stdout.splitlines()[0]
+        total, used = (int(x) for x in out.split(","))
+        return total, used
+    except Exception:
+        return None
+
+
+def ram_gib():
+    with open("/proc/meminfo") as f:
+        return int(f.readline().split()[1]) / 1048576
+
+
+def running():
+    try:
+        return urllib.request.urlopen(URL + "/health", timeout=2).status == 200
+    except Exception as e:
+        return getattr(e, "code", None) == 503  # still loading
+
+
+def healthy():
+    try:
+        return urllib.request.urlopen(URL + "/health", timeout=2).status == 200
+    except Exception:
+        return False
+
+
+def ollama_vram_mib():
+    """VRAM held by models Ollama has loaded; `up` unloads them, so they count as free."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-compute-apps=process_name,used_memory", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=10).stdout
+        return sum(int(l.rsplit(",", 1)[1]) for l in out.splitlines() if "ollama" in l or "llama-server" in l)
+    except Exception:
+        return 0
+
+
+def plan():
+    """(ok, reason, cache_mib) for this machine."""
+    if not (os.access(ENGINE, os.X_OK) and os.path.isdir(CUDA)):
+        return False, f"no llama-server with CUDA at {ENGINE_DIR} (it ships with Ollama)", 0
+    v = vram()
+    if not v:
+        return False, "no NVIDIA GPU", 0
+    if ram_gib() < MIN_RAM_GIB:
+        return False, f"{ram_gib():.0f} GiB RAM, needs {MIN_RAM_GIB}", 0
+    total, used = v
+    budget = total - max(0, used - ollama_vram_mib()) - HEADROOM_MIB
+    if budget < MIN_BUDGET_MIB:
+        return False, f"VRAM budget {budget} MiB of {total} (others hold {used} MiB), needs {MIN_BUDGET_MIB}", 0
+    cache = min(budget - DENSE_MIB, MAX_CACHE_MIB)
+    if not (os.path.isfile(MODEL) and os.path.getsize(MODEL) == SIZE):
+        return False, f"model not downloaded; this machine qualifies with a {cache} MiB expert cache: sakura-model pull", cache
+    return True, f"{total} MiB card, {budget} MiB budget, {cache} MiB expert cache", cache
+
+
+def up():
+    if healthy():
+        return 0
+    if running():  # loading: just wait below
+        pass
+    else:
+        subprocess.run(["systemctl", "--user", "stop", UNIT], capture_output=True)
+        subprocess.run(["systemctl", "--user", "reset-failed", UNIT], capture_output=True)
+        ok, reason, cache = plan()
+        if not ok:
+            print(f"sakura-model: {reason}", file=sys.stderr)
+            return 1
+        # Ollama's models would otherwise hold the VRAM this budget just counted as free.
+        ps = subprocess.run(["ollama", "ps"], capture_output=True, text=True).stdout.splitlines()[1:]
+        for line in ps:
+            if line.strip():
+                subprocess.run(["ollama", "stop", line.split()[0]], capture_output=True)
+        cmd = ["systemd-run", "--user", f"--unit={UNIT}", "--collect", "--quiet",
+               f"--setenv=LD_LIBRARY_PATH={CUDA}:{ENGINE_DIR}", f"--setenv=GGML_BACKEND_PATH={CUDA}/libggml-cuda.so",
+               ENGINE, "-m", MODEL, "--alias", SLUG, "--host", "127.0.0.1", "--port", str(PORT),
+               "-ngl", "99", "--cpu-moe", "--moe-cache-mib", str(cache), "-c", "32768", "--jinja", "-fa", "on",
+               "-ctk", "q8_0", "-ctv", "q8_0", "--parallel", "1", "--no-webui",
+               "--sleep-idle-seconds", str(IDLE_SLEEP_SECONDS)]
+        if subprocess.run(cmd).returncode != 0:
+            return 1
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        if healthy():
+            return 0
+        if subprocess.run(["systemctl", "--user", "is-active", "--quiet", UNIT]).returncode != 0:
+            print(f"sakura-model: server exited; journalctl --user -u {UNIT}", file=sys.stderr)
+            return 1
+        time.sleep(1)
+    print("sakura-model: server did not answer in 180 s", file=sys.stderr)
+    return 1
+
+
+def pull():
+    if os.path.isfile(MODEL) and os.path.getsize(MODEL) == SIZE:
+        print("already downloaded; verifying")
+    else:
+        os.makedirs(MODEL_DIR, exist_ok=True)
+        part = MODEL + ".part"
+        url = f"https://huggingface.co/{REPO}/resolve/{REVISION}/{FILENAME}"
+        print(f"downloading {SIZE / 2**30:.1f} GiB to {MODEL_DIR}")
+        if subprocess.run(["curl", "-fL", "-C", "-", "--retry", "5", "--retry-delay", "5", "-o", part, url]).returncode:
+            return 1
+        os.replace(part, MODEL)
+    h = hashlib.sha256()
+    with open(MODEL, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 24), b""):
+            h.update(chunk)
+    if h.hexdigest() != SHA256:
+        os.replace(MODEL, MODEL + ".bad")
+        print(f"CHECKSUM MISMATCH, not using it (moved to {MODEL}.bad)", file=sys.stderr)
+        return 1
+    print("checksum OK")
+    return 0
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "plan"
+    if cmd == "plan":
+        ok, reason, _ = plan()
+        print(f"{SLUG}: {reason}" if ok else f"9b on Ollama: {reason}")
+        return 0
+    if cmd == "up":
+        return up()
+    if cmd == "down":
+        subprocess.run(["systemctl", "--user", "stop", UNIT], capture_output=True)
+        return 0
+    if cmd == "status":
+        v = vram()
+        print(("up" if healthy() else "down"), f"at {URL}", f"VRAM {v[1]}/{v[0]} MiB" if v else "")
+        return 0
+    if cmd == "pull":
+        return pull()
+    print(__doc__)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
