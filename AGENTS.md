@@ -8,14 +8,14 @@ How to work is in Sakura's base instructions. This file is the reference for thi
 - `fetch_url "<url>" [chars]` — readable text of any page, follows redirects, renders RSS/Atom feeds. On a thin
   blog or news index it prints the site's feed URL: fetch that to read every entry at once.
 - `curated_search <persona> "<query>"` — your persona's authoritative sites (HackTricks, MDN, official docs, …).
-- Before you answer, a hook injects lookups it already ran for you: Wikidata for current office-holders, package
+- Before you answer, a hook injects lookups it already ran for you: Wikipedia and Wikidata for current office-holders, package
   registries for a tool's latest version, this project's own manifest versions. Use them; don't redo them.
 - DuckDuckGo and SearXNG often serve this host a CAPTCHA. Never curl a search engine.
 
 ## Specialist models
 `consult <role> "<question>"` gets a one-shot answer (no tools, no session) from a specialist local model:
 `coder` (hard code, algorithms), `coder-fast` (quick snippets), `reason` (deeper analysis), `security`, `prose`.
-Only the qwen3.5 family can drive a session here; reach every other model through `consult`.
+Only the driver model (Qwen3.6 or qwen3.5, picked by `sakura-launch`) runs a session here; reach every other model through `consult`.
 
 ## Root, installs, GUI
 - `sudo -A <command>` — askpass is configured, so it never blocks on a password prompt.
@@ -27,7 +27,7 @@ Only the qwen3.5 family can drive a session here; reach every other model throug
 Hosts are in ~/.ssh/config. Connections are multiplexed, so many ssh calls are cheap.
 
 ## Memory
-When Nobel says "remember", "commit to memory" or "note that", save one or two short, durable facts about Nobel,
+When the user says "remember", "commit to memory" or "note that", save one or two short, durable facts about the user,
 the machines or preferences with the memory tool (see the `memory` skill). No secrets. Confirm in one line.
 Use what you remember without being asked.
 

@@ -11,7 +11,7 @@ Roles (resolve to an Ollama model; edit the map or pass a raw model name):
   coder-fast   qwen2.5-coder 3b   — quick code snippets
   reason       qwen2.5 14b        — deeper general reasoning than the 9b driver
   security     WhiteRabbitNeo 8b  — security / exploitation phrasing
-  prose        kaede-prose        — long-form writing
+  prose        dolphin3.0 8b      — long-form writing
 
 Usage:
   consult coder "write a correct LRU cache in Rust with O(1) ops"
@@ -29,7 +29,7 @@ ROLES = {
     "coder-fast": "huihui_ai/qwen2.5-coder-abliterate:3b",
     "reason": "huihui_ai/qwen2.5-abliterate:14b",
     "security": "WhiteRabbitNeo/Llama-3.1-WhiteRabbitNeo-2-8B:latest",
-    "prose": "kaede-prose:latest",
+    "prose": "thomboe/dolphin3.0-llama3.1-8b-abliterated:latest",
 }
 BASE = os.environ.get("OLLAMA_API_BASE", "http://127.0.0.1:11434")
 

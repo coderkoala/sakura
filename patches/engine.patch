@@ -221,6 +221,41 @@ index b6efe1d68..56dd9a7aa 100644
      }
  
      pub(crate) async fn emit_model_verification(
+diff --git a/codex-rs/core/src/tools/handlers/mod.rs b/codex-rs/core/src/tools/handlers/mod.rs
+index bbfce5215..b41129fda 100644
+--- a/codex-rs/core/src/tools/handlers/mod.rs
++++ b/codex-rs/core/src/tools/handlers/mod.rs
+@@ -112,12 +112,8 @@ fn resolve_sandbox_permissions(
+     sandbox_permissions: Option<SandboxPermissions>,
+     justification: Option<&str>,
+ ) -> Result<SandboxPermissions, FunctionCallError> {
+-    if justification.is_some() && sandbox_permissions.is_none() {
+-        return Err(FunctionCallError::RespondToModel(
+-            "`justification` requires an explicit `sandbox_permissions`; use `sandbox_permissions: \"require_escalated\"` for unsandboxed execution, or omit `justification`.".to_string(),
+-        ));
+-    }
+-
++    // [sakura] A stray `justification` is harmless: rejecting it just cost the model a turn.
++    let _ = justification;
+     Ok(sandbox_permissions.unwrap_or_default())
+ }
+ 
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index aa0c7b163..0c1d0b18a 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -845,7 +845,10 @@ fn function_hook_tool_input(arguments: &str) -> Value {
+ fn unsupported_tool_call_message(payload: &ToolPayload, tool_name: &ToolName) -> String {
+     match payload {
+         ToolPayload::Custom { .. } => format!("unsupported custom tool call: {tool_name}"),
+-        _ => format!("unsupported call: {tool_name}"),
++        // [sakura] Tell the model the way forward: a weak model otherwise retries the same name.
++        _ => format!(
++            "unsupported call: {tool_name} is not a tool here. If it is a program, run it through your shell tool."
++        ),
+     }
+ }
+ #[cfg(test)]
 diff --git a/codex-rs/exec/src/main.rs b/codex-rs/exec/src/main.rs
 index 61eaecdd0..5784372c9 100644
 --- a/codex-rs/exec/src/main.rs
@@ -231,7 +266,7 @@ index 61eaecdd0..5784372c9 100644
  //!
  //! When this CLI is invoked normally, it parses the standard `codex-exec` CLI
 diff --git a/codex-rs/product-info/src/lib.rs b/codex-rs/product-info/src/lib.rs
-index 178b4c2f2..8d66dc6f3 100644
+index 178b4c2f2..5707f3e33 100644
 --- a/codex-rs/product-info/src/lib.rs
 +++ b/codex-rs/product-info/src/lib.rs
 @@ -1,6 +1,6 @@
@@ -243,7 +278,24 @@ index 178b4c2f2..8d66dc6f3 100644
  pub const OPEN_INTERPRETER_NON_INTERACTIVE_ENV_VAR: &str = "OPEN_INTERPRETER_NONINTERACTIVE";
  
  /// Codex service compatibility profile validated for Open Interpreter.
-@@ -188,7 +188,7 @@ pub fn is_open_interpreter_argv0() -> bool {
+@@ -69,14 +69,8 @@ impl Product {
+     /// checks only exist for development builds run straight out of the
+     /// cargo target directory.
+     pub fn current() -> Self {
+-        if std::env::var_os(OPEN_INTERPRETER_BRAND_ENV_VAR).is_some()
+-            || is_open_interpreter_argv0()
+-            || is_open_interpreter_install()
+-        {
+-            Self::OpenInterpreter
+-        } else {
+-            Self::Codex
+-        }
++        // [sakura] This fork only ever ships as Sakura, whatever name it was launched under.
++        Product::OpenInterpreter
+     }
+ 
+     pub fn display_name(self) -> &'static str {
+@@ -188,7 +182,7 @@ pub fn is_open_interpreter_argv0() -> bool {
                  .and_then(|name| name.to_str())
                  .map(str::to_owned)
          })

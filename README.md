@@ -126,10 +126,18 @@ The lower budget stands in for a 6 GB card by limiting the cache; it hasn't run 
 
 ## Install
 
-Sakura installs through my [dotfiles](https://github.com/coderkoala/dotfiles), where this repo lives as a
-submodule and `modules/77-sakura.sh` links the config, rules and skills into `~/.sakura` and `~/.agents`,
-puts the web CLIs on `PATH`, and installs the `sakura` binary. The binary is built from the Open Interpreter
-fork. On first launch, approve the web-grounding hook once (`q`) — it is my own code, trusted per machine.
+Linux with an NVIDIA GPU, Python 3.11+, git and [Ollama](https://ollama.com/download).
+
+```bash
+git clone https://github.com/coderkoala/sakura && cd sakura
+./install.sh                                   # tells you what's still missing
+ollama pull huihui_ai/qwen3.5-abliterated:9b
+# build the binary: patches/README.md
+sakura-launch
+```
+
+`sakura-model plan` says which driver your machine can run, and `sakura-model pull` fetches the bigger one (15.6 GB).
+To add your own notes for the agent, put them in `~/.config/sakura/profile.md` and run `./install.sh` again.
 
 ## Credit
 

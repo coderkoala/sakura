@@ -6,7 +6,7 @@ stream (final answer, executed commands, tokens, wall time) plus on-disk checks.
 answers for current facts and versions are fetched LIVE from authoritative sources here,
 independently of Sakura's own lookup code, so a bug there can't grade itself as correct.
 
-  python3 evals/run.py                 # all cases, model routed like `?`
+  python3 evals/run.py                 # all cases, on the default driver
   python3 evals/run.py --tag version   # one tag
   python3 evals/run.py --only fact-nepal-pm,code-fix-bug
   python3 evals/run.py --model huihui_ai/qwen3.5-abliterated:9b   # force a model
@@ -29,7 +29,6 @@ import xml.etree.ElementTree as ET
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 SAKURA = os.environ.get("SAKURA_BIN", os.path.expanduser("~/.local/bin/sakura"))
-ROUTER = os.path.join(HERE, "..", "..", "bash", "86-sakura.sh")  # dotfiles/bash, when vendored as dotfiles/sakura
 DEFAULT_MODEL = "huihui_ai/qwen3.5-abliterated:9b"
 UA = "sakura-evals/0.1 (local eval harness)"
 
@@ -152,18 +151,6 @@ def resolve_expectation(e):
 
 
 # ── running a case ────────────────────────────────────────────────────────────
-def route_model(prompt):
-    if os.path.exists(ROUTER):
-        try:
-            out = subprocess.run(["bash", "-c", f'source "{ROUTER}" >/dev/null 2>&1; _sakura_pick_model "$1"', "_", prompt],
-                                 capture_output=True, text=True, timeout=10).stdout.strip()
-            if out:
-                return out
-        except Exception:
-            pass
-    return DEFAULT_MODEL
-
-
 def ollama_ok():
     """Can the model actually answer? (A machine suspend can leave the runner wedged.)"""
     try:
@@ -183,7 +170,7 @@ def run_case(case, model_override, timeout, base_url=None, catalog=None):
     prompt = case["prompt"].replace("{work}", work)
     if case.get("setup"):
         subprocess.run(["bash", "-c", case["setup"]], cwd=cwd, check=True)
-    model = model_override or route_model(prompt)
+    model = model_override or DEFAULT_MODEL
     # Not --ephemeral: the Stop verifier reads the turn's transcript, so evals must exercise the real path.
     cmd = [SAKURA, "exec", "--dangerously-bypass-hook-trust", "--skip-git-repo-check", "--json", "-m", model]
     if base_url:

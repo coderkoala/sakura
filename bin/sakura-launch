@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# sakura-launch [request...] — open Sakura in a fresh session. This is what the `?` key runs.
+#
+# Uses the big driver if this machine qualifies (sakura-model), otherwise the 9b on Ollama. Sakura's own hooks do its
+# lookups, so they have to run on every launch. Set SAKURA_MODEL to force a model, or SAKURA_FAST=1 for the 2b.
+set -u
+flags=(--dangerously-bypass-hook-trust)
+big="${SAKURA_BIG_MODEL:-huihui_ai/qwen3.5-abliterated:9b}"
+fast="${SAKURA_FAST_MODEL:-huihui_ai/qwen3.5-abliterated:2b}"
+
+if ! command -v sakura >/dev/null 2>&1; then
+    echo "sakura: the binary isn't installed. To build it, see patches/README.md in the Sakura repo." >&2
+    exit 127
+fi
+
+if [ -n "${SAKURA_MODEL:-}" ]; then
+    flags+=(--model "$SAKURA_MODEL")
+elif [ "${SAKURA_FAST:-0}" = 1 ]; then
+    flags+=(--model "$fast")
+elif command -v sakura-model >/dev/null 2>&1 && sakura-model up 2>/dev/null; then
+    flags+=(--model qwen36-q3 -c 'model_providers.local-ollama.base_url="http://127.0.0.1:8091/v1"')
+    export SAKURA_ROUTER_URL=http://127.0.0.1:8091/v1
+else
+    flags+=(--model "$big")
+    if ! curl -fsS --max-time 3 "${OLLAMA_API_BASE:-http://127.0.0.1:11434}/api/version" >/dev/null 2>&1; then
+        echo "sakura: Ollama isn't answering, so there's no model to run. Start it with: sudo systemctl start ollama" >&2
+        exit 1
+    fi
+    if ! ollama list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$big"; then
+        echo "sakura: model $big isn't downloaded. Get it with: ollama pull $big" >&2
+        exit 1
+    fi
+fi
+
+if [ "$#" -gt 0 ]; then
+    exec sakura "${flags[@]}" "$*"
+fi
+exec sakura "${flags[@]}"
