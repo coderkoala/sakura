@@ -11,6 +11,7 @@ falls back to the old heuristics.
   python3 intent.py "who's running japan's government right now? name the PM"
 """
 import json
+import re
 import os
 import sys
 import urllib.request
@@ -85,8 +86,23 @@ Examples:
 "say hi" -> {"intent":"chat","tool":null,"ecosystem":"unknown","subject":null,"role":null,"query":null,"time_scope":"not_applicable","version_target":"not_applicable","host":null,"no_lookup":false,"action_requested":false}"""
 
 
+# "summarize this note: <text>". What follows the colon is material to work on, so it can't choose the route.
+DATA_TASK = re.compile(r"^\s*(?:please\s+|can you\s+|could you\s+)?(?:summari[sz]e|translate|rewrite|rephrase|paraphrase|"
+                       r"proofread|spell-?check|classify|tl;?dr|shorten|reword)\b[^:\n]{0,80}:", re.I)
+PLANTED = re.compile(r"<<<.*?>>>", re.S)
+
+
+def routing_text(prompt):
+    """The part of a prompt that says what the user wants done."""
+    m = DATA_TASK.match(prompt)
+    if m:
+        return m.group(0).rstrip(":")
+    return PLANTED.sub(" ", prompt)
+
+
 def _excerpt(prompt, limit=1600):
     """Keep the head and tail of a long prompt: the real question is often buried at the end."""
+    prompt = routing_text(prompt)
     if len(prompt) <= limit:
         return prompt
     return prompt[: limit // 2] + "\n[…]\n" + prompt[-limit // 2:]

@@ -13,6 +13,9 @@ Roles (resolve to an Ollama model; edit the map or pass a raw model name):
   security     WhiteRabbitNeo 8b  — security / exploitation phrasing
   prose        dolphin3.0 8b      — long-form writing
 
+If the big driver (sakura-model) holds the card and the specialist wouldn't fit beside it, the driver answers instead
+and the output says so: spilling onto the CPU would take minutes and slow the session down too.
+
 Usage:
   consult coder "write a correct LRU cache in Rust with O(1) ops"
   consult "huihui_ai/qwen2.5-coder-abliterate:14b" "..."     # raw model name also works
@@ -21,6 +24,7 @@ Env: CONSULT_TIMEOUT (seconds, default 180), CONSULT_NUM_PREDICT (default 1024).
 """
 import json
 import os
+import subprocess
 import sys
 import urllib.request
 
@@ -32,6 +36,28 @@ ROLES = {
     "prose": "thomboe/dolphin3.0-llama3.1-8b-abliterated:latest",
 }
 BASE = os.environ.get("OLLAMA_API_BASE", "http://127.0.0.1:11434")
+DRIVER = os.environ.get("SAKURA_DRIVER_URL", "http://127.0.0.1:8091")
+
+
+def driver_holds_card(model):
+    """True if the big driver is running and `model` needs more VRAM than is free next to it."""
+    try:
+        urllib.request.urlopen(DRIVER + "/health", timeout=2)
+        free = int(subprocess.check_output(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                                           text=True, timeout=5).split()[0])
+        tags = json.loads(urllib.request.urlopen(BASE + "/api/tags", timeout=5).read())["models"]
+        size = next(m["size"] for m in tags if m["name"] in (model, model + ":latest")) / 1048576
+    except Exception:
+        return False
+    return size * 1.15 > free
+
+
+def ask_driver(prompt, timeout):
+    body = json.dumps({"model": "driver", "messages": [{"role": "user", "content": prompt}], "temperature": 0.2,
+                       "max_tokens": int(os.environ.get("CONSULT_NUM_PREDICT", 1024)),
+                       "reasoning_effort": "none"}).encode()
+    req = urllib.request.Request(DRIVER + "/v1/chat/completions", data=body, headers={"Content-Type": "application/json"})
+    return json.loads(urllib.request.urlopen(req, timeout=timeout).read())["choices"][0]["message"].get("content") or ""
 
 
 def main():
@@ -44,14 +70,24 @@ def main():
         prompt = sys.stdin.read().strip()
     if not prompt:
         sys.exit("consult: no question given (as args or on stdin)")
+    timeout = int(os.environ.get("CONSULT_TIMEOUT", 180))
+    if driver_holds_card(model):
+        try:
+            text = ask_driver(prompt, timeout).strip()
+        except Exception as e:
+            sys.exit(f"consult: the driver failed: {e}")
+        if not text:
+            sys.exit("consult: the driver returned nothing")
+        print(f"[consult:{who} -> driver; {model} doesn't fit in the free VRAM]\n{text}")
+        return
     body = json.dumps({
-        "model": model, "prompt": prompt, "stream": False,
+        "model": model, "prompt": prompt, "stream": False, "keep_alive": 0,
         "options": {"temperature": 0.2, "num_predict": int(os.environ.get("CONSULT_NUM_PREDICT", 1024))},
     }).encode()
     req = urllib.request.Request(BASE + "/api/generate", data=body,
                                  headers={"Content-Type": "application/json"})
     try:
-        r = json.loads(urllib.request.urlopen(req, timeout=int(os.environ.get("CONSULT_TIMEOUT", 180))).read())
+        r = json.loads(urllib.request.urlopen(req, timeout=timeout).read())
     except Exception as e:
         sys.exit(f"consult: {model} failed: {e}\n(is Ollama up, and is the model pulled? `ollama pull {model}`)")
     text = (r.get("response") or "").strip()

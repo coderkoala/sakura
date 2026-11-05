@@ -19,6 +19,7 @@ import re
 import subprocess
 import time
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor
 import urllib.parse
 import urllib.request
 
@@ -329,29 +330,56 @@ def _go(_):
 REGISTRIES = {"npm": _npm, "pypi": _pypi, "crates": _crates, "composer": _composer, "github": _github, "go": _go}
 
 
-def tool_latest(tool, ecosystem="unknown"):
+def _popularity(eco, name):
+    """Downloads per week, or None when the registry doesn't say."""
+    try:
+        if eco == "npm":
+            return get_json(f"https://api.npmjs.org/downloads/point/last-week/{urllib.parse.quote(name, safe='@/')}", retries=1)["downloads"]
+        if eco == "crates":
+            return get_json(f"https://crates.io/api/v1/crates/{name}")["crate"]["recent_downloads"] // 13  # 90 days
+        if eco == "pypi":
+            return get_json(f"https://pypistats.org/api/packages/{name}/recent", retries=1)["data"]["last_week"]
+    except Exception:
+        pass
+    return None
+
+
+def tool_latest(tool, ecosystem="unknown", explicit=False):
+    """Latest version of a tool. `ecosystem` is the router's guess, and it does get them wrong (tokio -> npm), so unless
+    the user named the registry, a far more used package of that name in another registry wins."""
     if not tool:
         return None
     name = tool.strip().lower()
     if name in ALIASES:
         ecosystem, ident = ALIASES[name]
         plan = [(ecosystem, ident)]
-    elif ecosystem in REGISTRIES:
+    elif ecosystem in ("github", "go") or (explicit and ecosystem in REGISTRIES):
         plan = [(ecosystem, name)]
-    else:  # unknown ecosystem: ask every package registry that might know the name
-        plan = [("npm", name), ("pypi", name), ("crates", name), ("composer", name)]
-    found = []
-    for eco, ident in plan:
+    else:
+        plan = [(eco, name) for eco in ("npm", "pypi", "crates", "composer")]
+    def fetch(entry):
+        eco, ident = entry
         try:
             ver, url = REGISTRIES[eco](ident)
-            found.append((eco, ver, url))
         except Exception:
-            continue
+            return None
+        return eco, ver, url, _popularity(eco, ident)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        found = [hit for hit in pool.map(fetch, plan) if hit]
     if not found:
         return None
+    if len(found) > 1:
+        guess = next((f for f in found if f[0] == ecosystem), None)
+        busiest = max(found, key=lambda f: f[3] or 0)
+        if not busiest[3]:  # nothing to compare: the guess, if it has a hit
+            found = [guess] if guess else found
+        elif guess is None or (guess[3] or 0) * 100 < busiest[3]:
+            found = [busiest]
+        else:
+            found = [guess]
     if len(found) == 1:
-        eco, ver, url = found[0]
+        eco, ver, url, _ = found[0]
         return f"Latest published version of {tool}: {ver} ({eco} registry, fetched just now).\nSource: {url}"
-    lines = "\n".join(f"- {eco}: {ver} — {url}" for eco, ver, url in found)
+    lines = "\n".join(f"- {eco}: {ver} — {url}" for eco, ver, url, _ in found)
     return (f"'{tool}' exists in several registries (they may be different projects); latest published versions, "
             f"fetched just now:\n{lines}\nUse the one that matches what the user means.")

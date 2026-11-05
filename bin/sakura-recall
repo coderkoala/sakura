@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""sakura-recall "<words>" [n] — search past Sakura conversations. No model involved, so it costs nothing to run.
+
+Prints up to n sessions (default 3). The best one comes with the surrounding conversation, the others with one line.
+Only interactive sessions are searched: one-shot runs (workers, evals) aren't conversations.
+"""
+import json
+import os
+import re
+import sqlite3
+import sys
+
+SESSIONS = os.path.expanduser(os.environ.get("SAKURA_SESSIONS_DIR") or "~/.sakura/sessions")
+DB = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "sakura", "recall.db")
+BOILERPLATE = ("# AGENTS.md", "<environment_context", "<user_instructions", "<hook_prompt", "<permissions", "<skills",
+               "<collaboration_mode", "<turn_aborted")
+MAX_MESSAGE = 4000
+EXPAND = 1400
+
+
+def text_of(content):
+    if isinstance(content, str):
+        return content
+    return " ".join(c.get("text", "") for c in content or [] if isinstance(c, dict))
+
+
+def read_session(path):
+    """(meta, [(role, text)]), or None for a one-shot run."""
+    meta, msgs = {}, []
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            p = d.get("payload") or {}
+            if d.get("type") == "session_meta":
+                meta = p
+                if str(p.get("source", "")).lower() == "exec":
+                    return None
+            elif d.get("type") == "response_item" and p.get("type") == "message" and p.get("role") in ("user", "assistant"):
+                t = text_of(p.get("content")).strip()
+                if t and not t.startswith(BOILERPLATE):
+                    msgs.append((p["role"], t[:MAX_MESSAGE]))
+    return meta, msgs
+
+
+def connect():
+    os.makedirs(os.path.dirname(DB), exist_ok=True)
+    db = sqlite3.connect(DB)
+    db.execute("create table if not exists files(path text primary key, stamp text)")
+    db.execute("create virtual table if not exists msgs using fts5(body, role unindexed, path unindexed, seq unindexed, "
+               "started unindexed, cwd unindexed, tokenize='porter unicode61')")
+    return db
+
+
+def refresh(db):
+    known = dict(db.execute("select path, stamp from files"))
+    seen = set()
+    for root, _, names in os.walk(SESSIONS):
+        for n in names:
+            if not n.endswith(".jsonl"):
+                continue
+            path = os.path.join(root, n)
+            seen.add(path)
+            st = os.stat(path)
+            stamp = f"{st.st_mtime_ns}:{st.st_size}"
+            if known.get(path) == stamp:
+                continue
+            db.execute("delete from msgs where path=?", (path,))
+            got = read_session(path)
+            if got:
+                meta, msgs = got
+                db.executemany("insert into msgs(body, role, path, seq, started, cwd) values(?,?,?,?,?,?)",
+                               [(t, r, path, i, str(meta.get("timestamp", ""))[:10], meta.get("cwd", "")) for i, (r, t) in enumerate(msgs)])
+            db.execute("insert or replace into files values(?,?)", (path, stamp))
+    for gone in set(known) - seen:
+        db.execute("delete from msgs where path=?", (gone,))
+        db.execute("delete from files where path=?", (gone,))
+    db.commit()
+
+
+def search(db, words, n):
+    terms = [f'"{w}"' for w in re.findall(r"\w[\w.-]*", words, re.U)]
+    if not terms:
+        return []
+    for joiner in (" ", " OR "):  # every word if possible, else any
+        rows = db.execute("select path, seq, started, cwd, snippet(msgs, 0, '', '', '…', 24) from msgs where msgs match ? order by rank limit 200",
+                          (joiner.join(terms),)).fetchall()
+        if rows:
+            break
+    best = {}
+    for r in rows:
+        best.setdefault(r[0], r)
+    return list(best.values())[:n]
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print(__doc__)
+        return
+    n = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 3
+    db = connect()
+    refresh(db)
+    hits = search(db, sys.argv[1], n)
+    if not hits:
+        print(f"nothing in past sessions matches: {sys.argv[1]}")
+        return
+    print("From past sessions. Things may have changed since, so check anything you act on.")
+    for i, (path, seq, started, cwd, snip) in enumerate(hits):
+        print(f"\n[{started}] {cwd}")
+        if i:
+            print("  " + " ".join(snip.split()))
+            continue
+        rows = db.execute("select role, body from msgs where path=? and cast(seq as int) between ? and ? order by cast(seq as int)",
+                          (path, int(seq) - 1, int(seq) + 2)).fetchall()
+        left = EXPAND
+        for role, body in rows:
+            part = " ".join(body.split())[:left]
+            left -= len(part)
+            print(f"  {role}: {part}")
+            if left <= 0:
+                break
+
+
+if __name__ == "__main__":
+    main()

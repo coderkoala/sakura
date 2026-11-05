@@ -108,6 +108,8 @@ def registry_latest(kind, name):
         return json.loads(_get(f"https://registry.npmjs.org/{name}/latest"))["version"]
     if kind == "pypi":
         return json.loads(_get(f"https://pypi.org/pypi/{name}/json"))["info"]["version"]
+    if kind == "crates":
+        return json.loads(_get(f"https://crates.io/api/v1/crates/{name}"))["crate"]["max_stable_version"]
     raise ValueError(kind)
 
 
@@ -136,7 +138,7 @@ def resolve_expectation(e):
         if not ver:
             raise LookupError(f"no version from: {e['cmd']}")
         return f"{e['cmd']} = {ver.group(0)}", [re.escape(ver.group(0))]
-    if live in ("packagist", "npm", "pypi"):
+    if live in ("packagist", "npm", "pypi", "crates"):
         v = registry_latest(live, e["name"]).lstrip("vV")
         parts = v.split(".")
         want = {"major": parts[0], "minor": ".".join(parts[:2]), "exact": v}[e.get("match", "minor")]
@@ -168,8 +170,10 @@ def run_case(case, model_override, timeout, base_url=None, catalog=None):
     work = tempfile.mkdtemp(prefix=f"sakura-eval-{case['id']}-")
     cwd = os.path.expanduser(case.get("cwd", "{work}").replace("{work}", work))
     prompt = case["prompt"].replace("{work}", work)
+    # Evals get their own memory: they mustn't read or change the user's.
+    env = dict(os.environ, SAKURA_MEMORY_DIR=os.path.join(work, ".mem"))
     if case.get("setup"):
-        subprocess.run(["bash", "-c", case["setup"]], cwd=cwd, check=True)
+        subprocess.run(["bash", "-c", case["setup"]], cwd=cwd, check=True, env=env)
     model = model_override or DEFAULT_MODEL
     # Not --ephemeral: the Stop verifier reads the turn's transcript, so evals must exercise the real path.
     cmd = [SAKURA, "exec", "--dangerously-bypass-hook-trust", "--skip-git-repo-check", "--json", "-m", model]
@@ -181,7 +185,7 @@ def run_case(case, model_override, timeout, base_url=None, catalog=None):
     t0 = time.time()
     timed_out = False
     try:
-        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=env)
         stdout = p.stdout
     except subprocess.TimeoutExpired as ex:
         timed_out = True
@@ -233,7 +237,7 @@ def run_case(case, model_override, timeout, base_url=None, catalog=None):
         bad = [c for c in commands if re.search(f["regex"], c)]
         checks.append(("forbid_cmd", not bad, f"no command matching {f['regex']}" + (f" (ran: {bad[0][:80]!r})" if bad else "")))
     if case.get("check"):
-        r = subprocess.run(["bash", "-c", case["check"]], cwd=cwd, capture_output=True, text=True)
+        r = subprocess.run(["bash", "-c", case["check"]], cwd=cwd, capture_output=True, text=True, env=env)
         checks.append(("on_disk", r.returncode == 0, case["check"][:70]))
     if case.get("max_seconds"):
         checks.append(("speed", secs <= case["max_seconds"], f"{secs:.0f}s <= {case['max_seconds']}s"))

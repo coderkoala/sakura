@@ -40,13 +40,11 @@ show_tooltips = false
 approve = ["y", "q"]
 decline = ["esc", "n", "w"]
 
-# Memory: it summarises past sessions into durable facts about you and injects them next time, so it
-# becomes yours over time. Both models are local. See the `memory` skill for explicit "remember".
+# Long-term memory is bin/sakura-memory, loaded by hooks/session_context.py. The engine's own pipeline wrote nothing
+# in 449 sessions, so it's off.
 [memories]
-use_memories = true
-generate_memories = true
-extract_model = "huihui_ai/qwen3.5-abliterated:9b"
-consolidation_model = "huihui_ai/qwen3.5-abliterated:9b"
+use_memories = false
+generate_memories = false
 
 # Silence every outbound call that is not the model: metrics, update checks, feedback.
 [analytics]
@@ -60,11 +58,9 @@ enabled = false
 
 # Tiering: the generalist (top-level `model`) can delegate a hard subtask to a stronger model with the spawn_agent
 # tool; default_subagent_model is the "muscle". On bigger hardware raise both this and `model` to larger Ollama tags.
+# The agent tools are off: the local model serves one request at a time. Separate jobs go through bin/sakura-worker.
 [features]
-multi_agent_v2 = true
-
-[agents]
-default_subagent_model = "huihui_ai/qwen3.5-abliterated:9b"
+multi_agent_v2 = false
 
 # ── Live web knowledge (cited) ────────────────────────────────────────────────
 # The native `web_search` above is a hosted tool that never fires over local Ollama, so it stays off.

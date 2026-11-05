@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""sakura-memory — Sakura's long-term memory: small, capped, plain text.
+
+Two stores, one fact per line, loaded into every new session as a frozen snapshot:
+  user   who the user is and how they want to work   (USER.md,   1200 chars)
+  notes  machines, projects, lessons learned         (MEMORY.md, 2000 chars)
+A full store refuses the write and lists what's in it, so the agent has to decide what to drop.
+
+  sakura-memory add <store> "fact"
+  sakura-memory replace <store> "unique part of the old fact" "new fact"
+  sakura-memory remove <store> "unique part of the fact"
+  sakura-memory show [store]
+
+Each project also gets a state file for the coordinator, loaded the same way (6000 chars):
+  sakura-memory state              print it
+  sakura-memory state note "line"  append a line
+  sakura-memory state write        replace it with stdin
+  sakura-memory state path         print its path
+
+Where: $SAKURA_MEMORY_DIR, else ~/.sakura/memory.
+"""
+import fcntl
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = os.path.expanduser(os.environ.get("SAKURA_MEMORY_DIR") or "~/.sakura/memory")
+STORES = {"user": ("USER.md", 1200), "notes": ("MEMORY.md", 2000)}
+MAX_FACT = 300
+STATE_CAP = 6000
+
+# What must never get into a file that's fed back to the model on every session and synced between machines.
+SECRET = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY|\bAKIA[0-9A-Z]{16}\b|\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_\w{20,}"
+    r"|\bsk-[A-Za-z0-9_-]{16,}|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bAIza[0-9A-Za-z_-]{30,}"
+    r"|\b(?:password|passwd|passphrase|pwd|api[_ -]?key|secret|token)\b\s*(?:is|=|:)\s*\S{4,}"
+    r"|\b(?:password|passwd|passphrase|pwd|api[_ -]?key|secret|token)\b\W+(?=\S*[\d!@#$%^&*_])\S{4,}", re.I)
+INJECTION = re.compile(
+    r"\b(?:ignore|disregard|forget)\b.{0,30}\b(?:previous|prior|above|earlier|all)\b.{0,30}\b(?:instructions?|rules?|prompts?)\b"
+    r"|\byou are now\b|<\s*/?\s*(?:system|developer|lookup|memory)\b|^\s*(?:system|assistant)\s*:"
+    r"|authorized_keys|\bcurl\b[^|\n]*\|\s*(?:ba)?sh\b|\bwget\b[^|\n]*\|\s*(?:ba)?sh\b", re.I)
+INVISIBLE = re.compile("[​-‏‪-‮⁠-⁤⁦-⁯﻿\U000e0000-\U000e007f]")
+
+
+def flagged(text):
+    """Why this text can't go in memory, or None."""
+    if SECRET.search(text):
+        return "it looks like a secret"
+    if INJECTION.search(text):
+        return "it reads like an instruction to the agent, not a fact"
+    if INVISIBLE.search(text):
+        return "it contains invisible characters"
+    return None
+
+
+def read(path):
+    """Text of a file; empty if it doesn't exist. Raises if it can't be read, so a write can't wipe it."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+
+
+def write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+class Lock:
+    def __enter__(self):
+        os.makedirs(ROOT, exist_ok=True)
+        self.f = open(os.path.join(ROOT, ".lock"), "w")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+
+    def __exit__(self, *_):
+        self.f.close()
+
+
+def entries(text):
+    return [l[2:].strip() for l in text.splitlines() if l.startswith("- ")]
+
+
+def render(items):
+    return "".join(f"- {i}\n" for i in items)
+
+
+def listing(store, items):
+    cap = STORES[store][1]
+    used = len(render(items))
+    body = "\n".join(f"  - {i}" for i in items) or "  (empty)"
+    return f"{store}: {used}/{cap} chars\n{body}"
+
+
+def fail(msg):
+    print(f"sakura-memory: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def match_one(items, needle):
+    hits = [i for i in items if needle.lower() in i.lower()]
+    if not hits:
+        fail(f"nothing matches “{needle}”.\n" + "\n".join(f"  - {i}" for i in items))
+    if len(hits) > 1:
+        fail(f"“{needle}” matches {len(hits)} facts; use a longer part of the one you mean:\n" + "\n".join(f"  - {i}" for i in hits))
+    return hits[0]
+
+
+def clean_fact(text):
+    fact = " ".join(text.split())
+    if not fact:
+        fail("that's empty")
+    if len(fact) > MAX_FACT:
+        fail(f"that's {len(fact)} chars and one fact can be {MAX_FACT}. Shorten it.")
+    why = flagged(fact)
+    if why:
+        fail(f"not saved: {why}.")
+    return fact
+
+
+def edit(store, change):
+    name, cap = STORES[store]
+    path = os.path.join(ROOT, name)
+    with Lock():
+        try:
+            items = entries(read(path))
+        except (OSError, UnicodeDecodeError) as e:
+            fail(f"can't read {path} ({e}), so I won't overwrite it.")
+        new, said = change(items)
+        if new is None:
+            print(said)
+            return
+        if len(render(new)) > cap:
+            fail(f"not saved: {store} would be {len(render(new))}/{cap} chars. Make room first: `remove` what no longer "
+                 f"matters, or `replace` two facts with one.\n{listing(store, items)}")
+        write(path, render(new))
+        print(f"{said} ({len(render(new))}/{cap} chars in {store})")
+
+
+def project_slug(cwd=None):
+    """The same project gets the same name on every machine: its git remote if it has one, else its folder."""
+    cwd = cwd or os.getcwd()
+    def git(*a):
+        try:
+            return subprocess.run(["git", "-C", cwd, *a], capture_output=True, text=True, timeout=5).stdout.strip()
+        except Exception:
+            return ""
+    source = git("remote", "get-url", "origin") or git("rev-parse", "--show-toplevel") or cwd
+    source = re.sub(r"\.git$", "", source.rstrip("/"))
+    parts = re.split(r"[/:]", source)
+    return re.sub(r"[^\w.-]", "-", "-".join(parts[-2:]).strip("-")) or "project"
+
+
+def state_path(cwd=None):
+    return os.path.join(ROOT, "projects", project_slug(cwd) + ".md")
+
+
+STATE_TEMPLATE = """# Coordinator state
+
+## Mission
+(what the user wants from this project, in their words)
+
+## In flight
+
+## Next
+
+## Decisions
+(the user's rulings; don't ask these again)
+
+## Log
+"""
+
+
+def trim_log(text):
+    """A note shouldn't fail because the state is full: the oldest log lines go first."""
+    head, sep, log = text.partition("## Log\n")
+    lines = log.splitlines(True)
+    while sep and len(head) + len(sep) + sum(map(len, lines)) > STATE_CAP and len(lines) > 1:
+        lines.pop(0)
+    return head + sep + "".join(lines)
+
+
+def cmd_state(args):
+    path = state_path()
+    sub = args[0] if args else "show"
+    if sub == "path":
+        print(path)
+    elif sub == "show":
+        print(read(path) or STATE_TEMPLATE, end="")
+    elif sub in ("note", "write"):
+        with Lock():
+            if sub == "note":
+                line = " ".join(" ".join(args[1:]).split())
+                if not line:
+                    fail('usage: sakura-memory state note "line"')
+                old = read(path) or STATE_TEMPLATE
+                text = old.rstrip("\n") + f"\n- {time.strftime('%Y-%m-%d')} {line}\n"
+                text = trim_log(text)
+            else:
+                text = sys.stdin.read()
+            why = flagged(text)
+            if why:
+                fail(f"not saved: {why}.")
+            if len(text) > STATE_CAP:
+                fail(f"not saved: that makes the state {len(text)}/{STATE_CAP} chars. Rewrite it shorter with "
+                     "`sakura-memory state write`: keep the mission, what's open and the decisions, and drop finished work.")
+            write(path, text)
+        print(f"state saved ({len(text)}/{STATE_CAP} chars): {path}")
+    else:
+        fail("usage: sakura-memory state [show|note \"line\"|write|path]")
+
+
+def snapshot():
+    """What a new session is told, as text. Anything flagged is withheld here too: these files can change without
+    going through this command, by hand or by a sync from another machine."""
+    parts = []
+    for store, (name, cap) in STORES.items():
+        try:
+            items = entries(read(os.path.join(ROOT, name)))
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not items:
+            continue
+        shown = [f"[withheld: {flagged(i)}. See it with: sakura-memory show {store}]" if flagged(i) else i for i in items]
+        parts.append(f"{store} ({len(render(items))}/{cap} chars)\n" + render(shown).rstrip())
+    return "\n\n".join(parts)
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help"):
+        print(__doc__)
+        return
+    cmd = a[0]
+    if cmd == "state":
+        return cmd_state(a[1:])
+    if cmd == "show":
+        for store in ([a[1]] if len(a) > 1 else STORES):
+            if store not in STORES:
+                fail(f"no store “{store}”: use user or notes")
+            print(listing(store, entries(read(os.path.join(ROOT, STORES[store][0])))))
+        return
+    if len(a) < 3 or a[1] not in STORES or cmd not in ("add", "replace", "remove") or (cmd == "replace" and len(a) < 4):
+        fail("usage: sakura-memory add|replace|remove <user|notes> ...  (see --help)")
+    store = a[1]
+    if cmd == "add":
+        fact = clean_fact(" ".join(a[2:]))
+        def change(items):
+            if any(i.lower() == fact.lower() for i in items):
+                return None, f"already remembered: {fact}"
+            return items + [fact], f"remembered: {fact}"
+    elif cmd == "replace":
+        fact = clean_fact(" ".join(a[3:]))
+        def change(items):
+            old = match_one(items, a[2])
+            return [fact if i == old else i for i in items], f"replaced with: {fact}"
+    else:
+        def change(items):
+            old = match_one(items, " ".join(a[2:]))
+            return [i for i in items if i != old], f"forgot: {old}"
+    edit(store, change)
+
+
+if __name__ == "__main__":
+    main()

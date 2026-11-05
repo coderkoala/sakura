@@ -27,9 +27,22 @@ Only the driver model (Qwen3.6 or qwen3.5, picked by `sakura-launch`) runs a ses
 Hosts are in ~/.ssh/config. Connections are multiplexed, so many ssh calls are cheap.
 
 ## Memory
-When the user says "remember", "commit to memory" or "note that", save one or two short, durable facts about the user,
-the machines or preferences with the memory tool (see the `memory` skill). No secrets. Confirm in one line.
-Use what you remember without being asked.
+- Your saved facts arrive at the start of a session. They hold about 3000 characters, so keep only what will matter next time.
+- `sakura-memory add user|notes "<fact>"`, `replace <store> "<part of old>" "<new>"`, `remove <store> "<part>"`, `show`. A full store refuses the write and lists what's in it: remove or merge something, then retry.
+- `sakura-recall "<words>"` searches past conversations.
+- "forget X" → `sakura-memory remove`. Secrets are refused.
+
+## Big jobs
+Run one job in a fresh context, with no quoting to get wrong:
+```
+sakura-worker <<'JOB'
+verify: <command that exits 0 only if it worked>
+scope: <files it may change>
+
+<the brief>
+JOB
+```
+It passes only if the verify command exits 0, it retries once with the failure, and it returns a short report. Run one at a time.
 
 ## Skills
 Skills hold the procedures and tool lists for specialist work (pentesting, reversing, forensics, media, image

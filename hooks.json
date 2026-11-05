@@ -1,5 +1,16 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 __SAKURA_DIR__/hooks/session_context.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
@@ -8,6 +19,11 @@
             "command": "python3 __SAKURA_DIR__/hooks/web_ground.py",
             "timeout": 45,
             "statusMessage": "checking the web"
+          },
+          {
+            "type": "command",
+            "command": "python3 __SAKURA_DIR__/hooks/coordinator_turn.py",
+            "timeout": 5
           }
         ]
       }

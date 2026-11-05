@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""sakura-worker [options] "brief" — one job in a fresh context, checked by something other than the worker.
+
+Starts a one-shot Sakura that knows only the brief, so its reading and dead ends never reach the session that called it.
+That session gets a short report, and whether the job passed comes from your command, not from what the worker claims.
+Only one worker runs at a time, because the local model serves one request at a time.
+
+  --verify CMD   must exit 0 for the job to pass. If it fails, a new worker gets the failure and tries again.
+  --scope GLOB   what the worker may change, repeatable. Anything else it changes fails the job.
+  --retries N    extra attempts after a failure (default 1)
+  --timeout S    seconds per attempt (default 900)
+
+The easy way, with no quoting to get wrong, is a job on stdin. Header lines come first, then a blank line, then the brief:
+
+  sakura-worker <<'JOB'
+  verify: python3 -c 'import calc; assert calc.add(2, 3) == 5'
+  scope: calc.py src/parser/*
+
+  add() in calc.py subtracts. Make it add.
+  JOB
+
+Exit status: 0 PASSED or UNVERIFIED, 1 FAILED. The full transcript is in ~/.sakura/runs.
+"""
+import argparse
+import fcntl
+import fnmatch
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+RUNS = os.path.expanduser("~/.sakura/runs")
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+TAIL = 800
+PREAMBLE = """You're a worker: you do this one job, report and end. Nobody will answer questions, so make the standard call yourself.
+Run things and read their output; don't assume. Stay inside the job: if something else is broken, mention it and leave it.
+Don't push or commit unless the job says to.
+Finish with: DONE or BLOCKED, what you changed, and what output proved it, in at most five lines.
+"""
+
+
+# What running code leaves behind. It isn't a change anyone made.
+GENERATED = re.compile(r"(^|/)(__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|node_modules)(/|$)|\.pyc$")
+
+
+def parse_job(text):
+    """Split a job from stdin into its header settings and the brief."""
+    settings, lines = {}, text.strip().splitlines()
+    i = 0
+    while i < len(lines):
+        m = re.match(r"(verify|scope|retries|timeout)\s*:\s*(.*)$", lines[i].strip(), re.I)
+        if not m:
+            break
+        settings[m.group(1).lower()] = m.group(2).strip()
+        i += 1
+    return settings, "\n".join(lines[i:]).strip()
+
+
+def log_to_state(line):
+    """A coordinator's record of what landed shouldn't depend on it remembering to write one."""
+    try:
+        subprocess.run(["sakura-memory", "state", "note", line], capture_output=True, timeout=10)
+    except Exception:
+        pass
+
+
+def git_changes(cwd):
+    """Files git sees as changed, with a fingerprint so a further edit to an already dirty file still counts. None outside git."""
+    try:
+        out = subprocess.run(["git", "-C", cwd, "status", "--porcelain", "-z", "--untracked-files=all"],
+                             capture_output=True, text=True, timeout=30, check=True).stdout
+    except Exception:
+        return None
+    seen = {}
+    fields = out.split("\0")
+    i = 0
+    while i < len(fields):
+        entry = fields[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        name = entry[3:]
+        if entry[0] in "RC":
+            i += 1  # the old name follows a rename
+        try:
+            st = os.stat(os.path.join(cwd, name))
+            seen[name] = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            seen[name] = None
+    return seen
+
+
+def changed_since(before, after):
+    if before is None or after is None:
+        return []
+    return sorted(n for n in set(before) | set(after)
+                  if before.get(n, "absent") != after.get(n, "absent") and not GENERATED.search(n))
+
+
+def out_of_scope(files, scopes):
+    if not scopes:
+        return []
+    return [f for f in files if not any(fnmatch.fnmatch(f, s) or f.startswith(s.rstrip("/") + "/") for s in scopes)]
+
+
+def launcher():
+    return shutil.which("sakura-launch") or os.path.join(ROOT, "bin", "sakura-launch")
+
+
+def run_attempt(brief, cwd, timeout, log):
+    env = dict(os.environ, SAKURA_WORKER="1")
+    env.pop("SAKURA_COORDINATOR", None)
+    # Not --ephemeral: the Stop verifier reads the transcript.
+    cmd = [launcher(), "--exec", "--skip-git-repo-check", "--json", brief]
+    timed_out = False
+    with open(log, "ab") as f:
+        p = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            p.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            os.killpg(p.pid, 15)
+            p.wait()
+    final, commands, failed = "", 0, 0
+    with open(log, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            item = ev.get("item", {}) if isinstance(ev, dict) else {}
+            if ev.get("type") == "thread.started":  # a later attempt shares the log: only count this one
+                final, commands, failed = "", 0, 0
+            if ev.get("type") == "item.completed":
+                if item.get("type") == "agent_message" and item.get("text"):
+                    final = item["text"]
+                elif item.get("type") == "command_execution":
+                    commands += 1
+                    failed += item.get("exit_code") not in (0, None)
+    return {"final": final.strip(), "commands": commands, "failed": failed, "timed_out": timed_out, "code": p.returncode}
+
+
+def tail(text, n=TAIL):
+    return text if len(text) <= n else "…" + text[-n:]
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True, description="One job in a fresh context, checked independently.")
+    ap.add_argument("--verify")
+    ap.add_argument("--scope", action="append", default=[])
+    ap.add_argument("--retries", type=int, default=1)
+    ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument("brief", nargs="*")
+    args = ap.parse_args()
+    if os.environ.get("SAKURA_WORKER"):
+        sys.exit("sakura-worker: a worker can't start another worker")
+    brief = " ".join(args.brief).strip()
+    if not brief and not sys.stdin.isatty():
+        settings, brief = parse_job(sys.stdin.read())
+        args.verify = args.verify or settings.get("verify")
+        args.scope = args.scope or settings.get("scope", "").split()
+        args.retries = int(settings.get("retries", args.retries))
+        args.timeout = int(settings.get("timeout", args.timeout))
+    if not brief:
+        sys.exit("sakura-worker: no brief given")
+    cwd = os.getcwd()
+    os.makedirs(RUNS, exist_ok=True)
+    slug = re.sub(r"\W+", "-", brief[:40]).strip("-").lower() or "job"
+    log = os.path.join(RUNS, f"{time.strftime('%Y%m%d-%H%M%S')}-{slug}.jsonl")
+    lock = open(os.path.join(RUNS, ".lock"), "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+
+    before = git_changes(cwd)
+    prompt = PREAMBLE + ("\nYou may change only: " + ", ".join(args.scope) + "\n" if args.scope else "") + "\nThe job:\n" + brief
+    attempts = max(args.retries, 0) + 1
+    status, why, res, verify_out, code = "FAILED", "", {}, "", None
+    for n in range(1, attempts + 1):
+        res = run_attempt(prompt, cwd, args.timeout, log)
+        after = git_changes(cwd)
+        files = changed_since(before, after)
+        stray = out_of_scope(files, args.scope)
+        problems = []
+        if res["timed_out"]:
+            problems.append(f"it ran out of time after {args.timeout}s")
+        elif res["code"] not in (0, None):
+            problems.append(f"the worker exited with code {res['code']}")
+        elif not res["final"]:
+            problems.append("the worker ended without a report")
+        if stray:
+            problems.append("it changed files outside its scope: " + ", ".join(stray[:8]))
+        if args.verify:
+            try:
+                v = subprocess.run(["bash", "-c", args.verify], cwd=cwd, capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL)
+                code, verify_out = v.returncode, (v.stdout + v.stderr).strip()
+            except subprocess.TimeoutExpired:
+                code, verify_out = 124, "the verify command timed out after 600s"
+            if code:
+                problems.append(f"the verify command exited {code}")
+        if not problems:
+            status = "PASSED" if args.verify else "UNVERIFIED"
+            why = ""
+            break
+        why = "; ".join(problems)
+        if n < attempts:
+            prompt = (PREAMBLE + ("\nYou may change only: " + ", ".join(args.scope) + "\n" if args.scope else "") + "\nThe job:\n" + brief +
+                      f"\n\nAn earlier worker tried this and it didn't pass: {why}.\n"
+                      + (f"`{args.verify}` printed:\n{tail(verify_out)}\n" if args.verify and code else "")
+                      + f"It reported:\n{tail(res['final'], 500)}\n\nIts changes are still on disk. Find what's actually wrong and fix that.")
+
+    if os.environ.get("SAKURA_COORDINATOR"):
+        log_to_state(f"{status}: {' '.join(brief.split())[:90]}" + (f" ({why[:90]})" if why else ""))
+    print(f"WORKER {status} (attempt {n}/{attempts})")
+    if why:
+        print(f"why: {why}")
+    if args.verify:
+        print(f"verify: `{args.verify}` exited {code}")
+        if code:
+            print(tail(verify_out))
+    if before is None:
+        print("changed: unknown (not a git repo)")
+    else:
+        print("changed: " + (", ".join(files[:20]) + (f" and {len(files) - 20} more" if len(files) > 20 else "") if files else "nothing"))
+    print(f"commands: {res.get('commands', 0)} run, {res.get('failed', 0)} failed")
+    print("worker's report: " + (tail(res.get("final", ""), 900) or "(none)"))
+    print(f"transcript: {log}")
+    sys.exit(0 if status != "FAILED" else 1)
+
+
+if __name__ == "__main__":
+    main()

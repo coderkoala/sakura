@@ -154,7 +154,7 @@ def by_intent(it, prompt, cwd):
         if target == "remote_host":
             return []  # the local machine and the registry say nothing about another host
         if kind == "tool_version" and target == "registry" and it.get("time_scope") == "current":
-            latest = lookups.tool_latest(tool, eco)
+            latest = lookups.tool_latest(tool, eco, explicit=_named_registry(prompt, eco))
             if latest:
                 out.append(_closing(it, latest + " Don't curl a docs site."))
         if kind != "system_task" or target == "this_machine":
@@ -162,6 +162,12 @@ def by_intent(it, prompt, cwd):
             if pinned:
                 out.append(pinned)
     return out
+
+
+def _named_registry(prompt, eco):
+    """Did the user say which registry, as in "the npm package tokio"?"""
+    words = {"npm": "npm|node", "pypi": "pypi|pip|python", "crates": "crates?|cargo|rust", "composer": "composer|packagist|php"}
+    return bool(re.search(rf"\b(?:{words.get(eco, eco)})\b", prompt, re.I))
 
 
 def legacy(prompt, cwd):

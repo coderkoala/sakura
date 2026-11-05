@@ -13,7 +13,7 @@ if [ "$(uname -s)" != Linux ]; then
     echo "Sakura runs on Linux only." >&2
     exit 1
 fi
-mkdir -p "$SAKURA_HOME/memories" "$HOME/.agents" "$HOME/.local/bin" "$HOME/.config/sakura"
+mkdir -p "$SAKURA_HOME" "$HOME/.agents" "$HOME/.local/bin" "$HOME/.config/sakura"
 
 # Point a path at ours. Anything there that isn't already a link is kept beside it.
 link() {
@@ -36,7 +36,7 @@ if [ -L "$SAKURA_HOME/AGENTS.md" ]; then rm -f "$SAKURA_HOME/AGENTS.md"; fi
 } > "$SAKURA_HOME/AGENTS.md"
 link "$ROOT/rules" "$SAKURA_HOME/rules"
 link "$ROOT/skills" "$HOME/.agents/skills"
-for tool in web_search wikipedia fetch_url curated_search consult sakura-model sakura-launch; do
+for tool in web_search wikipedia fetch_url curated_search consult sakura-model sakura-launch sakura-worker sakura-memory sakura-recall; do
     ln -sf "$ROOT/bin/$tool" "$HOME/.local/bin/$tool"
 done
 
@@ -59,3 +59,4 @@ echo "  driver: $("$ROOT/bin/sakura-model" plan 2>&1 || true)"
 echo
 echo "Run it with: sakura-launch"
 echo "For a ? key, add to ~/.bashrc:  alias '?'=sakura-launch"
+echo "For a coordinator that hands work to disposable workers:  sakura-launch --coordinator"

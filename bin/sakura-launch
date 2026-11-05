@@ -3,8 +3,18 @@
 #
 # Uses the big driver if this machine qualifies (sakura-model), otherwise the 9b on Ollama. Sakura's own hooks do its
 # lookups, so they have to run on every launch. Set SAKURA_MODEL to force a model, or SAKURA_FAST=1 for the 2b.
+#   --coordinator   a session that plans and hands the work to disposable workers (the `??` key)
+#   --exec ARGS     a one-shot `sakura exec` on the same model (how sakura-worker runs)
 set -u
+mode=tui
+case "${1:-}" in
+    --coordinator) mode=coordinator; shift; export SAKURA_COORDINATOR=1 ;;
+    --exec) mode=exec; shift ;;
+esac
 flags=(--dangerously-bypass-hook-trust)
+# ssh and scp that fail instead of waiting for a password nobody can type (see shims/ssh).
+PATH="$(dirname "$(dirname "$(readlink -f "$0")")")/shims:$PATH"
+export PATH
 big="${SAKURA_BIG_MODEL:-huihui_ai/qwen3.5-abliterated:9b}"
 fast="${SAKURA_FAST_MODEL:-huihui_ai/qwen3.5-abliterated:2b}"
 
@@ -32,6 +42,9 @@ else
     fi
 fi
 
+if [ "$mode" = exec ]; then
+    exec sakura exec "${flags[@]}" "$@"
+fi
 if [ "$#" -gt 0 ]; then
     exec sakura "${flags[@]}" "$*"
 fi

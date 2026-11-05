@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 OUT = sys.argv[1]
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 11435
-UPSTREAM = ("127.0.0.1", 11434)
+UPSTREAM = ("127.0.0.1", int(os.environ.get("TRACE_UPSTREAM_PORT", 11434)))
 
 
 LOOKUP = re.compile(r"\s*<lookup>.*?</lookup>", re.S)

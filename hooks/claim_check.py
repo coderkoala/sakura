@@ -208,6 +208,54 @@ def continuation_reason(answer, prompt=""):
     return None
 
 
+# First-person or passive claims that work got done. Tight on purpose: "working on" or "the fix is" don't count.
+DONE_CLAIM = re.compile(
+    r"^\W*(done|fixed|deployed|finished|all set)\b"
+    r"|\bI(?:'ve| have)?\s+(?:\w+ly\s+)?(fixed|created|updated|deployed|installed|pushed|committed|restarted|removed|"
+    r"deleted|added|wrote|ran|tested|verified|configured|changed|moved)\b"
+    r"|\b(?:has|have|is|are|was|were) (?:now )?(?:been )?(?:successfully )(?:\w+)\b"
+    r"|\b(?:has|have) been (fixed|created|updated|deployed|installed|pushed|committed|restarted|removed|deleted|added)\b"
+    r"|\bsuccessfully\b",
+    re.I | re.M)
+FAIL_ADMITTED = re.compile(
+    r"\b(fail(ed|s|ure|ing)?|error(ed|s)?|couldn'?t|could not|cannot|can'?t|unable|denied|not found|didn'?t|doesn'?t|"
+    r"blocked|refused|exit(ed)?( with)?( code| status)? ?[1-9]|non-?zero|expected)\b", re.I)
+EXIT_CODE = re.compile(r"(?:Process exited with code|Exit code:?) (-?\d+)")
+
+
+def turn_results(transcript_path):
+    """Exit codes of this turn's tool calls, in order (None where the output doesn't say)."""
+    try:
+        items = [json.loads(l) for l in open(transcript_path, encoding="utf-8")]
+    except Exception:
+        return None
+    items = [d.get("payload", {}) for d in items if d.get("type") == "response_item"]
+    start = 0
+    for i, p in enumerate(items):
+        if p.get("type") == "message" and p.get("role") == "user" and "hook_prompt" not in text_of(p.get("content"))[:200] \
+                and not text_of(p.get("content")).lstrip().startswith(("# AGENTS.md", "<environment_context", "<user_instructions")):
+            start = i
+    out = []
+    for p in items[start + 1:]:
+        if p.get("type") in ("function_call_output", "custom_tool_call_output", "mcp_tool_call_output"):
+            m = EXIT_CODE.search(text_of(p.get("output"))[:300])
+            out.append(int(m.group(1)) if m else None)
+    return out
+
+
+def completion_reason(answer, results):
+    """Block a claim of finished work when no tool ran, or when the last command failed and the answer doesn't say so."""
+    if results is None or not answer or not DONE_CLAIM.search(answer):
+        return None
+    if not results:
+        return ("You said the work is done, but you ran no tool this turn, so nothing happened. Do it now with tool "
+                "calls and report what the output shows. If the user only wanted an explanation, say that nothing was run.")
+    if results[-1] not in (None, 0) and not FAIL_ADMITTED.search(answer):
+        return (f"Your last command exited with code {results[-1]}, and your answer says the work succeeded. Read that "
+                "output: fix the cause and re-run it, or tell the user plainly that it failed.")
+    return None
+
+
 def _bump(turn_id):
     """Count continuations for this turn; returns the new count."""
     d = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "sakura-hooks")
@@ -237,13 +285,17 @@ def main():
         cont = ("You listed the steps without doing them. If they are work to carry out, do them now with tool calls, "
                 "then give the result. If the user only asked for an explanation, restate your answer.")
     if cont:
-        if _bump(data.get("turn_id")) <= MAX_CONTINUES:
+        n = _bump(data.get("turn_id"))
+        if n == MAX_CONTINUES:  # the last chance: a turn must end with an answer, even if the answer is "I couldn't"
+            cont = ("Stop trying new things now. Write your final answer from what you've seen: what worked, what didn't, "
+                    "and what's blocking. If it couldn't be done, say that plainly. Make no more tool calls.")
+        if n <= MAX_CONTINUES:
             print(json.dumps({"decision": "block", "reason": cont}))
         return
     # 2. Claims: checked once per turn (stop_hook_active means we already sent it back once).
     if data.get("stop_hook_active"):
         return
-    reason = decide(answer, prompt, evidence, grounded, fact)
+    reason = completion_reason(answer, turn_results(path) if path else None) or decide(answer, prompt, evidence, grounded, fact)
     if reason:
         print(json.dumps({"decision": "block", "reason": reason}))
 
@@ -300,6 +352,21 @@ def selftest():
             if got:
                 print("   reason:", decide(ans, pr, ev, g, f)[:120])
     total = len(cases) + cases_total + 8
+    for ans, results, want in (
+        ("Done. The file is created.", [], True),
+        ("I've fixed the bug.", [], True),
+        ("Here is how you would fix it: change a to b.", [], False),
+        ("The nginx service has been restarted.", [0, 1], True),
+        ("I restarted nginx but it failed: port in use.", [0, 1], False),
+        ("Fixed. The test passes.", [1, 0], False),
+        ("Deployed v2.", [0], False),
+        ("Deployed v2.", None, False),
+        ("I fixed it.", [None], False),
+    ):
+        total += 1
+        if bool(completion_reason(ans, results)) != want:
+            bad += 1
+            print(f"completion_reason wrong: {ans!r} {results} (wanted block={want})")
     import tempfile
     with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
         for role, text in (("user", "do: 1) a, 2) b"), ("assistant", "Step 1 done."), ("user", "<hook_prompt hook_run_id=\"x\">go on</hook_prompt>")):

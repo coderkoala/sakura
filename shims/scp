@@ -1,0 +1,9 @@
+#!/bin/sh
+# Sakura's scp: never ask for a password. An agent has nobody to answer the prompt, so without this a host that refuses
+# the key hangs on a dialog on the desktop. Now it fails at once with an error the agent can read.
+# Keys in the agent still work. SAKURA_SSH_INTERACTIVE=1 turns this off.
+here=$(dirname "$(readlink -f "$0")")
+PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$here" | paste -sd: -)
+export PATH
+[ -n "${SAKURA_SSH_INTERACTIVE:-}" ] && exec scp "$@"
+exec scp -o BatchMode=yes "$@"

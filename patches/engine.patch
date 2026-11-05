@@ -12,7 +12,7 @@ index beab5351b..75d48c6fc 100644
              });
          if !approval_policy_was_explicit
 diff --git a/codex-rs/core/src/harness/qwen_code.rs b/codex-rs/core/src/harness/qwen_code.rs
-index d11fe2b77..fcc0e3e71 100644
+index d11fe2b77..6104e2d79 100644
 --- a/codex-rs/core/src/harness/qwen_code.rs
 +++ b/codex-rs/core/src/harness/qwen_code.rs
 @@ -2,6 +2,9 @@ use crate::client_common::Prompt;
@@ -34,17 +34,20 @@ index d11fe2b77..fcc0e3e71 100644
  
  pub(crate) fn build_request(
      prompt: &Prompt,
-@@ -29,7 +34,8 @@ pub(crate) fn build_request(
+@@ -29,8 +34,10 @@ pub(crate) fn build_request(
              "content": "Got it. Thanks for the context!",
          }),
      ];
 -    messages.extend(build_qwen_messages(prompt.get_formatted_input())?);
+-    let tools = super::kimi_cli::build_tools(&prompt.tools)?;
 +    let input = normalize_input_items(prompt.get_formatted_input());
 +    messages.extend(build_qwen_messages(&input)?);
-     let tools = super::kimi_cli::build_tools(&prompt.tools)?;
++    let mut tools = super::kimi_cli::build_tools(&prompt.tools)?;
++    tools.retain(offered_to_qwen);
      let tool_kinds = prompt
          .tools
-@@ -41,6 +47,9 @@ pub(crate) fn build_request(
+         .iter()
+@@ -41,6 +48,9 @@ pub(crate) fn build_request(
          "model": model_info.slug,
          "messages": messages,
          "max_tokens": QWEN_CODE_DEFAULT_MAX_TOKENS,
@@ -54,7 +57,25 @@ index d11fe2b77..fcc0e3e71 100644
          "stream": true,
          "stream_options": {
              "include_usage": true,
-@@ -114,6 +123,38 @@ fn render_folder_listing(cwd: &Path) -> String {
+@@ -50,6 +60,17 @@ pub(crate) fn build_request(
+     Ok((request, tool_kinds))
+ }
+ 
++/// [sakura] The compatibility aliases (Bash, read, edit, ...) can't work with this harness, and the model calls them
++/// anyway, then retries. The goal tools aren't used here. Together they took 7k characters of a 32k-token context.
++fn offered_to_qwen(tool: &Value) -> bool {
++    let function = &tool["function"];
++    let is_alias = function["description"]
++        .as_str()
++        .is_some_and(|description| description.starts_with("Open Interpreter harness compatibility alias"));
++    let name = function["name"].as_str().unwrap_or_default();
++    !is_alias && !matches!(name, "get_goal" | "create_goal" | "update_goal")
++}
++
+ fn build_startup_context_message(prompt: &Prompt) -> Value {
+     let cwd = prompt
+         .cwd
+@@ -114,6 +135,38 @@ fn render_folder_listing(cwd: &Path) -> String {
      lines.join("\n")
  }
  
@@ -93,7 +114,7 @@ index d11fe2b77..fcc0e3e71 100644
  fn build_qwen_messages(
      items: &[codex_protocol::models::ResponseItem],
  ) -> Result<Vec<Value>, serde_json::Error> {
-@@ -252,7 +293,8 @@ fn build_system_prompt(prompt: &Prompt) -> String {
+@@ -252,7 +305,8 @@ fn build_system_prompt(prompt: &Prompt) -> String {
              }
              _ => None,
          })
@@ -103,7 +124,7 @@ index d11fe2b77..fcc0e3e71 100644
          .collect::<Vec<_>>()
          .join("\n\n");
      if !developer_instructions.is_empty() {
-@@ -265,3 +307,59 @@ fn build_system_prompt(prompt: &Prompt) -> String {
+@@ -265,3 +319,67 @@ fn build_system_prompt(prompt: &Prompt) -> String {
      }
      rendered
  }
@@ -138,6 +159,14 @@ index d11fe2b77..fcc0e3e71 100644
 +    }
 +
 +    #[test]
++    fn only_working_tools_are_offered() {
++        let tool = |name: &str, description: &str| json!({"function": {"name": name, "description": description}});
++        assert!(offered_to_qwen(&tool("exec_command", "Runs a command")));
++        assert!(!offered_to_qwen(&tool("Bash", "Open Interpreter harness compatibility alias for Bash.")));
++        assert!(!offered_to_qwen(&tool("create_goal", "Create a goal")));
++    }
++
++    #[test]
 +    fn lookup_moves_beside_the_question_and_other_developer_text_stays() {
 +        let items = vec![
 +            message("developer", "skills index"),
@@ -163,6 +192,116 @@ index d11fe2b77..fcc0e3e71 100644
 +        assert!(last.to_string().contains("Do it now."), "got {last}");
 +    }
 +}
+diff --git a/codex-rs/core/src/harness/qwen_code_prompt.md b/codex-rs/core/src/harness/qwen_code_prompt.md
+index 4e8a6e275..a1e872d84 100644
+--- a/codex-rs/core/src/harness/qwen_code_prompt.md
++++ b/codex-rs/core/src/harness/qwen_code_prompt.md
+@@ -80,25 +80,6 @@ When requested to perform tasks like fixing bugs, adding features, refactoring,
+ 
+ IMPORTANT: Always use the todo_write tool to plan and track tasks throughout the conversation.
+ 
+-## New Applications
+-
+-**Goal:** Autonomously implement and deliver a visually appealing, substantially complete, and functional prototype. Utilize all tools at your disposal to implement the application. Some tools you may especially find useful are 'write_file', 'edit' and 'run_shell_command'.
+-
+-1. **Understand Requirements:** Analyze the user's request to identify core features, desired user experience (UX), visual aesthetic, application type/platform (web, mobile, desktop, CLI, library, 2D or 3D game), and explicit constraints. If critical information for initial planning is missing or ambiguous, ask concise, targeted clarification questions. Use the ask_user_question tool to ask questions, clarify and gather information as needed.
+-2. **Propose Plan:** Formulate an internal development plan. Present a clear, concise, high-level summary to the user. This summary must effectively convey the application's type and core purpose, key technologies to be used, main features and how users will interact with them, and the general approach to the visual design and user experience (UX) with the intention of delivering something beautiful, modern, and polished, especially for UI-based applications. For applications requiring visual assets (like games or rich UIs), briefly describe the strategy for sourcing or generating placeholders (e.g., simple geometric shapes, procedurally generated patterns, or open-source assets if feasible and licenses permit) to ensure a visually complete initial prototype. Ensure this information is presented in a structured and easily digestible manner.
+-  - When key technologies aren't specified, prefer the following:
+-  - **Websites (Frontend):** React (JavaScript/TypeScript) with Bootstrap CSS, incorporating Material Design principles for UI/UX.
+-  - **Back-End APIs:** Node.js with Express.js (JavaScript/TypeScript) or Python with FastAPI.
+-  - **Full-stack:** Next.js (React/Node.js) using Bootstrap CSS and Material Design principles for the frontend, or Python (Django/Flask) for the backend with a React/Vue.js frontend styled with Bootstrap CSS and Material Design principles.
+-  - **CLIs:** Python or Go.
+-  - **Mobile App:** Compose Multiplatform (Kotlin Multiplatform) or Flutter (Dart) using Material Design libraries and principles, when sharing code between Android and iOS. Jetpack Compose (Kotlin JVM) with Material Design principles or SwiftUI (Swift) for native apps targeted at either Android or iOS, respectively.
+-  - **3d Games:** HTML/CSS/JavaScript with Three.js.
+-  - **2d Games:** HTML/CSS/JavaScript.
+-3. **User Approval:** Obtain user approval for the proposed plan.
+-4. **Implementation:** Use the 'todo_write' tool to convert the approved plan into a structured todo list with specific, actionable tasks, then autonomously implement each task utilizing all available tools. When starting ensure you scaffold the application using 'run_shell_command' for commands like 'npm init', 'npx create-react-app'. Aim for full scope completion. Proactively create or source necessary placeholder assets (e.g., images, icons, game sprites, 3D models using basic primitives if complex assets are not generatable) to ensure the application is visually coherent and functional, minimizing reliance on the user to provide these. If the model can generate simple assets (e.g., a uniformly colored square sprite, a simple 3D cube), it should do so. Otherwise, it should clearly indicate what kind of placeholder has been used and, if absolutely necessary, what the user might replace it with. Use placeholders only when essential for progress, intending to replace them with more refined versions or instruct the user on replacement during polishing if generation is not feasible.
+-5. **Verify:** Review work against the original request, the approved plan. Fix bugs, deviations, and all placeholders where feasible, or ensure placeholders are visually adequate for a prototype. Ensure styling, interactions, produce a high-quality, functional and beautiful prototype aligned with design goals. Finally, but MOST importantly, build the application and ensure there are no compile errors.
+-6. **Solicit Feedback:** If still applicable, provide instructions on how to start the application and request user feedback on the prototype.
+-
+ # Operational Guidelines
+ 
+ ## Tone and Style (CLI Interaction)
+@@ -163,79 +144,5 @@ When you encounter an obstacle, do not use destructive actions as a shortcut to
+ - Never push changes to a remote repository without being asked explicitly by the user.
+ 
+ 
+-# Examples (Illustrating Tone and Workflow)
+-<example>
+-user: 1 + 2
+-model: 3
+-</example>
+-
+-<example>
+-user: is 13 a prime number?
+-model: true
+-</example>
+-
+-<example>
+-user: start the server implemented in server.js
+-model: [tool_call: run_shell_command for 'node server.js' with is_background: true because it must run in the background]
+-</example>
+-
+-<example>
+-user: Refactor the auth logic in src/auth.py to use the requests library instead of urllib.
+-model: Okay, I can refactor 'src/auth.py'.
+-First, I'll analyze the code and check for a test safety net before planning any changes.
+-[tool_call: glob for path 'tests/test_auth.py']
+-[tool_call: read_file for path '/path/to/tests/test_auth.py' with offset 0 and limit 10]
+-(After analysis)
+-Great, 'tests/test_auth.py' exists and covers the core authentication logic. With this safety net in place, I can safely plan the refactoring.
+-I'll also confirm 'requests' is a dependency.
+-[tool_call: read_file for path '/path/to/requirements.txt']
+-(After analysis)
+-Looks good, 'requests' is available.
+-
+-Here's the plan:
+-1.  Replace the 'urllib' calls with 'requests'.
+-2.  Add proper 'try...except' error handling for the new network calls.
+-3.  Remove the old 'urllib' import.
+-4.  Run the project's linter and tests to verify the changes.
+-
+-[tool_call: edit for path 'src/auth.py' replacing old content with new content]
+-Refactoring complete. Running verification...
+-[tool_call: run_shell_command for 'ruff check src/auth.py && pytest']
+-(After verification passes)
+-All checks passed. This is a stable checkpoint.
+-Would you like me to write a commit message and commit these changes?
+-</example>
+-
+-<example>
+-user: Delete the temp directory.
+-model: I can run `rm -rf /path/to/project/temp`. This will permanently delete the directory and all its contents.
+-</example>
+-
+-<example>
+-user: Write tests for someFile.ts
+-model:
+-Okay, I can write those tests. First, I'll read someFile.ts to understand its functionality.
+-[tool_call: read_file for path '/path/to/someFile.ts']
+-Now I'll look for existing or related test files to understand current testing conventions and dependencies.
+-[tool_call: read_file for path '/path/to/existingTest.test.ts']
+-(After reviewing existing tests and the file content)
+-[tool_call: write_file for path '/path/to/someFile.test.ts']
+-I've written the tests. Now I'll run the project's test command to verify them.
+-[tool_call: run_shell_command for 'npm run test']
+-(After verification passes)
+-All checks passed. This is a stable checkpoint.
+-</example>
+-
+-<example>
+-user: Where are all the 'app.config' files in this project? I need to check their settings.
+-model:
+-[tool_call: glob for pattern './**/app.config']
+-(Assuming GlobTool returns a list of paths like ['/path/to/moduleA/app.config', '/path/to/moduleB/app.config'])
+-I found the following 'app.config' files:
+-- /path/to/moduleA/app.config
+-- /path/to/moduleB/app.config
+-To help you check their settings, I can read their contents. Which one would you like to start with, or should I read all of them?
+-</example>
+-
+ # Final Reminder
+ Your core function is efficient and safe assistance. Balance extreme conciseness with the crucial need for clarity, especially regarding safety and potential system modifications. Always prioritize user control and project conventions. Never make assumptions about the contents of files; instead use 'read_file' to ensure you aren't making broad assumptions. Finally, you are an agent - please keep going until the user's query is completely resolved.
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
 index b6efe1d68..56dd9a7aa 100644
 --- a/codex-rs/core/src/session/mod.rs
@@ -256,6 +395,34 @@ index aa0c7b163..0c1d0b18a 100644
      }
  }
  #[cfg(test)]
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index 105783518..2b8e097ec 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -89,6 +89,8 @@ use codex_tools::ToolName;
+ use codex_utils_output_truncation::approx_tokens_from_byte_count;
+ use codex_utils_path_uri::PathUri;
+ 
++const SAKURA_WORKER_YIELD_TIME_MS: u64 = 2 * 60 * 60 * 1000;
++
+ const UNIFIED_EXEC_ENV: [(&str, &str); 10] = [
+     ("NO_COLOR", "1"),
+     ("TERM", "dumb"),
+@@ -630,7 +632,13 @@ impl UnifiedExecProcessManager {
+             }
+         };
+ 
+-        let yield_time_ms = clamp_yield_time(request.yield_time_ms);
++        // [sakura] A worker is a whole job on the one model slot. If the caller came back to poll, each poll would be a model
++        // turn that fights the worker for that slot, so hold the result until it's finished.
++        let yield_time_ms = if request.command.iter().any(|part| part.contains("sakura-worker")) {
++            SAKURA_WORKER_YIELD_TIME_MS
++        } else {
++            clamp_yield_time(request.yield_time_ms)
++        };
+         // For the initial exec_command call, we both stream output to events
+         // (via start_streaming_output above) and collect a snapshot here for
+         // the tool response body.
 diff --git a/codex-rs/exec/src/main.rs b/codex-rs/exec/src/main.rs
 index 61eaecdd0..5784372c9 100644
 --- a/codex-rs/exec/src/main.rs

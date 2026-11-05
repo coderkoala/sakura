@@ -76,7 +76,8 @@ flowchart TD
 - **Skills.** 39 specialist personas: office/student (xlsx, docx, pptx, pdf with safe page breaks,
   step-by-step spellcheck), the full offensive-security suite, OSINT, reversing, forensics, networking,
   databases, media and translation.
-- **Memory.** Say *"remember"* and it distils durable facts about me and reuses them, becoming mine over time.
+- **Memory.** Say *"remember"* and it saves a durable fact. Two small plain-text stores, capped at 3200 characters between them, load into every new session. A full store refuses the write, so the agent has to choose what to drop. Secrets and instruction-like text are refused on the way in and withheld again on load, because a sync can change the files. `sakura-recall` searches past conversations with SQLite full-text search, no model involved. The design follows the ideas in [Hermes Agent](https://github.com/NousResearch/hermes-agent)'s memory, written from scratch for a 32k context.
+- **Coordinator.** `??` opens a session that holds the plan and never touches the work: a guard refuses anything that changes something. It hands each change to `sakura-worker`, a disposable run in a fresh context that returns a short report. A job passes only if your verify command exits 0, so the worker can't talk its way through, and a failure goes to a new worker. The plan survives compaction in a state file. Any session can call a worker too.
 - **GPU.** A driver module that actually works: graphics-drivers PPA, the full build/DKMS prereq stack,
   per-kernel module builds, Secure-Boot MOK enrolment, `nvidia-drm.modeset` + initramfs.
 - **Version control across devices.** `dotfiles-autosync` (systemd timer): commit → rebase → push, never
@@ -124,7 +125,17 @@ The lower budget stands in for a 6 GB card by limiting the cache; it hasn't run 
 | `bin/` | `web_search` · `wikipedia` · `fetch_url` · `curated_search` CLIs. |
 | `hooks/` | `web_ground.py` — the time-sensitive grounding hook. |
 
+## Measuring it
+
+```bash
+python3 evals/run.py              # 31 cases, graded against live sources
+python3 evals/ssh_chain.py        # ssh, pull and deploy on a throwaway container, graded inside it (needs docker)
+python3 evals/coordinator.py      # workers and a coordinator session, graded by the repo's real state
+```
+
 ## Install
+
+Built for 8 GB of VRAM and up. Smaller cards are untested.
 
 Linux with an NVIDIA GPU, Python 3.11+, git and [Ollama](https://ollama.com/download).
 

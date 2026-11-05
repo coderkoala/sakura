@@ -1,16 +1,21 @@
 ---
 name: memory
-description: Save a durable fact about the user when they say remember, note that, or commit to memory
+description: Save, change or forget a durable fact when the user says remember, note that, commit to memory or forget
 ---
 
-When I say "remember", "note that", "commit to memory", or clearly state a lasting preference or fact about me, my
-machines, or how I want you to work:
+Use `sakura-memory`. Don't edit its files.
 
-1. Distil it to one or two short, durable sentences — the fact itself, not the conversation around it. Resolve
-   relative dates to absolute. Drop anything transient or secret (no passwords, keys, tokens).
-2. Append it as a `- ` bullet to `~/.sakura/memories/MEMORY.md` (create the file if missing), each bullet on
-   its own line. Read the file first and skip near-duplicates; update the existing line instead of adding a second.
-3. Confirm in one line: `remembered: <the fact>`.
+1. Boil it down to one short sentence: the fact, not the conversation. Turn relative dates into absolute ones.
+2. Save it: `sakura-memory add user "<fact>"` for who the user is and how they work, `sakura-memory add notes "<fact>"` for machines, projects and lessons learned.
+3. If the store is full, it refuses and lists what's there. Remove what no longer matters, or `replace` two facts with one, then add again.
+4. Confirm in one line: `remembered: <the fact>`.
 
-This is also picked up by the automatic memory pass, so over time the things you learn about me compound and you
-become mine. Use what you remember without being asked. If I say "forget X", remove the matching bullet.
+To change a fact: `sakura-memory replace <store> "<unique part of it>" "<new fact>"`. For "forget X": `sakura-memory remove <store> "<unique part>"`.
+
+It doesn't belong in memory if it's:
+- a secret (these are refused)
+- progress on the current task
+- a step-by-step procedure (that's a skill)
+- something a command or the repo can tell you
+
+Saved facts reach the prompt at the next session. They're on disk straight away.
