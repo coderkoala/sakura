@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""edit_file — change a file by exact text, with no shell quoting to get wrong.
+
+  edit_file FILE <<'EDIT'
+  @@old
+  the exact lines to replace
+  @@new
+  what they become
+  @@end
+  EDIT
+
+Each @@old must match exactly once, or nothing is changed and it says why. Several blocks apply together, all or none.
+An empty @@old is refused. --all replaces every match of each block.
+
+  edit_file --create FILE <<'EOF'     write a new file from stdin; refuses to overwrite one, unless --force
+  ...
+  EOF
+
+Prints the change as a diff.
+"""
+import difflib
+import os
+import select
+import stat
+import sys
+import tempfile
+
+
+def fail(message):
+    sys.exit(f"edit_file: not changed. {message}")
+
+
+def read_stdin():
+    # An open pipe with nothing coming would hang a shell tool forever.
+    if sys.stdin.isatty() or not select.select([sys.stdin], [], [], 2)[0]:
+        fail("It needs its text on stdin, as a heredoc. See: edit_file --help")
+    return sys.stdin.read()
+
+
+def parse(text):
+    blocks, old, new, state = [], [], [], None
+    for line in text.splitlines(keepends=True):
+        mark = line.strip()
+        if mark == "@@old" and state in (None, "done"):
+            old, new, state = [], [], "old"
+        elif mark == "@@new" and state == "old":
+            state = "new"
+        elif mark == "@@end" and state == "new":
+            blocks.append(("".join(old), "".join(new)))
+            state = "done"
+        elif state == "old":
+            old.append(line)
+        elif state == "new":
+            new.append(line)
+        elif mark and state in (None, "done"):
+            fail(f"Unexpected text outside a block: {line.strip()[:80]!r}. Each change is @@old, the old lines, @@new, the new lines, @@end.")
+    if state in ("old", "new"):
+        fail("A block isn't closed: it needs @@old, @@new and @@end, each on its own line.")
+    if not blocks:
+        fail("No change found. Each change is @@old, the old lines, @@new, the new lines, @@end.")
+    return blocks
+
+
+def line_of(text, pos):
+    return text.count("\n", 0, pos) + 1
+
+
+def closest(text, old):
+    first = next((l for l in old.splitlines() if l.strip()), "")
+    lines = text.splitlines()
+    hits = difflib.get_close_matches(first, lines, n=1, cutoff=0.5)
+    if not hits:
+        return "Nothing like it is in the file. Read it with view_file."
+    return f"The closest line is {lines.index(hits[0]) + 1}: {hits[0][:120]!r}. Copy the text exactly, spaces included."
+
+
+def write(path, text, mode):
+    d = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".edit-")
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def show(path, before, after):
+    diff = list(difflib.unified_diff(before.splitlines(), after.splitlines(), path, path, lineterm="", n=1))
+    print("\n".join(diff[:60]))
+    if len(diff) > 60:
+        print(f"[{len(diff) - 60} more diff lines]")
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or "-h" in a or "--help" in a:
+        sys.exit(__doc__)
+    flags = {x for x in a if x.startswith("--")}
+    files = [x for x in a if not x.startswith("--")]
+    if len(files) != 1 or flags - {"--create", "--force", "--all"}:
+        sys.exit(__doc__)
+    path = files[0]
+    if "--create" in flags:
+        if os.path.lexists(path) and "--force" not in flags:
+            fail(f"{path} already exists. To change it, use a block with @@old. To replace all of it, add --force.")
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        text = read_stdin()
+        write(path, text, stat.S_IMODE(os.stat(path).st_mode) if os.path.exists(path) else 0o644)
+        print(f"wrote {path}: {len(text.splitlines())} lines")
+        return
+    try:
+        with open(path, encoding="utf-8", newline="") as f:
+            before = f.read()
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError as e:
+        fail(f"{path}: {e.strerror}. For a new file, use --create.")
+    except UnicodeDecodeError:
+        fail(f"{path} isn't text.")
+    after = before
+    for i, (old, new) in enumerate(parse(read_stdin()), 1):
+        if not old.strip():
+            fail(f"Block {i} has nothing in @@old.")
+        count = after.count(old)
+        if count == 0 and old.endswith("\n") and after.endswith(old[:-1]):
+            old, new, count = old[:-1], new[:-1] if new.endswith("\n") else new, 1  # the file's last line has no newline
+        if count == 0:
+            fail(f"Block {i} doesn't match. {closest(after, old)}")
+        if count > 1 and "--all" not in flags:
+            places, at = [], -1
+            while (at := after.find(old, at + 1)) >= 0 and len(places) < 8:
+                places.append(str(line_of(after, at)))
+            fail(f"Block {i} matches {count} places (lines {', '.join(places)}). Add nearby lines to @@old and @@new to pick one, or use --all.")
+        after = after.replace(old, new)
+    if after == before:
+        print(f"{path}: already says that, nothing to change")
+        return
+    write(path, after, mode)
+    show(path, before, after)
+
+
+if __name__ == "__main__":
+    main()

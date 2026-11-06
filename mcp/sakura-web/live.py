@@ -243,9 +243,11 @@ def cve(term):
 
     def affects(c):
         """The product itself, by NVD's product records or the description's opening, over a passing mention."""
-        products = json.dumps(c.get("configurations") or []).lower()
-        opening = next((x["value"] for x in c.get("descriptions", []) if x.get("lang") == "en"), "")[:120].lower()
-        return all(w in products for w in words) or all(w in opening for w in words)
+        cpes = re.findall(r"cpe:2\.3:[aoh]:([^:]*):([^:]*):", json.dumps(c.get("configurations") or []).lower())
+        if any(all(w in product for w in words) for _, product in cpes):
+            return 2
+        opening = next((x["value"] for x in c.get("descriptions", []) if x.get("lang") == "en"), "")[:60].lower()
+        return 1 if all(w in opening for w in words) else 0
     found = sorted((v["cve"] for v in found), key=lambda c: (affects(c), c.get("published", "")), reverse=True)[:8]
     try:
         kev = {v["cveID"]: v for v in get_json("https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", timeout=20)["vulnerabilities"]}

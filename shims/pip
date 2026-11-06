@@ -1,0 +1,8 @@
+#!/bin/sh
+# As with python: use a real pip if there is one, otherwise python3's. In an environment python3 won't let it
+# touch, it prints what to do, and uv and venvs both work.
+here=$(dirname "$(readlink -f "$0")")
+PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$here" | paste -sd:)
+export PATH
+command -v pip >/dev/null 2>&1 && exec pip "$@"
+exec python3 -m pip "$@"

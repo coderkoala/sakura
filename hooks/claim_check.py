@@ -166,7 +166,8 @@ ANNOUNCE = re.compile(
     r"(?:(?:i'?ll|i will|i'?m going to|i am going to|let me|let's|let us|going to)\b|step \d+[:.)])",
     re.I,
 )
-MAX_CONTINUES = 3  # per turn: never trap the model in a loop
+MAX_CONTINUES = 3  # in a row: never trap the model in a loop
+MAX_TOTAL_CONTINUES = 12
 
 
 # A progress note, not an ending: "Now creating the archive.", "Step 2 done.", "**2. Write the version:**"
@@ -174,8 +175,17 @@ PROGRESS = re.compile(r"(?:\bnow\s+\w+ing\b|\bnext\b[,:]?\s|\bstep\s+\d+\b|^\w+i
 
 
 # A command for the user to run, when the request was for the work itself.
-WRITES_IN_FENCE = re.compile(r"```[a-z]*\n(?:(?!```).)*?(?:(?:^|\s)>>?\s*[\w/~$.]|\btee\s|\bsudo\s|\bchmod\s|\bcp\s|\bmv\s)", re.S)
+WRITES_IN_FENCE = re.compile(r"```[a-z]*\n(?:(?!```).)*?(?:(?:^|\s)>>?\s*[\w/~$.]|\btee\s|\bsudo\s|\bchmod\s|\bcp\s|\bmv\s|\bedit_file\s|\bsakura-tool\s+keep\b)", re.S)
 ASKING_HOW = re.compile(r"^\W*(how\b|what\b|why\b|which\b|explain\b|show me\b|can you (?:explain|show)\b|write me a (?:command|one-?liner)\b|give me a (?:command|one-?liner)\b)|\?\s*$", re.I)
+
+
+# Nothing but code, as an answer to a request to get something done: the tool call came out as text.
+ONLY_CODE = re.compile(r"^\s*(?:```[^\n]*\n.*\n```|`[^`\n]+`)\s*$", re.S)
+WANTS_ACTION = re.compile(r"\b[\w-]+\.[a-z]{1,5}\b|\b(?:run it|then run|remember|save|create|install|delete|deploy|commit|restart)\b", re.I)
+
+
+def wrote_out_the_call(answer, prompt):
+    return bool(ONLY_CODE.match(answer or "")) and bool(WANTS_ACTION.search(prompt or "")) and not ASKING_HOW.search((prompt or "").strip())
 
 
 def handed_over(answer, prompt):
@@ -191,6 +201,26 @@ KEPT = re.compile(r"\bkept: \S+, at ")
 
 def tool_not_kept(prompt, evidence):
     return bool(LASTING.search(prompt or "") and WROTE_SCRIPT.search(evidence or "") and not KEPT.search(evidence or ""))
+
+
+# A sum done in the head. Local models get them wrong and sound just as sure. This has to ask for an actual sum: "what does
+# 204 mean" once sent the model hunting for numbers, all the way to a URL it had been told not to open.
+ARITHMETIC = re.compile(r"\b(?:the\s+(?:grand\s+)?total|their\s+total|in\s+total|sum\s+of|add(?:ed)?\s+(?:them\s+)?up|average\s+of|mean\s+of|how\s+many\s+in\s+all|altogether)\b", re.I)
+COMPUTED = re.compile(r"\bpython3?\b|\bbc\b|\bawk\b|\$\(\(|\bexpr\b|\bwc\b|\bnumfmt\b")
+
+
+def arithmetic_reason(answer, prompt, evidence, ran_tools=True):
+    if not ran_tools or not ARITHMETIC.search(prompt or "") or not re.search(r"\d", answer or "") or COMPUTED.search(evidence or ""):
+        return None
+    return ("The user asked for a sum, and you didn't compute it with a command. Add the numbers you already have using `python3 -c`, then give your "
+            "whole answer again with that result in it, everything else unchanged. Don't look anything else up. If no sum was actually asked for, "
+            "repeat your answer exactly as it was.")
+
+
+def bare_done(answer, prompt, results):
+    """A one-word ending on a numbered job, with fewer commands run than steps asked for."""
+    total = steps_in(prompt)
+    return bool(total and results is not None and len((answer or "").strip()) <= 40 and len(results) < total)
 
 
 def steps_in(prompt):
@@ -278,15 +308,23 @@ def completion_reason(answer, results, prompt=""):
     return None
 
 
-def _bump(turn_id):
-    """Count continuations for this turn; returns the new count."""
+def _bump(turn_id, progress=0):
+    """Count continuations for this turn; returns the new count. Progress restarts the count, up to MAX_TOTAL_CONTINUES in
+    the whole turn. Callers only report progress on a job the user numbered: elsewhere, the limit is what stops a model that
+    can't reach something from hunting further and further afield, and the last chance is what makes it say so."""
     d = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "sakura-hooks")
     try:
         os.makedirs(d, exist_ok=True)
         p = os.path.join(d, f"stop-{re.sub(r'[^A-Za-z0-9_-]', '', turn_id or 'x')}")
-        n = int(open(p).read() or 0) + 1 if os.path.exists(p) else 1
-        open(p, "w").write(str(n))
-        return n
+        n, total, seen = 0, 0, 0
+        if os.path.exists(p):
+            parts = (open(p).read().split() + ["0", "0", "0"])[:3]
+            n, total, seen = int(parts[0]), int(parts[1]), int(parts[2])
+        if progress > seen:
+            n = 0
+        n, total = n + 1, total + 1
+        open(p, "w").write(f"{n} {total} {progress}")
+        return n if total <= MAX_TOTAL_CONTINUES else MAX_CONTINUES + 1
     except Exception:
         return MAX_CONTINUES + 1
 
@@ -311,11 +349,17 @@ def main():
                 "installed by hand, then run this with its real input and expected output:\n"
                 "sakura-tool keep NAME ./FILE --about \"one line\" <<'CHECK'\nprintf 'input\\n' | NAME | grep -qx 'expected'\nCHECK\n"
                 "Report what it prints. If it can't be kept, tell the user that.")
+    if not cont and path and bare_done(answer, prompt, turn_results(path)):
+        cont = ("The user numbered their steps, and you've run fewer commands than there are steps. Check each one with a command, do what's "
+                "missing, and report what each one's output showed.")
+    if not cont and wrote_out_the_call(answer, prompt) and not used_tools(path):
+        cont = ("You wrote that out as text, so nothing happened. Do it now with an actual tool call, then report what the output shows. "
+                "If the user only wanted to read the code, give it again and say that nothing was run.")
     if not cont and handed_over(answer, prompt) and not used_tools(path):
         cont = ("You wrote out commands and ran nothing, so nothing has happened. Run them yourself now with tool calls, then report "
                 "what the output shows. If the user only wanted to read the commands, say that nothing was run.")
     if cont:
-        n = _bump(data.get("turn_id"))
+        n = _bump(data.get("turn_id"), len(turn_results(path) or []) if path and steps_in(prompt) else 0)
         if n == MAX_CONTINUES:  # the last chance: a turn must end with an answer, even if the answer is "I couldn't"
             cont = ("Stop trying new things now. Write your final answer from what you've seen: what worked, what didn't, "
                     "and what's blocking. If it couldn't be done, say that plainly. Make no more tool calls.")
@@ -325,9 +369,24 @@ def main():
     # 2. Claims: checked once per turn (stop_hook_active means we already sent it back once).
     if data.get("stop_hook_active"):
         return
-    reason = completion_reason(answer, turn_results(path) if path else None, prompt) or decide(answer, prompt, evidence, grounded, fact)
+    reason = completion_reason(answer, turn_results(path) if path else None, prompt) or arithmetic_reason(answer, prompt, evidence, bool(turn_results(path) if path else None)) or decide(answer, prompt, evidence, grounded, fact)
     if reason:
         print(json.dumps({"decision": "block", "reason": reason}))
+
+
+def _bump_selftest():
+    import tempfile
+    old = os.environ.get("XDG_CACHE_HOME")
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["XDG_CACHE_HOME"] = d
+        seen = [_bump("t", p) for p in (1, 1, 1, 2, 2)]  # three stalls, a tool run, one more stall
+        stalled = [_bump("u", 0) for _ in range(5)]
+        capped = [_bump("v", i) for i in range(1, 15)]
+    if old is None:
+        del os.environ["XDG_CACHE_HOME"]
+    else:
+        os.environ["XDG_CACHE_HOME"] = old
+    return seen == [1, 2, 3, 1, 2] and stalled[3] > MAX_CONTINUES and capped[-1] > MAX_CONTINUES and capped[10] == 1
 
 
 def selftest():
@@ -408,6 +467,21 @@ def selftest():
         (tool_not_kept(make, "#!/bin/sh\nkept: x, at /a/x"), False, "kept"),
         (tool_not_kept("fix the script", "#!/bin/sh"), False, "nobody asked for it to last"),
         (tool_not_kept(make, "ls"), False, "no script yet"),
+        (wrote_out_the_call("```python\nprint(1)\n```", "write fizzbuzz.py that prints it, then run it"), True, "script written out"),
+        (wrote_out_the_call('`sakura-memory add user "x"`', "remember that my host is bluefin"), True, "memory call written out"),
+        (wrote_out_the_call("```python\nprint(1)\n```", "write a python function that adds two numbers"), False, "they asked for a snippet"),
+        (wrote_out_the_call("```bash\nls\n```", "how do I save a file listing?"), False, "they asked how"),
+        (wrote_out_the_call("Saved it. `x`", "remember x"), False, "more than code"),
+        (bool(arithmetic_reason("Total: 7174", "give me the total", "cat a")), True, "a total from the head"),
+        (bool(arithmetic_reason("Total: 7172", "give me the total", 'python3 -c "print(1+2)"')), False, "a computed total"),
+        (bool(arithmetic_reason("It has 3 files", "list the files", "ls")), False, "no sum asked for"),
+        (bool(arithmetic_reason("HTTP 204 means no content, 2xx is success", "what does HTTP status 204 mean?", "")), False, "'mean' isn't a sum"),
+        (bool(arithmetic_reason("Total 7", "the total of a and b", "cat a", False)), False, "nothing was run to add up"),
+        (handed_over("```\nedit_file --create f.py <<'EOF'\nprint(1)\nEOF\n```", "write fizzbuzz.py"), True, "edit_file left unrun"),
+        (bare_done("Done.", "do: 1) a, 2) b, 3) c", [0]), True, "bare done"),
+        (bare_done("Done.", "do: 1) a, 2) b", [0, 0]), False, "a command per step"),
+        (bare_done("Done.", "fix it", [0]), False, "not numbered"),
+        (_bump_selftest(), True, "progress restarts the continuation count"),
         (bool(completion_reason("204 means the request completed successfully.", [], "what does HTTP status 204 mean?")), False, "an explanation isn't a claim"),
         (bool(completion_reason("I fixed it.", [], "fix the bug")), True, "a claim with nothing run"),
     ):

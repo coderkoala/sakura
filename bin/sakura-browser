@@ -22,7 +22,8 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-DIR = os.path.expanduser(os.environ.get("SAKURA_BROWSER_DIR") or "~/.sakura/browser")
+# A worker runs with nobody watching, so it gets a profile of its own, with none of the user's logins.
+DIR = os.path.expanduser(os.environ.get("SAKURA_BROWSER_DIR") or ("~/.sakura/browser-worker" if os.environ.get("SAKURA_WORKER") else "~/.sakura/browser"))
 SOCK = os.path.join(DIR, "sock")
 PYTHON = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "sakura", "webenv", "bin", "python")
 

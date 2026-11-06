@@ -20,6 +20,7 @@ Each project also gets a state file for the coordinator, loaded the same way (60
 Where: $SAKURA_MEMORY_DIR, else ~/.sakura/memory.
 """
 import fcntl
+import hashlib
 import os
 import re
 import subprocess
@@ -40,6 +41,8 @@ SECRET = re.compile(
     SECRET_SHAPES.pattern +
     r"|\b(?:password|passwd|passphrase|pwd|api[_ -]?key|secret|token)\b\s*(?:is|=|:)\s*\S{4,}"
     r"|\b(?:password|passwd|passphrase|pwd|api[_ -]?key|secret|token)\b\W+(?=\S*[\d!@#$%^&*_])\S{4,}", re.I)
+# The same thing in other words: a credential word, then a value with a digit or symbol in it, or a "user / value" pair.
+CREDENTIAL = re.compile(r"\b(?:pass|pw|pwd|login|logins|cred|creds|credentials?|auth|pin|keyphrase)\b\W+(?:\w+\W+){0,2}?(?=\S*[\d!@#$%^&*_])\S{4,}", re.I)
 INJECTION = re.compile(
     r"\b(?:ignore|disregard|forget)\b.{0,30}\b(?:previous|prior|above|earlier|all)\b.{0,30}\b(?:instructions?|rules?|prompts?)\b"
     r"|\byou are now\b|<\s*/?\s*(?:system|developer|lookup|memory)\b|^\s*(?:system|assistant)\s*:"
@@ -47,10 +50,43 @@ INJECTION = re.compile(
 INVISIBLE = re.compile("[​-‏‪-‮⁠-⁤⁦-⁯﻿\U000e0000-\U000e007f]")
 
 
+def _refused_path():
+    return os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "sakura-hooks", "refused-secrets")
+
+
+def _value_hashes(text):
+    """Fingerprints of what could be the secret in a text: any word with a digit or symbol in it."""
+    words = [w.strip(".,;:'\"()[]`") for w in text.split()]
+    return {hashlib.sha256(w.encode()).hexdigest() for w in words if len(w) >= 4 and re.search(r"[\d!@#$%^&*_]", w)}
+
+
+def _remember_refusal(text):
+    """A refused secret stays refused in any wording. Only hashes are kept, on this machine, outside the synced memory."""
+    try:
+        path = _refused_path()
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        with open(path, "a") as f:
+            f.write("".join(h + "\n" for h in _value_hashes(text)))
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _refused_before(text):
+    try:
+        with open(_refused_path()) as f:
+            return bool(_value_hashes(text) & set(f.read().split()))
+    except OSError:
+        return False
+
+
 def flagged(text):
     """Why this text can't go in memory, or None."""
-    if SECRET.search(text):
+    if SECRET.search(text) or CREDENTIAL.search(text):
+        _remember_refusal(text)
         return "it looks like a secret"
+    if _refused_before(text):
+        return "it contains a value already refused as a secret. Tell the user you won't store it, and don't try other wordings"
     if INJECTION.search(text):
         return "it reads like an instruction to the agent, not a fact"
     if INVISIBLE.search(text):

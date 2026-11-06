@@ -40,6 +40,7 @@ def gate():
         refused("a check that proves nothing", "greeter", GOOD, "proves nothing", check="true")
         refused("a check that only shows the name exists", "greeter", GOOD, "stand-in", check="type greeter")
         refused("a check that only looks at the exit code", "greeter", GOOD, "stand-in", check="greeter")
+        refused("a check that calls it by path", "greeter", GOOD, "by its path", check=f"{tmp}/script | grep -qx hello-from-tool")
         refused("a check that fails", "greeter", "#!/bin/sh\necho wrong\n", "exited 1")
         refused("a name that's taken", "ls", GOOD, "already has the name", check="ls --nope-not-a-flag")
         refused("a bad name", "../evil", GOOD, "usable name")
@@ -164,9 +165,13 @@ def worker_keeps(tools, cwd, env):
                         "Write a small script called upcase that uppercases stdin, and keep it with sakura-tool so later sessions have it."],
                        cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=1200)
     print(r.stdout[-500:])
+    # As with grows: the model has root, so a miss can land on the real machine, and would then take the name.
+    strays = [p for p in ("/usr/local/bin/upcase", os.path.expanduser("~/.local/bin/upcase"), os.path.expanduser("~/bin/upcase")) if os.path.exists(p)]
+    for p in strays:
+        subprocess.run(["sudo", "-A", "rm", "-f", p], capture_output=True)
     tool = os.path.join(tools, "bin", "upcase")
     out = subprocess.run([tool], input="abc\n", capture_output=True, text=True).stdout if os.path.exists(tool) else ""
-    return {"worker passed": r.returncode == 0, "the tool really works": out.strip() == "ABC"}
+    return {"worker passed": r.returncode == 0, "the tool really works": out.strip() == "ABC", "nothing landed outside the gate": not strays}
 
 
 LIVE = {"worker-keeps": worker_keeps, "grows": grows, "uses-kept": uses_kept, "one-off-not-kept": one_off_not_kept}

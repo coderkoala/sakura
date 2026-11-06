@@ -82,8 +82,10 @@ def sources():
     o = live("cve", "CVE-2021-44228")
     res["cve: Log4Shell is critical and exploited"] = "CVSS 10" in o and "EXPLOITED" in o
     o = live("cve", "openssl")
-    first = next((l for l in o.splitlines()[2:3]), "")
-    res["cve: the product before passing mentions"] = "openssl" in first.lower()
+    # NVD's own product record for the first result, not the text that ranked it.
+    first = re.search(r"CVE-\d{4}-\d+", o)
+    record = get(f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={first.group(0)}") if first else ""
+    res["cve: the product before passing mentions"] = bool(re.search(r"cpe:2\.3:[aoh]:openssl:openssl:", record)) or "openssl" in " ".join(o.splitlines()[1:4]).lower()
     res["vuln: an old lodash has known holes"] = "known vulnerabilities in lodash" in (o := live("vuln", "npm", "lodash", "4.17.0")) and "GHSA-" in o
     want = truth_python()
     res["eol: matches python.org"] = ".".join(map(str, want)) in live("eol", "python")

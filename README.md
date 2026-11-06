@@ -80,6 +80,8 @@ flowchart TD
 - **What's true right now.** A small local model's training is always out of date, so `live` asks the sources that publish the answer: news feeds, weather, exchange rates, vulnerabilities and whether they're being exploited, release notes, support dates, papers and statistics. No keys or accounts, and every answer carries its source and date. The router injects the right lookup before the model answers, so it doesn't have to remember to look. `live research` searches and reads the top pages in one step. Your question's terms reach the source being asked, such as Open-Meteo or GitHub, so a lookup isn't private from that source.
 - **Web access, all on your machine.** `sakura-web-setup` adds a local SearXNG for search (your queries reach the search engines it asks, and nothing else does), main-text extraction, and a headless browser for pages built by JavaScript. No account, API key or third-party service. A site that refuses is taken at its word: Sakura reports it and uses another source, or asks you.
 - **A browser you share with it.** `sakura-browser` drives a window on your screen that keeps its logins, and shows the agent a numbered list of what it can click or type in. CAPTCHAs, human checks and passwords stay yours: the agent has no elements to act on while a check is up, can never type a password, and asks you, then carries on once you've dealt with it.
+- **Its own documents.** `rag` searches your files by meaning and keywords, with local embeddings on the CPU. Nothing leaves the machine, and secrets and generated folders are skipped.
+- **Careful with files and context.** `view_file` pages through a file with line numbers. `edit_file` changes exact text and refuses if it doesn't match exactly once. When command output would overflow a small context, the engine cuts the oldest output to its ends before it can crash the session.
 - **Tools it grows itself.** When you ask for a command that should last and nothing installable does the job, Sakura writes a script and runs `sakura-tool keep`. The script's own check runs three times in an empty directory: it has to fail without the tool, fail against a stand-in that does nothing, and pass with the real one. Kept tools come last on PATH, so one can't stand in for a real command, and the prompt lists them in later sessions. A guard refuses scripts written straight into a PATH directory, and a Stop hook sends the turn back if a script you asked to keep wasn't kept. This is for explicit requests today: it doesn't reliably decide to keep a tool unprompted.
 - **Coordinator.** `??` opens a session that holds the plan and never touches the work: a guard refuses anything that changes something. It hands each change to `sakura-worker`, a disposable run in a fresh context that returns a short report. A job passes only if your verify command exits 0, so the worker can't talk its way through, and a failure goes to a new worker. The plan survives compaction in a state file. Any session can call a worker too.
 - **GPU.** A driver module that actually works: graphics-drivers PPA, the full build/DKMS prereq stack,
@@ -112,9 +114,7 @@ The lower budget stands in for a 6 GB card by limiting the cache; it hasn't run 
 
 ## Roadmap
 
-- Wire the RAG MCP (sqlite-vec + local embeddings) live — scaffolded, not yet serving.
-- Email (`himalaya`) + `pass` first-run setup, and the mail-check timer, enabled end to end.
-- End-to-end validation of the office/student skills.
+- Email: `sakura-mail-setup` is written but hasn't been run against a real mail server yet.
 - A heavier muscle model as the hardware grows (the tiers are already config switches).
 
 ## Layout
@@ -147,7 +147,7 @@ Linux with an NVIDIA GPU, Python 3.11+, git and [Ollama](https://ollama.com/down
 git clone https://github.com/coderkoala/sakura && cd sakura
 ./install.sh                                   # tells you what's still missing
 ollama pull huihui_ai/qwen3.5-abliterated:9b
-# build the binary: patches/README.md
+# the engine comes from the release; to build it yourself: SAKURA_NO_BINARY=1 and patches/README.md
 sakura-launch
 ```
 

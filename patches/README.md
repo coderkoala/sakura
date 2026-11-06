@@ -1,6 +1,6 @@
 # Engine patch
 
-The `sakura` binary is Open Interpreter (a Rust fork of Codex) plus `engine.patch`. Build it on any device:
+The `sakura` binary is Open Interpreter (a Rust fork of Codex) plus `engine.patch`. `install.sh` downloads the matching build from this version's GitHub release (Linux x86_64) and verifies its checksum, so you only need this page to build it yourself, with `SAKURA_NO_BINARY=1`. To build it:
 
     git clone https://github.com/OpenInterpreter/open-interpreter sakura-src && cd sakura-src
     git checkout "$(cat <this repo>/patches/ENGINE_BASE)"
@@ -10,6 +10,6 @@ The `sakura` binary is Open Interpreter (a Rust fork of Codex) plus `engine.patc
 
 What it changes: Sakura's name and config home, no network at startup, and in the qwen-code harness: thinking
 off (answers were landing in `reasoning` and reaching the user as silence), `<lookup>` context placed beside the
-question instead of mid system prompt, and Stop hook prompts actually delivered to the model.
+question instead of mid system prompt, and Stop hook prompts actually delivered to the model. It also cuts the oldest tool output before a small context can overflow, and hides the MCP resource tools nothing here serves.
 
 Regenerate after changing the engine: `git -C ~/sakura-src diff "$(cat patches/ENGINE_BASE)" > patches/engine.patch`

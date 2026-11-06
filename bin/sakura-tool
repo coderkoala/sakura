@@ -125,6 +125,9 @@ def keep(args):
     why = refusal_for(args.name, args.file, args.about, args.check)
     if why:
         sys.exit(f"not kept: {why}")
+    if re.search(r"(?:^|[\s|;&(])(?:\./|/|~/)\S*" + re.escape(os.path.basename(args.file)) + r"\b", args.check) or os.path.abspath(args.file) in args.check:
+        sys.exit(f"not kept: the check calls the script by its path. It has to call it by name, as {args.name}, or it won't test the kept copy. Nothing else needs installing: "
+                 f"printf 'input\\n' | {args.name} | grep -qx 'expected'")
     code, out = run_check(args.check, path_without_tools())
     if code == 0:
         sys.exit("not kept: the check passes without the tool too, so it proves nothing. Make it fail unless the tool does its job.\n"
@@ -143,7 +146,7 @@ def keep(args):
         code, out = run_check(args.check, stage + os.pathsep + path_without_tools())
         if code:
             sys.exit(f"not kept: the check exited {code} with the tool in place. It runs in an empty directory with the tool on PATH: call it as {args.name}, "
-                     "with no path, and give it its input with printf or a heredoc. Fix the tool or the check and run keep again. Don't install it by hand.\n"
+                     "with no path, and give it its input with printf or a heredoc, with a newline: printf 'x\\n'. Each line of the check is a command, and the last one's exit decides. Fix the tool or the check and run keep again. Don't install it by hand.\n"
                      f"check: {args.check}\n{out[-800:]}")
         os.makedirs(BIN, exist_ok=True)
         os.makedirs(META, exist_ok=True)

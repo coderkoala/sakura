@@ -12,6 +12,19 @@ search:
   formats:
     - html
     - json
+# The general engines that answer an ordinary home connection, and none of the ones that challenge it.
+engines:
+  - {name: mojeek, disabled: false}
+  - {name: startpage, disabled: false}
+  - {name: presearch, disabled: false}
+  - {name: yahoo, disabled: false}
+  - {name: yandex, disabled: false}
+  - {name: github, disabled: false}
+  - {name: stackoverflow, disabled: false}
+  - {name: duckduckgo, disabled: true}
+  - {name: brave, disabled: true}
+  - {name: qwant, disabled: true}
+  - {name: google, disabled: true}
 outgoing:
   request_timeout: 6.0
   max_request_timeout: 10.0

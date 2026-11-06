@@ -180,6 +180,8 @@ def by_intent(it, prompt, cwd):
         if kind == "tool_version" and target == "registry" and it.get("time_scope") == "current":
             latest = lookups.tool_latest(tool, eco, explicit=_named_registry(prompt, eco))
             if latest:
+                if it.get("action_requested"):
+                    latest += " When asked to update to the latest, that means this version, even across a major version, unless the user said otherwise. Say if it's a major upgrade."
                 out.append(_closing(it, latest + " Don't curl a docs site."))
         if kind != "system_task" or target == "this_machine":
             pinned = webkit.version_context(prompt, cwd, extra_tools=[tool] if tool else None)

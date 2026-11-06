@@ -1,0 +1,7 @@
+#!/bin/sh
+# Plenty of commands say python, and Linux often only has python3. A real python, if there is one, still wins.
+here=$(dirname "$(readlink -f "$0")")
+PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$here" | paste -sd:)
+export PATH
+command -v python >/dev/null 2>&1 && exec python "$@"
+exec python3 "$@"

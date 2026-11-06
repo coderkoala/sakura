@@ -14,7 +14,8 @@ import sys
 
 from playwright.sync_api import sync_playwright
 
-DIR = os.path.expanduser(os.environ.get("SAKURA_BROWSER_DIR") or "~/.sakura/browser")
+# A worker runs with nobody watching, so it gets a profile of its own, with none of the user's logins.
+DIR = os.path.expanduser(os.environ.get("SAKURA_BROWSER_DIR") or ("~/.sakura/browser-worker" if os.environ.get("SAKURA_WORKER") else "~/.sakura/browser"))
 SOCK = os.path.join(DIR, "sock")
 PROFILE = os.path.join(DIR, "profile")
 IDLE_EXIT = 1800
@@ -52,7 +53,7 @@ ELEMENTS_JS = r"""(max) => {
 class Browser:
     def __init__(self):
         self.pw = sync_playwright().start()
-        self.headless = bool(os.environ.get("SAKURA_BROWSER_HEADLESS")) or not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+        self.headless = bool(os.environ.get("SAKURA_BROWSER_HEADLESS") or os.environ.get("SAKURA_WORKER")) or not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
         self.told = None
         self.launch()
 

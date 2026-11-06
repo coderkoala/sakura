@@ -3,15 +3,13 @@ name: rag
 description: Semantic search over the user's own documents, notes and past work (local embeddings, no network)
 ---
 
-Local RAG: embeddings from Ollama `qwen3-embedding:0.6b` (already pulled), stored in a single sqlite-vec DB at
-~/.local/share/rag/index.db. No server. Exposed to you as the MCP tool `rag_search` once wired; the `rag` CLI
-(interpreter/bin/rag) does the same from the shell.
+Search the user's own documents with `rag`. Embeddings run locally on the CPU, and nothing leaves the machine.
 
-- index a folder: `rag index ~/mis/docs`   (chunks text/markdown/pdf-text, embeds, upserts)
-- search:         `rag search "how does the cargo desk flow work" -k 6`  -> file:chunk + text
-Use it when a persona needs reference the model doesn't carry: kb/research questions, "where did I write X",
-grounding an answer in the user's actual docs. Always cite the file path you used; say so when nothing matches
-rather than inventing. Re-index after big doc changes.
+- Index what the user names: `rag index ~/docs`. It handles text, code, markdown, PDF and .docx, skips secrets and generated folders, and only re-reads what changed.
+- Search: `rag search "how does the cargo desk flow work" -k 6`, which prints each passage with its file and line.
+- `rag status` shows what's indexed, and `rag forget PATH` removes something.
+
+Use it for "where did I write X", and to ground an answer in the user's actual documents. Cite the file you used. If it finds nothing, say that instead of guessing.
 
 ## Specialist model
 Only qwen3.5 drives this session (it's the one model here that tool-calls). For a hard sub-problem, pull a specialist one-shot and act on its answer yourself — you keep the tools:

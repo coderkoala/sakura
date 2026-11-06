@@ -2,7 +2,7 @@
 # Install Sakura for this user. Safe to run again: it re-renders config and re-links everything.
 #   ./install.sh [--profile FILE]
 # FILE (default ~/.config/sakura/profile.md) holds your own notes for the agent, added to its instructions.
-# It doesn't build the binary or download models; it tells you what's still missing at the end.
+# It downloads the engine from this version's release, but no models; it tells you what's still missing at the end.
 set -eu
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 SAKURA_HOME="$HOME/.sakura"
@@ -36,9 +36,41 @@ if [ -L "$SAKURA_HOME/AGENTS.md" ]; then rm -f "$SAKURA_HOME/AGENTS.md"; fi
 } > "$SAKURA_HOME/AGENTS.md"
 link "$ROOT/rules" "$SAKURA_HOME/rules"
 link "$ROOT/skills" "$HOME/.agents/skills"
-for tool in web_search wikipedia fetch_url curated_search consult sakura-model sakura-launch sakura-worker sakura-memory sakura-recall sakura-tool sakura-browser sakura-web-setup live; do
+for tool in web_search wikipedia fetch_url curated_search consult sakura-model sakura-launch sakura-worker sakura-memory sakura-recall sakura-tool sakura-browser sakura-web-setup live view_file edit_file rag sakura-mail-setup; do
     ln -sf "$ROOT/bin/$tool" "$HOME/.local/bin/$tool"
 done
+
+# The engine, from this version's release, so a machine doesn't need 20 GB of RAM and half an hour to compile it. A failure
+# here keeps whatever binary is already there. Set SAKURA_NO_BINARY=1 to skip this, as when you build your own.
+install_binary() {
+    local version tag url tmp asset="sakura-linux-$(uname -m).tar.gz"
+    version="$(cat "$ROOT/VERSION")"
+    tag="v$version"
+    [ "${SAKURA_NO_BINARY:-0}" != 1 ] || return 0
+    [ "$(cat "$SAKURA_HOME/binary-version" 2>/dev/null)" != "$version" ] || return 0
+    url="${SAKURA_RELEASE_URL:-https://github.com/coderkoala/sakura/releases/download/$tag}"
+    tmp="$(mktemp -d)"
+    if ! curl -fsSL --max-time 900 -o "$tmp/$asset" "$url/$asset" || ! curl -fsSL --max-time 60 -o "$tmp/$asset.sha256" "$url/$asset.sha256"; then
+        echo "  couldn't download the engine for $tag; keeping the current one. To build it instead, see $ROOT/patches/README.md"
+        rm -rf "$tmp"; return 0
+    fi
+    if ! (cd "$tmp" && sha256sum -c --quiet "$asset.sha256" >/dev/null 2>&1) || ! tar -xzf "$tmp/$asset" -C "$tmp" sakura; then
+        echo "  the engine download failed its checksum; not installing it. To build it instead, see $ROOT/patches/README.md"
+        rm -rf "$tmp"; return 0
+    fi
+    chmod 755 "$tmp/sakura"
+    # Too new a system library is the likely failure on an older distro, so prove it runs before replacing anything.
+    if ! "$tmp/sakura" --version >/dev/null 2>&1; then
+        echo "  the prebuilt engine won't run on this system, usually an older glibc; keeping the current one. To build it, see $ROOT/patches/README.md"
+        rm -rf "$tmp"; return 0
+    fi
+    if [ -e "$HOME/.local/bin/sakura" ]; then cp -f "$(readlink -f "$HOME/.local/bin/sakura")" "$HOME/.local/bin/sakura.prev" 2>/dev/null || true; fi
+    mv -f "$tmp/sakura" "$HOME/.local/bin/sakura.new" && mv -f "$HOME/.local/bin/sakura.new" "$HOME/.local/bin/sakura"
+    printf '%s\n' "$version" > "$SAKURA_HOME/binary-version"
+    rm -rf "$tmp"
+    echo "  engine: $tag installed from the release"
+}
+install_binary
 
 echo "Sakura $(cat "$ROOT/VERSION") installed to $SAKURA_HOME."
 missing=0
@@ -47,7 +79,7 @@ case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) need "add ~/.local/bin to your P
 command -v python3 >/dev/null || need "install python3"
 command -v git >/dev/null || need "install git"
 if ! command -v sakura >/dev/null && [ ! -x "$HOME/.local/bin/sakura" ]; then
-    need "build the binary: see $ROOT/patches/README.md"
+    need "the engine: it couldn't be downloaded, so build it: see $ROOT/patches/README.md"
 fi
 if ! command -v ollama >/dev/null; then
     need "install Ollama: https://ollama.com/download"

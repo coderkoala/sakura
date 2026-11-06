@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""view_file FILE [START] [END] — read part of a file with line numbers, so a big file can't flood the context.
+
+Shows at most 200 lines at a time, and says how to read on.
+"""
+import sys
+
+LIMIT = 200
+MAX_LINE = 400
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help"):
+        sys.exit(__doc__)
+    try:
+        start = max(int(a[1]), 1) if len(a) > 1 else 1
+        end = int(a[2]) if len(a) > 2 else start + LIMIT - 1
+    except ValueError:
+        sys.exit(__doc__)
+    end = min(end, start + LIMIT - 1)
+    try:
+        with open(a[0], "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        sys.exit(f"view_file: {a[0]}: {e.strerror}")
+    if b"\0" in raw[:8000]:
+        sys.exit(f"view_file: {a[0]} is a binary file ({len(raw)} bytes).")
+    lines = raw.decode("utf-8", "replace").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    total = len(lines)
+    if start > total:
+        print(f"{a[0]} has {total} lines; nothing at line {start}.")
+        return
+    for n in range(start, min(end, total) + 1):
+        line = lines[n - 1]
+        print(f"{n:>5}  {line[:MAX_LINE]}" + (f" …[{len(line) - MAX_LINE} more chars]" if len(line) > MAX_LINE else ""))
+    if end < total:
+        print(f"[{a[0]}: lines {start}-{end} of {total}. Next: view_file {a[0]} {end + 1}]")
+
+
+if __name__ == "__main__":
+    main()
