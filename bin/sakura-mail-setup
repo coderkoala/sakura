@@ -3,11 +3,12 @@
 #   sakura-mail-setup install                                      himalaya into ~/.local/bin, and pass if apt can get it
 #   sakura-mail-setup account NAME EMAIL IMAP_HOST SMTP_HOST [IMAP_PORT] [SMTP_PORT]
 #   sakura-mail-setup check [NAME]                                 list the inbox, to prove the account works
+#   sakura-mail-setup notify on|off                                a desktop notification for new mail, every 10 minutes
 # Passwords are never given to this command. It tells you what to run so that you type them into pass yourself.
 set -eu
 HIMALAYA_VERSION="${SAKURA_HIMALAYA_VERSION:-v2.2.1}"
 BIN="$HOME/.local/bin"
-CONF="${HIMALAYA_CONFIG:-$HOME/.config/himalaya/config.toml}"
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/himalaya/config.toml"
 
 install_himalaya() {
     mkdir -p "$BIN"
@@ -27,6 +28,19 @@ install_himalaya() {
     fi
 }
 
+# imaps://host:993, or plain IMAP/SMTP upgraded with STARTTLS. Cleartext only for a server on this machine.
+server_url() {
+    local scheme=$1 tls_scheme=$2 host=$3 port=$4 tls_port=$5
+    if [ "${SAKURA_MAIL_CLEARTEXT:-0}" = 1 ]; then
+        case "$host" in 127.0.0.1|localhost|::1) ;; *) echo "cleartext is only for a server on this machine" >&2; exit 1 ;; esac
+        printf '%s://%s:%s' "$scheme" "$host" "$port"
+    elif [ "$port" = "$tls_port" ]; then
+        printf '%s://%s:%s' "$tls_scheme" "$host" "$port"
+    else
+        printf '%s://%s:%s' "$scheme" "$host" "$port"
+    fi
+}
+
 add_account() {
     name=$1 email=$2 imap=$3 smtp=$4 imap_port=${5:-993} smtp_port=${6:-587}
     case "$name" in *[!a-zA-Z0-9_-]*) echo "account names are letters, digits, - and _" >&2; exit 1 ;; esac
@@ -34,32 +48,55 @@ add_account() {
     if [ -f "$CONF" ] && grep -q "^\[accounts\.$name\]" "$CONF"; then
         echo "$name is already in $CONF"; exit 0
     fi
-    default=false; [ -s "$CONF" ] || default=true
-    (umask 077; cat >> "$CONF" <<EOF
-
-[accounts.$name]
-default = $default
-email = "$email"
-backend.type = "imap"
-backend.host = "$imap"
-backend.port = $imap_port
-backend.login = "$email"
-backend.passwd.cmd = "pass show email/$name"
-message.send.backend.type = "smtp"
-message.send.backend.host = "$smtp"
-message.send.backend.port = $smtp_port
-message.send.backend.login = "$email"
-message.send.backend.passwd.cmd = "pass show email/$name"
-EOF
-    )
+    default=false; grep -q '^default = true' "$CONF" 2>/dev/null || default=true
+    sasl=${SAKURA_MAIL_SASL:-plain}  # PLAIN is the standard; a server that doesn't offer it may take login
+    imap_url=$(server_url imap imaps "$imap" "$imap_port" 993)
+    smtp_url=$(server_url smtp smtps "$smtp" "$smtp_port" 465)
+    (umask 077; {
+        printf '\n[accounts.%s]\ndefault = %s\nemail = "%s"\n' "$name" "$default" "$email"
+        printf 'imap.server = "%s"\n' "$imap_url"
+        case "$imap_url" in imap://*) [ "${SAKURA_MAIL_CLEARTEXT:-0}" = 1 ] || printf 'imap.starttls = true\n' ;; esac
+        printf 'imap.sasl.%s.username = "%s"\nimap.sasl.%s.password.command = "pass show email/%s"\n' "$sasl" "$email" "$sasl" "$name"
+        printf 'smtp.server = "%s"\n' "$smtp_url"
+        case "$smtp_url" in smtp://*) [ "${SAKURA_MAIL_CLEARTEXT:-0}" = 1 ] || printf 'smtp.starttls = true\n' ;; esac
+        printf 'smtp.sasl.%s.username = "%s"\nsmtp.sasl.%s.password.command = "pass show email/%s"\n' "$sasl" "$email" "$sasl" "$name"
+    } >> "$CONF")
     echo "added $name to $CONF"
     echo "Now run this yourself and type the password or app password: pass insert email/$name"
     echo "Then prove it works: sakura-mail-setup check $name"
 }
 
+notify_timer() {
+    local root unit units="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+    if [ "$1" = on ]; then
+        mkdir -p "$units"
+        for unit in mail-check.service mail-check.timer; do
+            sed "s#__SAKURA_DIR__#$root#g" "$root/systemd/$unit" > "$units/$unit"
+        done
+        systemctl --user daemon-reload && systemctl --user enable --now mail-check.timer && echo "mail-check is on"
+    else
+        systemctl --user disable --now mail-check.timer 2>/dev/null || true
+        rm -f "$units/mail-check.service" "$units/mail-check.timer"
+        systemctl --user daemon-reload
+        echo "mail-check is off"
+    fi
+}
+
 case "${1:-}" in
     install) install_himalaya ;;
-    account) [ $# -ge 5 ] || { sed -n 2,6p "$0"; exit 1; }; shift; add_account "$@" ;;
-    check) shift; himalaya envelope list ${1:+--account "$1"} ;;
-    *) sed -n 2,6p "$0"; exit 1 ;;
+    notify) notify_timer "${2:-on}" ;;
+    account) [ $# -ge 5 ] || { sed -n 2,7p "$0"; exit 1; }; shift; add_account "$@" ;;
+    check)
+        shift
+        # himalaya exits 0 even when a backend fails, so the report itself has to be read.
+        report=$(himalaya account check ${1:+--account "$1"} 2>&1) || { printf '%s\n' "$report"; exit 1; }
+        printf '%s\n' "$report"
+        if printf '%s\n' "$report" | grep -q 'FAIL'; then
+            echo "That account doesn't work yet. An authentication failure usually means the password in pass, or that the provider needs an app password." >&2
+            exit 1
+        fi
+        himalaya envelope list --page-size 3 ${1:+--account "$1"}
+        ;;
+    *) sed -n 2,7p "$0"; exit 1 ;;
 esac

@@ -49,6 +49,18 @@ CHECK
 - `view_file FILE [start] [end]` reads with line numbers, 200 lines at a time. `edit_file FILE` applies @@old/@@new/@@end blocks from a heredoc, exact text only; `--all` replaces every match, `--create` makes a new file.
 - `rag index PATH` makes the user's documents searchable, `rag search "<question>" [-k 6]` finds passages by meaning and keywords, and `rag status` shows what's in it. Never index a folder the user didn't name.
 
+## Personal assistant
+`pa` does these, without the model, and they survive reboots. Don't write your own cron job or reminder script.
+- `pa remind tomorrow, 10am birthday wish`, also `in 20 minutes`, `friday 3pm`, `every monday 9am`, `every 2 hours`. `pa list`, `pa cancel ID`.
+- `pa brief [ROLE]` for what needs the user today, `pa standup` for what they've done, `pa roles` for the roles.
+- `pa todo add "thing due:2026-12-01"`, `pa clock in PROJECT`, `pa log "..."`.
+- `pa watch every day 8am: releases owner/repo` says when a `live` answer changes. `pa job every day 7am: ...` runs you later, unattended.
+- `pa autoreply on "message"` replies to new mail, never the backlog, and skips lists and automated senders. `pa autoreply preview` shows what it would do.
+- The `pa` skill has what suits each role.
+
+## Email
+`himalaya envelope list`, `himalaya message read ID`, `himalaya message compose --to a@b.c --subject "..." --body "..."` (add `--send` to send it, leave it off for a draft), `himalaya message reply ID --body "..." --send`. Add `--json` to parse, `-a NAME` for another account. Show the user a draft and get their approval before sending. Set up with `sakura-mail-setup` (the email skill). Never read a password: himalaya gets it from pass by itself.
+
 ## Remote machines
 Hosts are in ~/.ssh/config. Connections are multiplexed, so many ssh calls are cheap.
 

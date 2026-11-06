@@ -114,8 +114,7 @@ The lower budget stands in for a 6 GB card by limiting the cache; it hasn't run 
 
 ## Roadmap
 
-- Email: `sakura-mail-setup` is written but hasn't been run against a real mail server yet.
-- A heavier muscle model as the hardware grows (the tiers are already config switches).
+See [ROADMAP.md](ROADMAP.md): where it stands, what comes next, and what it's aiming for.
 
 ## Layout
 

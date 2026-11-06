@@ -99,8 +99,20 @@ SCRIPT_ON_PATH = re.compile(r"(?:>>?\s*[\"']?|\btee\s+(?:-a\s+)?[\"']?)" + PATH_
 
 
 # Sending is outward-facing, and a worker's commands run with nobody to approve them.
-MAIL_SEND = re.compile(r"\bhimalaya\b[^|;&\n]*\b(?:message|template)\s+(?:send|reply|forward)\b")
+MAIL_SEND = re.compile(r"\bhimalaya\b[^|;&\n]*\b(?:message\s+send|smtp\s+(?:send|raw)|(?:message\s+)?(?:compose|write|reply|forward|fwd)\b[^|;&\n]*--send)\b")
+# Every other way out: another client, a mail server to install or start, SMTP by hand.
+MAIL_OTHER = re.compile(r"(?:^|[\s;&|(]|/usr/s?bin/)(?:mail|mailx|mail\.mailutils|sendmail|msmtp|mutt|neomutt|swaks|ssmtp|postfix|postconf|exim4?)\b(?!\.)|\b(?:mailutils|postfix|exim4|msmtp|ssmtp|sendmail|swaks)\b[^|;&\n]*|smtplib|smtps?://|\b(?:EHLO|HELO|RCPT TO|MAIL FROM)\b|\b(?:nc|ncat|netcat|telnet|socat|s_client)\b[^|;&\n]*\b(?:25|465|587|2525|3025|3026)\b")
+# himalaya reads the password from pass itself. Nothing else needs to see it.
+READS_PASSWORD = re.compile(r"(?:^|[\s;&|(/])pass(?:\s+(?:show|ls|find|grep|git|otp|insert|edit|generate)\b|\s+email/)|\.password-store|passwd\.cmd")
+PASSWORD_NO = ("Blocked: passwords stay in pass, out of this conversation. himalaya reads them by itself, so you never need to. If one seems wrong, tell the user to check it: "
+               "pass insert email/NAME")
+# They asked to see it first, so sending now would be taking that decision for them.
+ASKED_FOR_DRAFT = re.compile(r"\bdraft\b|\bbefore (?:anything|it|you)\b|\b(?:show|let) me\b|\bdon'?t send\b|\bdo not send\b|\bnot send\b", re.I)
+DRAFT_NO = "Blocked: the user asked to see this first. Show them the draft and end your turn. They'll tell you when to send it."
 WORKER_NO_MAIL = "You're a worker, so nobody can approve this. Don't send mail: leave a draft and report that it's waiting for the user."
+# Standing orders that act on the user's behalf for weeks shouldn't come from something nobody is watching.
+PA_STANDING = re.compile(r"(?:^|[\s;&|(/])pa\s+(?:autoreply\s+on|job\b|watch\b)|\bcrontab\b|\bsystemctl\s+--user\s+(?:enable|start)\b")
+WORKER_NO_STANDING = "You're a worker, so nobody is here to approve a standing order. Report what you'd set up, and let the user turn it on."
 GIT_PUSH = re.compile(r"\bgit\b[^|;&\n]*\bpush\b")
 WORKER_NO_PUSH = "You're a worker, and your brief doesn't ask you to push. Leave it committed or uncommitted as the job says, and report it."
 BIG_CAT = re.compile(r"^\s*cat\s+([^\s|;&<>]+)\s*$")
@@ -283,6 +295,8 @@ def coordinator_verdict(cmd):
             continue
         if head == "rag" and words[1:2] in (["search"], ["status"]):
             continue
+        if head == "pa" and words[1:2] in (["brief"], ["list"], ["roles"], ["standup"]):
+            continue
         if head == "sed" and "-n" in words and not any(w.startswith("-i") for w in words):
             continue
         if head not in COORDINATOR_OK:
@@ -309,8 +323,14 @@ def main():
     if not reason:
         reason = script_on_path_verdict(cmd) or big_cat_verdict(cmd, data.get("cwd")) or packages_verdict(cmd) or overwrite_verdict(cmd, data.get("cwd")) or stand_in_verdict(cmd, data.get("transcript_path")) \
             or ssh_around_verdict(cmd, data.get("transcript_path")) or keep_around_verdict(cmd, data.get("transcript_path")) or one_file_sed_verdict(cmd)
-    if not reason and os.environ.get("SAKURA_WORKER") and MAIL_SEND.search(cmd):
+    if not reason and READS_PASSWORD.search(cmd):
+        reason = PASSWORD_NO
+    if not reason and os.environ.get("SAKURA_WORKER") and (MAIL_SEND.search(cmd) or MAIL_OTHER.search(cmd)):
         reason = WORKER_NO_MAIL
+    if not reason and MAIL_SEND.search(cmd) and ASKED_FOR_DRAFT.search(this_turn(data.get("transcript_path"))[0]):
+        reason = DRAFT_NO
+    if not reason and os.environ.get("SAKURA_WORKER") and PA_STANDING.search(cmd):
+        reason = WORKER_NO_STANDING
     if not reason and os.environ.get("SAKURA_WORKER") and GIT_PUSH.search(cmd) and "push" not in this_turn(data.get("transcript_path"))[0].lower():
         reason = WORKER_NO_PUSH
     if not reason and os.environ.get("SAKURA_WORKER") and re.search(r"\bsakura-worker\b", cmd):
@@ -450,7 +470,14 @@ def selftest():
                           (overwrite_verdict("tee long <<'E'\nx\nE", d), True), (overwrite_verdict("cat long", d), False),
                           (packages_verdict("pip install x --break-system-packages"), True), (packages_verdict("pip install x"), False),
                           (big_cat_verdict("cat big", d), True), (big_cat_verdict("cat small", d), False), (big_cat_verdict("cat big | head", d), False), (big_cat_verdict("cat nope", d), False),
-                          (MAIL_SEND.search("himalaya message send < m.txt"), True), (MAIL_SEND.search("himalaya -a x template send"), True), (MAIL_SEND.search("himalaya envelope list"), False), (MAIL_SEND.search("himalaya message read 3"), False)):
+                          (READS_PASSWORD.search("pass show email/me"), True), (READS_PASSWORD.search("/tmp/x/bin/pass show email/me"), True), (READS_PASSWORD.search("cat ~/.password-store/email/me.gpg"), True), (READS_PASSWORD.search("pass insert email/me"), True),
+                          (READS_PASSWORD.search("grep pass config.toml"), False), (READS_PASSWORD.search("pytest --pass show"), False), (READS_PASSWORD.search("sakura-mail-setup check me"), False),
+                          (ASKED_FOR_DRAFT.search("Draft an email to bob and show it to me before anything goes out"), True), (ASKED_FOR_DRAFT.search("Email bob with the subject Lunch"), False),
+                          (PA_STANDING.search("pa autoreply on 'busy'"), True), (PA_STANDING.search("pa job every day 7am: x"), True), (PA_STANDING.search("crontab -e"), True), (PA_STANDING.search("pa brief"), False), (PA_STANDING.search("pa remind in 1 hour x"), False),
+                          (MAIL_OTHER.search('echo x | mail -s hi a@b.c'), True), (MAIL_OTHER.search("apt-get install -y mailutils"), True), (MAIL_OTHER.search("sudo service postfix start"), True), (MAIL_OTHER.search("sudo postconf -e x"), True), (MAIL_OTHER.search("python3 -c 'import smtplib'"), True), (MAIL_OTHER.search("curl smtp://x"), True),
+                          (MAIL_OTHER.search('printf "EHLO x\\r\\nMAIL FROM:<a>" | nc -w 5 127.0.0.1 3026'), True), (MAIL_OTHER.search("telnet smtp.gmail.com 587"), True), (MAIL_OTHER.search("nc -z db.local 5432"), False),
+                          (MAIL_OTHER.search("cat mail.py"), False), (MAIL_OTHER.search("python3 evals/mail.py"), False), (MAIL_OTHER.search("ls ~/mail/inbox"), False), (MAIL_OTHER.search("grep -r email src"), False),
+                          (MAIL_SEND.search("himalaya message send < m.txt"), True), (MAIL_SEND.search("himalaya message compose --to a@b --body x --send"), True), (MAIL_SEND.search("himalaya -a x message reply 3 --body y --send"), True), (MAIL_SEND.search("himalaya smtp send m.eml"), True), (MAIL_SEND.search("himalaya message compose --to a@b --body x"), False), (MAIL_SEND.search("himalaya envelope list"), False), (MAIL_SEND.search("himalaya message read 3"), False)):
             total += 1
             if bool(got) != want:
                 bad += 1

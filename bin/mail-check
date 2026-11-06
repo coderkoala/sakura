@@ -3,8 +3,19 @@
 # Account via MAIL_CHECK_ACCOUNT (default: himalaya's default account).
 set -u
 command -v himalaya >/dev/null 2>&1 || exit 0
-acc="${MAIL_CHECK_ACCOUNT:-}"; args=(envelope list -o json); [ -n "$acc" ] && args=(-a "$acc" "${args[@]}")
-json="$(himalaya "${args[@]}" -- NOT SEEN 2>/dev/null)" || exit 0
-n="$(printf '%s' "$json" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)"
-[ "${n:-0}" -gt 0 ] && "$(dirname "$0")/notify" "Mail: $n unread" "$(printf '%s' "$json" | python3 -c 'import json,sys;[print("• "+e.get("from",{}).get("name") or e.get("from",{}).get("addr","?"),"—",e.get("subject","")[:60]) for e in json.load(sys.stdin)[:5]]' 2>/dev/null)"
+args=(envelope list --json --page-size 50); [ -n "${MAIL_CHECK_ACCOUNT:-}" ] && args+=(--account "$MAIL_CHECK_ACCOUNT")
+json="$(himalaya "${args[@]}" 2>/dev/null)" || exit 0
+summary="$(printf '%s' "$json" | python3 -c '
+import json, sys
+found = json.load(sys.stdin)
+found = found.get("envelopes", found) if isinstance(found, dict) else found
+unseen = [e for e in found if "seen" not in " ".join(map(str, e.get("flags", []))).lower()]
+if unseen:
+    print(len(unseen))
+    for e in unseen[:5]:
+        print(str(e.get("subject") or "(no subject)")[:80])
+' 2>/dev/null)"
+[ -n "$summary" ] || exit 0
+n="$(printf '%s\n' "$summary" | head -1)"
+"$(dirname "$(readlink -f "$0")")/notify" "Mail: $n unread" "$(printf '%s\n' "$summary" | tail -n +2)"
 exit 0

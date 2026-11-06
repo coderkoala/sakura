@@ -1,0 +1,1180 @@
+#!/usr/bin/env python3
+"""pa — your personal assistant. Everything here works without the model, except `pa ask`.
+
+Reminders   pa remind tomorrow, 10am birthday wish       also: in 20 minutes, friday 3pm, every monday 9am, every 2 hours
+            pa list     pa cancel ID
+Briefing    pa brief [ROLE...]    what needs you today     pa roles       pa standup     what you did since yesterday
+To-do       pa todo add "x due:2026-12-01"     pa todo     pa todo done ID
+Time        pa clock in PROJECT     pa clock out     pa clock report
+Log         pa log "shipped the fix"               feeds the standup
+Watching    pa watch every day 8am: releases tokio-rs/tokio      tells you when a `live` answer changes
+Scheduled   pa job every day 7am: summarise my unread mail       runs Sakura unattended, as a worker that can't send mail
+Auto-reply  pa autoreply on "I'm on a deadline and will reply when I can."     [--days N]  pa autoreply preview | off | status
+Settings    pa set role developer     pa set repo ~/code/app     pa set place Kathmandu     pa unset repo ~/code/app     pa settings
+Anything    pa ask "..."     opens Sakura as your PA
+
+Stored in $SAKURA_PA_DIR, else ~/.sakura/pa. A timer checks once a minute, and anything missed while the machine was off fires when it's back.
+"""
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import socket
+import ssl
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from datetime import datetime, timedelta
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+DIR = os.path.expanduser(os.environ.get("SAKURA_PA_DIR") or "~/.sakura/pa")
+sys.path.insert(0, os.path.join(ROOT, "mcp", "sakura-web"))
+
+DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+DAY_SHORT = {d[:3]: d for d in DAYS}
+MONTHS = "jan feb mar apr may jun jul aug sep oct nov dec".split()
+LIST_SETTINGS = {"role": "roles", "repo": "repos", "calendar": "calendars", "host": "hosts", "topic": "topics", "product": "products", "drafts": "drafts"}
+SINGLE_SETTINGS = {"place", "account"}
+AUTOREPLY_EVERY = 600
+ONCE_PER_SENDER_DAYS = 7
+MAX_REPLIES_PER_RUN = 10
+
+
+def now():
+    forced = os.environ.get("SAKURA_PA_NOW")
+    return datetime.fromisoformat(forced) if forced else datetime.now().replace(microsecond=0)
+
+
+def path(name):
+    return os.path.join(DIR, name)
+
+
+def load(name, default):
+    try:
+        with open(path(name), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def save(name, data):
+    os.makedirs(DIR, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=DIR, prefix=".tmp-")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=1)
+    os.replace(tmp, path(name))
+
+
+class Lock:
+    def __enter__(self):
+        os.makedirs(DIR, exist_ok=True)
+        self.f = open(path(".lock"), "w")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+
+    def __exit__(self, *_):
+        self.f.close()
+
+
+def settings():
+    return load("settings.json", {})
+
+
+def ensure_timer():
+    """The once-a-minute check, started the first time something is scheduled."""
+    if os.environ.get("SAKURA_PA_NO_TIMER") or not shutil.which("systemctl"):
+        return
+    units = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "systemd", "user")
+    os.makedirs(units, exist_ok=True)
+    me = os.path.realpath(__file__)
+    service = f"[Unit]\nDescription=Sakura PA: reminders and scheduled work\n[Service]\nType=oneshot\nExecStart={me} tick\n"
+    timer = "[Unit]\nDescription=Sakura PA once a minute\n[Timer]\nOnCalendar=minutely\nPersistent=true\nAccuracySec=15s\n[Install]\nWantedBy=timers.target\n"
+    changed = False
+    for name, text in (("sakura-pa.service", service), ("sakura-pa.timer", timer)):
+        p = os.path.join(units, name)
+        if not os.path.exists(p) or open(p).read() != text:
+            with open(p, "w") as f:
+                f.write(text)
+            changed = True
+    if changed:
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    subprocess.run(["systemctl", "--user", "enable", "--now", "sakura-pa.timer"], capture_output=True)
+
+
+# ── Understanding when ────────────────────────────────────────────────────────
+
+TIME_RE = r"\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)|\d{1,2}:\d{2}|noon|midnight|morning|afternoon|evening|tonight"
+STARTS_TEMPORAL = re.compile(rf"^(?:at\b|on\b|by\b|in\b|today\b|tomorrow\b|tonight\b|next\b|this\b|noon\b|midnight\b|morning\b|afternoon\b|evening\b|(?:{'|'.join(DAYS)}|{'|'.join(DAY_SHORT)})\b|(?:{'|'.join(MONTHS)})[a-z]*\b|\d{{4}}-\d{{2}}-\d{{2}}\b|\d{{1,2}}(?:st|nd|rd|th)?\s+(?:{'|'.join(MONTHS)})|{TIME_RE})", re.I)
+RELATIVE = re.compile(r"^(?:in\s+)?(an?|\d+)\s*(sec|second|min|minute|hour|hr|day|week)s?$", re.I)
+FAR = {"sec": "seconds", "second": "seconds", "min": "minutes", "minute": "minutes", "hour": "hours", "hr": "hours", "day": "days", "week": "weeks"}
+
+
+def _gnu_date(expr):
+    try:
+        out = subprocess.run(["date", "-d", expr, "+%s"], capture_output=True, text=True, env=dict(os.environ, LC_ALL="C"), timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return datetime.fromtimestamp(int(out.stdout)) if out.returncode == 0 and out.stdout.strip() else None
+
+
+def _clock(text):
+    """10am, 10.30pm or 14:00 as (hour, minute)."""
+    t = text.strip().lower().replace(".", ":").replace(" ", "")
+    named = {"noon": (12, 0), "midnight": (0, 0), "morning": (9, 0), "afternoon": (14, 0), "evening": (18, 0), "tonight": (20, 0)}
+    if t in named:
+        return named[t]
+    m = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?(am|pm)?", t)
+    if not m or (not m.group(2) and not m.group(3)):
+        return None
+    h, mi = int(m.group(1)), int(m.group(2) or 0)
+    if m.group(3) == "pm" and h != 12:
+        h += 12
+    if m.group(3) == "am" and h == 12:
+        h = 0
+    return (h, mi) if h < 24 and mi < 60 else None
+
+
+def when_from(expr, base=None):
+    """The moment an expression like 'tomorrow 10am' or 'in 20 minutes' means, or None. Never in the past."""
+    base = base or now()
+    expr = " ".join(expr.lower().replace(",", " ").split())
+    expr = re.sub(r"^(?:at|on|by)\s+", "", expr).replace(" at ", " ")
+    rel = RELATIVE.match(expr)
+    if rel:
+        n = 1 if rel.group(1).lower() in ("a", "an") else int(rel.group(1))
+        return base + timedelta(**{FAR[rel.group(2).lower()]: n})
+    if not STARTS_TEMPORAL.match(expr) or expr.startswith("in "):
+        return None
+    clock = None
+    found = re.search(TIME_RE, expr, re.I)
+    if found:
+        clock = _clock(found.group(0))
+        if clock is None:
+            return None
+    day_part = (expr[:found.start()] + expr[found.end():]).strip() if found else expr
+    if day_part:
+        if not re.search(rf"today|tomorrow|next|this|{'|'.join(DAYS)}|{'|'.join(DAY_SHORT)}|{'|'.join(MONTHS)}|\d{{4}}-\d{{2}}-\d{{2}}", day_part):
+            return None
+        if day_part == "next week":
+            day = base + timedelta(days=7)
+        elif day_part == "today":
+            day = base
+        elif day_part == "tomorrow":
+            day = base + timedelta(days=1)
+        else:
+            day = _gnu_date(day_part)
+            if not day:
+                return None
+    else:
+        day = base
+    hour, minute = clock or (9, 0)
+    at = day.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if at <= base:
+        named_day = re.search(rf"{'|'.join(DAYS)}|{'|'.join(DAY_SHORT)}", day_part or "")
+        if not day_part or day_part == "today" and not found:
+            at += timedelta(days=1)
+        elif named_day or day_part == "today":
+            at += timedelta(days=7 if named_day else 1)
+        elif re.search(rf"{'|'.join(MONTHS)}", day_part or "") and not re.search(r"\d{4}", day_part):
+            at = at.replace(year=at.year + 1)
+        else:
+            return None
+    return at
+
+
+EVERY = re.compile(rf"^every\s+(?:(\d+)\s+)?(minute|min|hour|hr|day|weekday|week|{'|'.join(DAYS)}|{'|'.join(DAY_SHORT)})s?\b(?:\s*(?:at\s+)?({TIME_RE}))?[\s,:-]*(.*)$", re.I | re.S)
+
+
+def next_run(rule, after):
+    """The next moment a repeating rule falls, strictly after this one."""
+    n, unit, clock = rule.get("n") or 1, rule["unit"], rule.get("clock")
+    if unit in ("minute", "hour"):
+        return after + timedelta(**{unit + "s": n})
+    hour, minute = clock or (9, 0)
+    at = after.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if unit == "day":
+        while at <= after:
+            at += timedelta(days=n)
+        return at
+    while at <= after or (unit == "weekday" and at.weekday() > 4) or (unit in DAYS and at.weekday() != DAYS.index(unit)) or (unit == "week" and at.weekday() != after.weekday()):
+        at += timedelta(days=1)
+    return at
+
+
+def parse_every(text):
+    m = EVERY.match(text.strip())
+    if not m:
+        return None
+    unit = {"min": "minute", "hr": "hour"}.get(m.group(2).lower(), m.group(2).lower())
+    unit = DAY_SHORT.get(unit, unit)
+    clock = _clock(m.group(3)) if m.group(3) else None
+    rule = {"n": int(m.group(1) or 1), "unit": unit, "clock": clock}
+    if rule["n"] < 1:
+        return None
+    return rule, m.group(4).strip()
+
+
+def parse_reminder(text, base=None):
+    """(moment, rule, what). Takes the time from the front or the end of the sentence. Raises ValueError if there's no clear time."""
+    base = base or now()
+    text = " ".join(text.split())
+    text = re.sub(r"^(?:remind me\s+|me\s+)", "", text, flags=re.I)
+    every = parse_every(text)
+    if every:
+        rule, what = every
+        what = re.sub(r"^to\s+", "", what, flags=re.I)
+        if not what:
+            raise ValueError("what should I remind you about?")
+        return next_run(rule, base), rule, what
+    words = text.replace(",", " , ").split()
+    plain = [w for w in words if w != ","]
+    # "friday at 3pm: call the dentist". Only the punctuation ending the time, not a colon later in the message.
+    first_colon = next((i for i, w in enumerate(plain[:8]) if w.endswith(":")), None)
+    if first_colon is not None and plain[first_colon].rstrip(":"):
+        plain[first_colon] = plain[first_colon].rstrip(":")
+    for n in range(min(7, len(plain) - 1), 0, -1):  # the longest time at the front
+        at = when_from(" ".join(plain[:n]), base)
+        if at and re.search(TIME_RE + r"|\d|^in\b|\bnext\b|today|tomorrow|" + "|".join(DAYS + list(DAY_SHORT)) + "|" + "|".join(MONTHS), " ".join(plain[:n]), re.I):
+            what = re.sub(r"^(?:to|that|about|[-:])\s+", "", " ".join(plain[n:]), flags=re.I)
+            if what:
+                return at, None, what
+    for n in range(min(7, len(plain) - 1), 0, -1):  # or at the end: "call mum tomorrow at 10am"
+        at = when_from(" ".join(plain[-n:]), base)
+        if at:
+            what = re.sub(r"^to\s+|\s+(?:at|on|by|in)$", "", " ".join(plain[:-n]), flags=re.I)
+            if what:
+                return at, None, what
+    raise ValueError(f"I couldn't find a clear time in: {text}. Try: tomorrow, 10am {text}")
+
+
+def describe(item):
+    rule = item.get("rule")
+    if rule:
+        n = rule.get("n") or 1
+        clock = f" at {rule['clock'][0]:02d}:{rule['clock'][1]:02d}" if rule.get("clock") else ""
+        return f"every {str(n) + ' ' if n > 1 else ''}{rule['unit']}{'s' if n > 1 else ''}{clock}, next {item['at'][:16].replace('T', ' ')}"
+    return item["at"][:16].replace("T", " ")
+
+
+# ── Schedule ──────────────────────────────────────────────────────────────────
+
+def add_item(item):
+    with Lock():
+        items = load("schedule.json", [])
+        item["id"] = hashlib.sha1(f"{time.time()}{item}".encode()).hexdigest()[:6]
+        item["created"] = now().isoformat()
+        items.append(item)
+        save("schedule.json", items)
+    ensure_timer()
+    return item
+
+
+def cmd_remind(args):
+    if args[:1] in (["cancel"], ["list"]):  # an easy thing to type
+        return cmd_cancel(args[1:]) if args[0] == "cancel" else cmd_list(args[1:])
+    text = " ".join(args).strip()
+    if not text:
+        sys.exit("usage: pa remind tomorrow, 10am birthday wish")
+    try:
+        at, rule, what = parse_reminder(text)
+    except ValueError as e:
+        sys.exit(f"pa: {e}")
+    item = add_item({"kind": "reminder", "text": what, "at": at.isoformat(), "rule": rule})
+    print(f"Reminder set for {describe(item)}: {what}  (id {item['id']})")
+
+
+def cmd_list(_):
+    items = sorted(load("schedule.json", []), key=lambda i: i["at"])
+    if not items:
+        print("Nothing scheduled.")
+    for i in items:
+        print(f"{i['id']}  {i['kind']:8s}  {describe(i)}  {i.get('text') or i.get('prompt') or i.get('command')}")
+
+
+def cmd_cancel(args):
+    if not args:
+        sys.exit("usage: pa cancel ID")
+    with Lock():
+        items = load("schedule.json", [])
+        keep = [i for i in items if i["id"] != args[0]]
+        save("schedule.json", keep)
+    print("cancelled" if len(keep) < len(items) else f"no item {args[0]}")
+    sys.exit(0 if len(keep) < len(items) else 1)
+
+
+def split_schedule(args, what):
+    """'every day 8am: thing' into its timing and the thing."""
+    text = " ".join(args)
+    head, sep, rest = text.partition(":")
+    if sep and re.match(r"\d{2}", rest):  # the colon in 10:30
+        m = re.match(r"^(.*?\d{1,2}:\d{2}\s*(?:am|pm)?)\s*:?\s*(.*)$", text, re.I)
+        head, rest = (m.group(1), m.group(2)) if m else (head, rest)
+    if not rest.strip():
+        sys.exit(f"usage: pa {what} every day 8am: the thing")
+    return head.strip(), rest.strip()
+
+
+def schedule_of(timing):
+    every = parse_every(timing + " x")
+    if every:
+        return next_run(every[0], now()), every[0]
+    at = when_from(timing)
+    if not at:
+        sys.exit(f"pa: I couldn't read that time: {timing}")
+    return at, None
+
+
+def cmd_job(args):
+    if not args:
+        sys.exit("usage: pa job every day 7am: summarise my unread mail")
+    timing, prompt = split_schedule(args, "job")
+    # A job runs as a worker, which can't send mail or push. Scheduling one that must would quietly do nothing.
+    if re.search(r"\b(?:repl(?:y|ies)|respond|answer|send|forward)\b.*\b(?:e?-?mails?|messages?|inbox)\b|\b(?:e?-?mails?)\b.*\b(?:repl(?:y|ies)|respond|answer|send|forward)\b", prompt, re.I):
+        sys.exit('pa: a job runs unattended and can\'t send mail, so that wouldn\'t work. To answer new mail automatically: pa autoreply on "the message". To get a summary instead, ask the job to summarise.')
+    if re.search(r"\bgit\s+push\b|\bpush\b.*\b(?:branch|main|master|origin|remote)\b", prompt, re.I):
+        sys.exit("pa: a job runs unattended and can't push, so that wouldn't work. Ask it to report what's ready, and push it yourself.")
+    at, rule = schedule_of(timing)
+    item = add_item({"kind": "job", "prompt": prompt, "at": at.isoformat(), "rule": rule})
+    print(f"Job set for {describe(item)}. It runs as a worker, so it can't send mail or push. It tells you what it found. (id {item['id']})")
+
+
+def cmd_watch(args):
+    if not args:
+        sys.exit("usage: pa watch every day 8am: releases tokio-rs/tokio   (any `live` command)")
+    timing, command = split_schedule(args, "watch")
+    command = re.sub(r"^live\s+", "", command)
+    import live as L  # only what `live` can answer, so a watch can't run anything else
+    if command.split()[0] not in ("news", "weather", "quakes", "fx", "crypto", "stock", "cve", "vuln", "releases", "eol", "answers", "issues", "discussion", "papers", "stat"):
+        sys.exit("pa: a watch runs one `live` command, such as: pa watch every day 9am: releases laravel/framework. See: live. For anything else, use pa job.")
+    at, rule = schedule_of(timing)
+    if not rule:
+        sys.exit("pa: a watch repeats, so it needs 'every ...'")
+    item = add_item({"kind": "watch", "command": command, "at": at.isoformat(), "rule": rule})
+    print(f"Watching `live {command}` {describe(item)}. You'll hear when the answer changes. (id {item['id']})")
+
+
+def notify(title, body):
+    os.makedirs(DIR, exist_ok=True)
+    with open(path("delivered.log"), "a", encoding="utf-8") as f:
+        f.write(f"{now().isoformat()}\t{title}\t{' '.join(str(body).split())}\n")
+    with open(path("pending"), "a", encoding="utf-8") as f:
+        f.write(f"{title}: {' '.join(str(body).split())}\n")
+    command = os.environ.get("SAKURA_PA_NOTIFY") or os.path.join(ROOT, "bin", "notify")
+    try:
+        subprocess.run([command, title, str(body)], capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def cmd_pending(_):
+    """Shown when a shell opens, for whatever was missed. A desktop notification vanishes; this doesn't."""
+    try:
+        with Lock():
+            text = open(path("pending"), encoding="utf-8").read()
+            os.remove(path("pending"))
+    except OSError:
+        return
+    if text.strip():
+        print("Sakura PA:")
+        print("".join("  " + line + "\n" for line in text.splitlines()[-10:]), end="")
+
+
+def fire(item, at):
+    late = at - datetime.fromisoformat(item["at"])
+    note = f" (was due {item['at'][:16].replace('T', ' ')})" if late > timedelta(minutes=5) else ""
+    if item["kind"] == "reminder":
+        notify("Reminder", item["text"] + note)
+    elif item["kind"] == "job":
+        subprocess.Popen([os.path.realpath(__file__), "_job", item["prompt"]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    elif item["kind"] == "watch":
+        run_watch(item)
+
+
+def run_watch(item):
+    out = subprocess.run([os.path.join(ROOT, "bin", "live")] + item["command"].split(), capture_output=True, text=True, timeout=120).stdout
+    # What changed, not when it was fetched.
+    body = re.sub(r"\(from .*?retrieved [^)]*\)\.? ?(?:It's data from the source[^\n]*)?", "", out)
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    seen = load("watches.json", {})
+    previous = seen.get(item["id"], {})
+    seen[item["id"]] = {"digest": digest, "body": body[:4000]}
+    save("watches.json", seen)
+    if previous and previous.get("digest") != digest and body.strip():
+        old = set(previous.get("body", "").splitlines())
+        new = [l.strip() for l in body.splitlines() if l.strip() and l not in old]
+        notify(f"Changed: live {item['command']}", (new[0] if new else body.strip())[:240])
+
+
+def cmd_tick(_):
+    at = now()
+    with Lock():
+        items = load("schedule.json", [])
+        due, keep = [], []
+        for item in items:
+            if datetime.fromisoformat(item["at"]) <= at:
+                due.append(dict(item))
+                if item.get("rule"):
+                    item["at"] = next_run(item["rule"], at).isoformat()
+                    keep.append(item)
+            else:
+                keep.append(item)
+        if due:
+            save("schedule.json", keep)
+    for item in due:
+        try:
+            fire(item, at)
+        except Exception as e:
+            notify("PA problem", f"{item.get('text') or item.get('prompt') or item.get('command')}: {e}")
+    try:
+        autoreply_run()
+    except Exception as e:
+        notify("Auto-reply problem", str(e)[:200])
+
+
+def cmd_job_run(args):
+    env = dict(os.environ, SAKURA_WORKER="1")
+    env.pop("SAKURA_COORDINATOR", None)
+    prompt = args[0]
+    try:
+        out = subprocess.run([os.path.join(ROOT, "bin", "sakura-launch"), "--exec", "--skip-git-repo-check", "--json", prompt], cwd=os.path.expanduser("~"), env=env,
+                             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=1800).stdout
+    except subprocess.TimeoutExpired:
+        notify("Scheduled job", f"{prompt[:60]}: ran out of time")
+        return
+    final = ""
+    for line in out.splitlines():
+        try:
+            item = json.loads(line).get("item", {})
+        except ValueError:
+            continue
+        if item.get("type") == "agent_message" and item.get("text"):
+            final = item["text"]
+    notify("Scheduled job", f"{prompt[:60]}: {final or 'finished with no answer'}")
+
+
+# ── Auto-reply ────────────────────────────────────────────────────────────────
+
+AUTOMATED_SENDER = re.compile(r"^(?:no-?reply|do-?not-?reply|donotreply|mailer-daemon|postmaster|bounces?|notifications?|alerts?|news|newsletter|marketing|billing|root|daemon|automated|auto)\b|[+-]bounces?@", re.I)
+AUTOMATED_HEADER = re.compile(r"^(?:auto-submitted:\s*(?!no\b)\S|precedence:\s*(?:bulk|list|junk|auto_reply)|list-(?:id|unsubscribe|post):|x-auto-response-suppress:|x-autoreply:|x-autorespond:|x-loop:|feedback-id:|return-path:\s*<>)", re.I | re.M)
+DEFAULT_REPLY = "Thanks for your message. I'm heads-down on a deadline right now and will reply as soon as I can."
+
+
+def himalaya(*args):
+    account = settings().get("account")
+    cmd = ["himalaya"] + list(args) + (["--account", account] if account else [])
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
+
+def who_am_i():
+    """The account's own address, from himalaya's config. Empty if it can't be told, and nothing is sent then."""
+    import tomllib
+    conf = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "himalaya", "config.toml")
+    try:
+        with open(conf, "rb") as f:
+            accounts = tomllib.load(f).get("accounts", {})
+    except (OSError, ValueError):
+        return ""
+    wanted = settings().get("account")
+    account = accounts.get(wanted) if wanted else next((a for a in accounts.values() if a.get("default")), None)
+    if account is None and not wanted and len(accounts) == 1:
+        account = next(iter(accounts.values()))
+    return str((account or {}).get("email") or "").lower()
+
+
+def envelope_date(e):
+    raw = e.get("date") or ""
+    try:
+        d = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        import email.utils
+        try:
+            d = email.utils.parsedate_to_datetime(str(raw))
+        except (TypeError, ValueError):
+            return None
+    return d.astimezone().replace(tzinfo=None) if d.tzinfo else d
+
+
+def sender_of(e):
+    f = e.get("from")
+    f = f[0] if isinstance(f, list) and f else f
+    return ((f or {}).get("email") or "").lower() if isinstance(f, dict) else str(f or "").lower()
+
+
+def why_not_reply(sender, raw, me, state, at):
+    """Why this message mustn't get an auto-reply, or None. RFC 3834: never to automated mail, and rarely to one person."""
+    if not sender or "@" not in sender:
+        return "no sender"
+    if sender == me:
+        return "from yourself"
+    if AUTOMATED_SENDER.search(sender):
+        return "an automated address"
+    headers = raw.split("\r\n\r\n", 1)[0] if "\r\n\r\n" in raw else raw.split("\n\n", 1)[0]
+    headers = re.sub(r"\r?\n[ \t]+", " ", headers)
+    if AUTOMATED_HEADER.search(headers):
+        return "automated or list mail"
+    recipients = " ".join(re.findall(r"^(?:to|cc):\s*(.*)$", headers, re.I | re.M)).lower()
+    if me not in recipients:
+        return "not addressed to you directly"
+    last = state.get("senders", {}).get(sender)
+    if last and at - datetime.fromisoformat(last) < timedelta(days=ONCE_PER_SENDER_DAYS):
+        return "already replied this week"
+    return None
+
+
+def autoreply_candidates(state, at):
+    """(message id, sender, subject, raw, why not): mail that arrived since auto-reply was turned on."""
+    started = datetime.fromisoformat(state["since"])
+    r = himalaya("envelope", "list", "--json", "--page-size", "50")
+    if r.returncode:
+        raise RuntimeError(r.stderr.strip()[-200:] or "himalaya failed")
+    found = json.loads(r.stdout)
+    found = found.get("envelopes", found) if isinstance(found, dict) else found
+    me = who_am_i()
+    if not me:
+        raise RuntimeError("I can't tell which address is yours. Check the himalaya config.")
+    out = []
+    for e in found:
+        mid = str(e.get("id"))
+        key = e.get("message-id") or mid
+        when = envelope_date(e)
+        if key in state.get("handled", []) or not when or when < started:
+            continue  # the backlog never gets a reply
+        raw = himalaya("message", "read", mid, "--raw").stdout
+        sender = sender_of(e)
+        out.append((key, sender, e.get("subject") or "", raw, why_not_reply(sender, raw, me, state, at), e.get("message-id")))
+    return out
+
+
+def send_reply(sender, subject, message_id, body, me):
+    subject = subject if re.match(r"(?i)^re:", subject) else f"Re: {subject}"
+    ref = f"<{message_id.strip('<>')}>" if message_id else ""
+    lines = [f"From: {me}", f"To: {sender}", f"Subject: {subject}", "Auto-Submitted: auto-replied", "X-Auto-Response-Suppress: All", "Precedence: auto_reply"]
+    if ref:
+        lines += [f"In-Reply-To: {ref}", f"References: {ref}"]
+    message = "\r\n".join(lines) + "\r\n\r\n" + body + "\r\n"
+    account = settings().get("account")
+    cmd = ["himalaya", "message", "send"] + (["--account", account] if account else [])
+    r = subprocess.run(cmd, input=message, capture_output=True, text=True, timeout=120)
+    if r.returncode:
+        raise RuntimeError((r.stderr + r.stdout).strip()[-200:] or "himalaya couldn't send it")
+
+
+def autoreply_run(force=False):
+    state = load("autoreply.json", {})
+    if not state.get("on"):
+        return
+    at = now()
+    if state.get("until") and at >= datetime.fromisoformat(state["until"]):
+        state["on"] = False
+        save("autoreply.json", state)
+        notify("Auto-reply", "turned off, as scheduled")
+        return
+    if not force and state.get("last") and (at - datetime.fromisoformat(state["last"])).total_seconds() < AUTOREPLY_EVERY - 30:
+        return
+    state["last"] = at.isoformat()
+    me = who_am_i()
+    if not me:
+        raise RuntimeError("I can't tell which address is yours, so nothing was sent. Check the himalaya config.")
+    sent = 0
+    for key, sender, subject, _raw, why, message_id in autoreply_candidates(state, at):
+        if not why and sent < MAX_REPLIES_PER_RUN:
+            send_reply(sender, subject, message_id, state["message"], me)
+            state.setdefault("senders", {})[sender] = at.isoformat()
+            state.setdefault("log", []).append(f"{at.isoformat()} replied to {sender}: {subject[:60]}")
+            state["log"] = state["log"][-50:]
+            sent += 1
+        elif why:
+            state.setdefault("log", []).append(f"{at.isoformat()} skipped {sender}: {why}")
+            state["log"] = state["log"][-50:]
+        else:
+            continue  # over this run's cap: it'll be picked up next time
+        state.setdefault("handled", []).append(key)
+        state["handled"] = state["handled"][-500:]
+    save("autoreply.json", state)
+
+
+def cmd_autoreply(args):
+    action = args[0] if args else "status"
+    state = load("autoreply.json", {})
+    if action == "on":
+        rest = list(args[1:])
+        days = None
+        if "--days" in rest:
+            i = rest.index("--days")
+            days = int(rest[i + 1])
+            del rest[i:i + 2]
+        if not shutil.which("himalaya"):
+            sys.exit("pa: email isn't set up. See: sakura-mail-setup")
+        at = now()
+        state = {"on": True, "message": " ".join(rest).strip() or DEFAULT_REPLY, "since": at.isoformat(), "senders": state.get("senders", {}), "handled": state.get("handled", []), "log": state.get("log", [])}
+        if days:
+            state["until"] = (at + timedelta(days=days)).isoformat()
+        save("autoreply.json", state)
+        ensure_timer()
+        print(f"Auto-reply is on{' for ' + str(days) + ' days' if days else ''}. New mail only: nothing already in your inbox gets a reply. Lists, no-reply addresses and other auto-replies are skipped, and each person hears from it at most once a week.")
+        print(f"It says: {state['message']}")
+    elif action == "off":
+        state["on"] = False
+        save("autoreply.json", state)
+        print("Auto-reply is off.")
+    elif action == "preview":
+        if not state.get("on"):
+            state = dict(state, since=(now() - timedelta(days=2)).isoformat())
+        for _, sender, subject, _raw, why, _m in autoreply_candidates(state, now()):
+            print(f"{'skip (' + why + ')' if why else 'WOULD REPLY'}: {sender}: {subject[:70]}")
+        print("Nothing was sent.")
+    elif action == "run":
+        autoreply_run(force=True)
+        print("checked")
+    else:
+        if not state.get("on"):
+            print("Auto-reply is off.")
+        else:
+            print(f"Auto-reply is on since {state['since'][:16].replace('T', ' ')}{', until ' + state['until'][:16].replace('T', ' ') if state.get('until') else ''}.\nIt says: {state['message']}")
+        for line in state.get("log", [])[-8:]:
+            print("  " + line)
+
+
+# ── To-do, time, log ──────────────────────────────────────────────────────────
+
+def todos():
+    return load("todo.json", [])
+
+
+def cmd_todo(args):
+    action = args[0] if args else "list"
+    items = todos()
+    if action == "add" and args[1:]:
+        text = " ".join(args[1:])
+        item = {"id": hashlib.sha1(f"{time.time()}{text}".encode()).hexdigest()[:5], "text": text, "added": now().isoformat()}
+        items.append(item)
+        save("todo.json", items)
+        print(f"added {item['id']}: {text}")
+    elif action == "done" and args[1:]:
+        keep = [i for i in items if i["id"] != args[1]]
+        save("todo.json", keep)
+        print("done" if len(keep) < len(items) else f"no item {args[1]}")
+    elif action == "list":
+        for i in sorted(items, key=lambda x: due_of(x["text"]) or "9999"):
+            print(f"{i['id']}  {i['text']}")
+        if not items:
+            print("Nothing on the list.")
+    else:
+        sys.exit('usage: pa todo add "thing due:2026-12-01"  |  pa todo  |  pa todo done ID')
+
+
+def due_of(text):
+    m = re.search(r"\bdue:(\d{4}-\d{2}-\d{2})\b", text)
+    return m.group(1) if m else None
+
+
+def cmd_clock(args):
+    action = args[0] if args else "report"
+    state = load("clock.json", {"open": None, "entries": []})
+    at = now()
+    if action == "in":
+        if state["open"]:
+            sys.exit(f"pa: already on {state['open']['project']}. pa clock out first.")
+        state["open"] = {"project": " ".join(args[1:]) or "work", "start": at.isoformat()}
+        save("clock.json", state)
+        print(f"clocked in: {state['open']['project']}")
+    elif action == "out":
+        if not state["open"]:
+            sys.exit("pa: not clocked in")
+        o = state["open"]
+        minutes = int((at - datetime.fromisoformat(o["start"])).total_seconds() // 60)
+        state["entries"].append({"project": o["project"], "start": o["start"], "minutes": minutes})
+        state["open"] = None
+        save("clock.json", state)
+        print(f"clocked out: {o['project']}, {minutes // 60}h {minutes % 60}m")
+    else:
+        since = at - timedelta(days=7)
+        totals = {}
+        for e in state["entries"]:
+            if datetime.fromisoformat(e["start"]) >= since:
+                totals[e["project"]] = totals.get(e["project"], 0) + e["minutes"]
+        if state["open"]:
+            print(f"on the clock: {state['open']['project']} since {state['open']['start'][11:16]}")
+        for p, m in sorted(totals.items(), key=lambda x: -x[1]):
+            print(f"{p}: {m // 60}h {m % 60}m in the past week")
+        if not totals and not state["open"]:
+            print("Nothing tracked in the past week.")
+
+
+def cmd_log(args):
+    if not args:
+        sys.exit('usage: pa log "what you did"')
+    os.makedirs(DIR, exist_ok=True)
+    with open(path("log.txt"), "a", encoding="utf-8") as f:
+        f.write(f"{now().isoformat()}\t{' '.join(args)}\n")
+    print("logged")
+
+
+# ── Settings ──────────────────────────────────────────────────────────────────
+
+def cmd_set(args, add=True):
+    if len(args) < 2:
+        sys.exit("usage: pa set role developer  (" + ", ".join(list(LIST_SETTINGS) + sorted(SINGLE_SETTINGS)) + ")")
+    key, value = args[0], " ".join(args[1:])
+    s = settings()
+    if key in SINGLE_SETTINGS:
+        s[key] = value if add else None
+    elif key in LIST_SETTINGS:
+        if key in ("repo", "calendar", "drafts"):
+            value = os.path.abspath(os.path.expanduser(value))
+        if key == "role" and value not in ROLES:
+            sys.exit(f"pa: no role called {value}. See: pa roles")
+        items = s.setdefault(LIST_SETTINGS[key], [])
+        if add and value not in items:
+            items.append(value)
+        elif not add and value in items:
+            items.remove(value)
+    else:
+        sys.exit("pa: settings are: " + ", ".join(list(LIST_SETTINGS) + sorted(SINGLE_SETTINGS)))
+    save("settings.json", s)
+    print(f"{key}: {value}" if add else f"removed {key}: {value}")
+
+
+def sh(*cmd, timeout=20, cwd=None):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd, stdin=subprocess.DEVNULL)
+        return r.returncode, r.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, ""
+
+
+# ── What a brief is made of ───────────────────────────────────────────────────
+
+def sec_schedule(s):
+    at = now()
+    soon = [i for i in load("schedule.json", []) if i["kind"] == "reminder" and datetime.fromisoformat(i["at"]) < at + timedelta(hours=36)]
+    return [f"{describe(i)}: {i['text']}" for i in sorted(soon, key=lambda x: x["at"])]
+
+
+def sec_todo(s):
+    today = now().strftime("%Y-%m-%d")
+    week = (now() + timedelta(days=7)).strftime("%Y-%m-%d")
+    out = []
+    for i in todos():
+        d = due_of(i["text"])
+        if d and d < today:
+            out.append(f"OVERDUE: {i['text']}")
+        elif d and d <= week:
+            out.append(f"due {d}: {i['text']}")
+    undated = sum(1 for i in todos() if not due_of(i["text"]))
+    if undated:
+        out.append(f"and {undated} with no date (pa todo)")
+    return out
+
+
+def sec_mail(s):
+    if not shutil.which("himalaya"):
+        return []
+    r = himalaya("envelope", "list", "--json", "--page-size", "30")
+    if r.returncode:
+        return []
+    found = json.loads(r.stdout)
+    found = found.get("envelopes", found) if isinstance(found, dict) else found
+    unread = [e for e in found if "seen" not in " ".join(map(str, e.get("flags", []))).lower()]
+    return ([f"{len(unread)} unread"] if unread else []) + [f"{sender_of(e)}: {str(e.get('subject'))[:70]}" for e in unread[:5]]
+
+
+def _ics_events(path_, day):
+    """Today's events from an .ics file. Single events only: repeating ones need a real calendar library."""
+    try:
+        text = re.sub(r"\r?\n[ \t]", "", open(path_, encoding="utf-8", errors="replace").read())
+    except OSError:
+        return []
+    out = []
+    for ev in re.findall(r"BEGIN:VEVENT(.*?)END:VEVENT", text, re.S):
+        start = re.search(r"^DTSTART[^:\n]*:(\d{8})(?:T(\d{4}))?", ev, re.M)
+        title = re.search(r"^SUMMARY[^:\n]*:(.*)$", ev, re.M)
+        if start and start.group(1) == day.strftime("%Y%m%d"):
+            t = f"{start.group(2)[:2]}:{start.group(2)[2:]} " if start.group(2) else ""
+            out.append(f"{t}{title.group(1).strip() if title else '(no title)'}")
+    return sorted(out)
+
+
+def sec_calendar(s):
+    return [e for c in s.get("calendars", []) for e in _ics_events(c, now())]
+
+
+def sec_weather(s):
+    if not s.get("place"):
+        return []
+    import live as L
+    lines = L.weather(s["place"]).splitlines()
+    return [lines[1]] if len(lines) > 1 else []
+
+
+def sec_news(s):
+    import live as L
+    out = []
+    for topic in s.get("topics", [])[:4]:
+        lines = [l for l in L.news(topic, 2).splitlines() if l.startswith("- ")]
+        out += [f"{topic}: {l[2:][:150]}" for l in lines[:2]]
+    return out
+
+
+def repos_of(s):
+    repos = list(s.get("repos", []))
+    code, top = sh("git", "rev-parse", "--show-toplevel")
+    if code == 0 and top not in repos:
+        repos.append(top)
+    return repos
+
+
+def sec_repos(s):
+    out = []
+    for repo in repos_of(s):
+        name = os.path.basename(repo)
+        code, st = sh("git", "status", "--porcelain", cwd=repo)
+        if code:
+            continue
+        bits = []
+        if st:
+            bits.append(f"{len(st.splitlines())} uncommitted")
+        _, ahead = sh("git", "rev-list", "--count", "@{u}..HEAD", cwd=repo)
+        _, behind = sh("git", "rev-list", "--count", "HEAD..@{u}", cwd=repo)
+        if ahead.isdigit() and int(ahead):
+            bits.append(f"{ahead} unpushed")
+        if behind.isdigit() and int(behind):
+            bits.append(f"{behind} behind")
+        if bits:
+            _, branch = sh("git", "rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
+            out.append(f"{name} ({branch}): {', '.join(bits)}")
+    return out
+
+
+def sec_prs(s):
+    if not shutil.which("gh"):
+        return []
+    out = []
+    code, text = sh("gh", "search", "prs", "--review-requested=@me", "--state=open", "--limit=8", "--json", "title,url,repository", timeout=25)
+    if code == 0 and text:
+        out += [f"review: {p['repository']['name']}: {p['title'][:70]} {p['url']}" for p in json.loads(text)]
+    code, text = sh("gh", "search", "prs", "--author=@me", "--state=open", "--limit=8", "--json", "title,url,repository", timeout=25)
+    if code == 0 and text:
+        out += [f"yours: {p['repository']['name']}: {p['title'][:70]} {p['url']}" for p in json.loads(text)]
+    code, text = sh("gh", "search", "issues", "--assignee=@me", "--state=open", "--limit=5", "--json", "title,url", timeout=25)
+    if code == 0 and text:
+        out += [f"assigned: {i['title'][:70]} {i['url']}" for i in json.loads(text)]
+    return out
+
+
+def _deps(repo):
+    """(ecosystem, name, version) pinned in a repo's lockfiles."""
+    out = []
+    try:
+        d = json.load(open(os.path.join(repo, "package-lock.json")))
+        for k, v in (d.get("packages") or {}).items():
+            if k and v.get("version"):
+                out.append(("npm", k.split("node_modules/")[-1], v["version"]))
+    except (OSError, ValueError):
+        pass
+    try:
+        d = json.load(open(os.path.join(repo, "composer.lock")))
+        out += [("Packagist", p["name"], p["version"].lstrip("v")) for p in d.get("packages", [])]
+    except (OSError, ValueError, KeyError):
+        pass
+    try:
+        for m in re.finditer(r'name = "([^"]+)"\nversion = "([^"]+)"', open(os.path.join(repo, "Cargo.lock")).read()):
+            out.append(("crates.io", m.group(1), m.group(2)))
+    except OSError:
+        pass
+    try:
+        for m in re.finditer(r"^([A-Za-z0-9_.-]+)==([^\s;]+)", open(os.path.join(repo, "requirements.txt")).read(), re.M):
+            out.append(("PyPI", m.group(1), m.group(2)))
+    except OSError:
+        pass
+    return out
+
+
+def sec_vulns(s):
+    import urllib.request
+    out = []
+    for repo in repos_of(s):
+        deps = _deps(repo)[:500]
+        if not deps:
+            continue
+        body = json.dumps({"queries": [{"package": {"name": n, "ecosystem": e}, "version": v} for e, n, v in deps]}).encode()
+        req = urllib.request.Request("https://api.osv.dev/v1/querybatch", data=body, headers={"Content-Type": "application/json"})
+        results = json.loads(urllib.request.urlopen(req, timeout=25).read()).get("results", [])
+        hit = [(deps[i], r["vulns"]) for i, r in enumerate(results) if r.get("vulns")]
+        if hit:
+            names = ", ".join(f"{d[1]} {d[2]}" for d, _ in hit[:5])
+            out.append(f"{os.path.basename(repo)}: {len(hit)} of {len(deps)} dependencies have known holes: {names}. Details: live vuln ECOSYSTEM NAME VERSION")
+    return out
+
+
+def sec_ci(s):
+    if not shutil.which("gh"):
+        return []
+    out = []
+    for repo in repos_of(s):
+        code, text = sh("gh", "run", "list", "--limit", "5", "--json", "conclusion,displayTitle,headBranch,url", cwd=repo, timeout=20)
+        if code == 0 and text:
+            bad = [r for r in json.loads(text) if r.get("conclusion") == "failure"]
+            if bad:
+                out.append(f"{os.path.basename(repo)}: {bad[0]['headBranch']} failed: {bad[0]['displayTitle'][:60]} {bad[0]['url']}")
+    return out
+
+
+def sec_system(s):
+    out = []
+    code, text = sh("df", "-P", "-x", "tmpfs", "-x", "devtmpfs", "-x", "squashfs", "-x", "overlay")
+    for line in text.splitlines()[1:] if code == 0 else []:
+        f = line.split()
+        if len(f) >= 6 and f[4].rstrip("%").isdigit() and int(f[4].rstrip("%")) >= 85:
+            out.append(f"disk {f[5]} is {f[4]} full")
+    code, text = sh("systemctl", "--failed", "--no-legend", "--plain")
+    out += [f"failed service: {l.split()[0]}" for l in text.splitlines()[:5]] if text else []
+    if os.path.exists("/var/run/reboot-required"):
+        out.append("a reboot is required")
+    code, text = sh("docker", "ps", "--filter", "health=unhealthy", "--format", "{{.Names}}")
+    out += [f"unhealthy container: {n}" for n in text.splitlines()[:5]] if code == 0 else []
+    code, text = sh("apt-get", "-s", "-o", "Debug::NoLocking=1", "upgrade", timeout=30)
+    security = len(re.findall(r"^Inst .*-security", text, re.M)) if code == 0 else 0
+    if security:
+        out.append(f"{security} security updates waiting")
+    return out
+
+
+def sec_certs(s):
+    out = []
+    for host in s.get("hosts", []):
+        name, _, port = host.partition(":")
+        try:
+            ctx = ssl.create_default_context()
+            with socket.create_connection((name, int(port or 443)), timeout=8) as raw, ctx.wrap_socket(raw, server_hostname=name) as tls:
+                ends = datetime.fromtimestamp(ssl.cert_time_to_seconds(tls.getpeercert()["notAfter"]))
+            days = (ends - now()).days
+            if days <= 21:
+                out.append(f"{host}: certificate ends in {days} days")
+        except (OSError, ssl.SSLError, ValueError) as e:
+            out.append(f"{host}: couldn't check the certificate ({str(e)[:60]})")
+    return out
+
+
+def sec_support(s):
+    import live as L
+    code, text = sh("sh", "-c", ". /etc/os-release && echo $ID $VERSION_ID")
+    out = []
+    if code == 0 and text:
+        distro, _, version = text.partition(" ")
+        try:
+            for line in L.eol(distro).splitlines():
+                if line.startswith(f"- {version}:") and "END OF LIFE" in line:
+                    out.append(f"{distro} {version} is past end of life")
+        except Exception:
+            pass
+    return out
+
+
+def sec_exploited(s):
+    import live as L
+    out = []
+    for product in s.get("products", [])[:5]:
+        lines = [l for l in L.cve(product).splitlines() if "EXPLOITED" in l]
+        out += [f"{product}: {l[2:][:120]}" for l in lines[:2]]
+    return out
+
+
+def sec_papers(s):
+    import live as L
+    out = []
+    for topic in s.get("topics", [])[:3]:
+        lines = [l for l in L.papers(topic, 3).splitlines() if l.startswith("- 20")]
+        out += [f"{topic}: {l[2:][:130]}" for l in sorted(lines, reverse=True)[:2]]
+    return out
+
+
+def sec_writing(s):
+    out = []
+    since = time.time() - 86400
+    for d in s.get("drafts", []):
+        total = changed = 0
+        for root, _, names in os.walk(d):
+            for n in names:
+                if n.endswith((".md", ".txt", ".tex", ".org")):
+                    p = os.path.join(root, n)
+                    try:
+                        w = len(open(p, encoding="utf-8", errors="replace").read().split())
+                    except OSError:
+                        continue
+                    total += w
+                    changed += w if os.path.getmtime(p) > since else 0
+        out.append(f"{os.path.basename(d)}: {total} words, {changed} in files touched today")
+    return out
+
+
+def sec_time(s):
+    state = load("clock.json", {"open": None, "entries": []})
+    out = [f"on the clock: {state['open']['project']} since {state['open']['start'][11:16]}"] if state.get("open") else []
+    cut = now() - timedelta(days=7)
+    totals = {}
+    for e in state.get("entries", []):
+        if datetime.fromisoformat(e["start"]) >= cut:
+            totals[e["project"]] = totals.get(e["project"], 0) + e["minutes"]
+    return out + [f"{p}: {m // 60}h {m % 60}m this week" for p, m in totals.items()]
+
+
+def sec_team(s):
+    if not shutil.which("gh"):
+        return []
+    out = []
+    for repo in repos_of(s):
+        code, text = sh("gh", "pr", "list", "--limit", "20", "--json", "title,updatedAt,author,url", cwd=repo, timeout=20)
+        if code == 0 and text:
+            stale = [p for p in json.loads(text) if p["updatedAt"][:10] < (now() - timedelta(days=3)).strftime("%Y-%m-%d")]
+            if stale:
+                out.append(f"{os.path.basename(repo)}: {len(stale)} PRs quiet for 3+ days, oldest by {stale[-1]['author'].get('login')}: {stale[-1]['title'][:60]}")
+    return out
+
+
+SECTIONS = {"schedule": ("Reminders", sec_schedule), "calendar": ("Calendar", sec_calendar), "todo": ("To-do", sec_todo), "mail": ("Mail", sec_mail), "weather": ("Weather", sec_weather),
+            "news": ("News", sec_news), "repos": ("Repos", sec_repos), "prs": ("Pull requests and issues", sec_prs), "ci": ("Failed builds", sec_ci), "vulns": ("Vulnerable dependencies", sec_vulns),
+            "system": ("This machine", sec_system), "certs": ("Certificates", sec_certs), "support": ("End of support", sec_support), "exploited": ("Being exploited", sec_exploited),
+            "papers": ("New papers", sec_papers), "writing": ("Writing", sec_writing), "time": ("Time", sec_time), "team": ("Team", sec_team)}
+BASE = ["schedule", "calendar", "todo", "mail", "weather"]
+ROLES = {
+    "everyone": (BASE + ["news"], "reminders, calendar, to-do, mail, weather, news on your topics"),
+    "developer": (["repos", "prs", "ci", "vulns"], "unpushed work, reviews waiting, failed builds, vulnerable dependencies"),
+    "sysadmin": (["system", "certs", "support"], "disks, failed services, updates, certificates, end of support"),
+    "security": (["exploited", "vulns", "certs"], "what's being exploited in your products, vulnerable dependencies, certificates"),
+    "manager": (["team", "prs", "time"], "PRs going quiet, reviews waiting on you, where the time went"),
+    "student": (["papers"], "deadlines come from to-do, classes from calendar, and papers on your topics"),
+    "researcher": (["papers", "news"], "new papers and news on your topics"),
+    "writer": (["writing"], "words written today, per drafts folder"),
+    "freelancer": (["time"], "hours per client, and invoices tracked as to-dos with a due date"),
+}
+
+
+def run_section(key, s, results):
+    title, fn = SECTIONS[key]
+    try:
+        results[key] = (title, fn(s))
+    except Exception as e:
+        results[key] = (title, [f"couldn't check this: {str(e)[:80]}"])
+
+
+def cmd_brief(args):
+    s = settings()
+    roles = args or s.get("roles") or ["developer"]
+    for r in roles:
+        if r not in ROLES:
+            sys.exit(f"pa: no role called {r}. See: pa roles")
+    keys = list(BASE) + ["news"]
+    for r in roles:
+        keys += [k for k in ROLES[r][0] if k not in keys]
+    results = {}
+    threads = [threading.Thread(target=run_section, args=(k, s, results), daemon=True) for k in keys]
+    for t in threads:
+        t.start()
+    limit = time.time() + 45
+    for t in threads:
+        t.join(max(0, limit - time.time()))
+    print(f"{now().strftime('%A %-d %B, %H:%M')}  ({', '.join(roles)})")
+    empty = True
+    for k in keys:
+        title, lines = results.get(k, (SECTIONS[k][0], ["still checking, so left out"]))
+        if lines:
+            empty = False
+            print(f"\n{title}")
+            for line in lines:
+                print(f"  {line}")
+    if empty:
+        print("\nNothing needs you.")
+
+
+def cmd_roles(_):
+    current = settings().get("roles") or []
+    for name, (_, what) in ROLES.items():
+        print(f"{'*' if name in current else ' '} {name:11s} {what}")
+    print("\nEveryone gets the basics. Add yours: pa set role developer")
+
+
+def cmd_standup(_):
+    s = settings()
+    since = (now() - timedelta(days=3 if now().weekday() == 0 else 1)).strftime("%Y-%m-%d %H:%M")
+    print(f"Since {since}:")
+    done = False
+    _, me = sh("git", "config", "user.email")
+    for repo in repos_of(s):
+        code, text = sh("git", "log", f"--since={since}", f"--author={me}", "--no-merges", "--format=%s", cwd=repo)
+        if code == 0 and text:
+            done = True
+            print(f"  {os.path.basename(repo)}:")
+            for line in text.splitlines()[:10]:
+                print(f"    {line[:90]}")
+    try:
+        for line in open(path("log.txt"), encoding="utf-8"):
+            when, _, what = line.rstrip("\n").partition("\t")
+            if when.replace("T", " ") >= since:
+                done = True
+                print(f"  {what}")
+    except OSError:
+        pass
+    if not done:
+        print("  nothing recorded")
+    print("Next:")
+    next_up = [i["text"] for i in sorted(todos(), key=lambda x: due_of(x["text"]) or "9999")[:3]]
+    print("\n".join(f"  {t}" for t in next_up) if next_up else "  nothing on the list")
+
+
+PREAMBLE = """You're acting as the user's personal assistant. `pa` does most of what's asked here, and it's safer than writing your own cron job or script:
+- reply to mail automatically, however they word it: `pa autoreply on "message"`
+- what's on my plate, what needs me: `pa brief`
+- a reminder: `pa remind tomorrow, 10am the thing`
+- tell me if something changes: `pa watch every day 9am: releases owner/repo`, or any other `live` command
+- work to do later: `pa job every day 7am: the task`
+`pa --help` has the rest. Do it, and say in a line or two what you set up and how to undo it.
+
+The request: """
+DIRECT = {"remind", "list", "cancel", "brief", "roles", "standup", "todo", "clock", "log", "watch", "job", "autoreply", "settings"}
+
+
+def cmd_ask(args):
+    """`?pa`: a plain command runs straight away, anything else goes to Sakura."""
+    text = " ".join(args).strip()
+    if not text:
+        return cmd_brief([])
+    first = text.split()[0].lower()
+    if first in DIRECT:
+        return main(shlex_split(text))
+    launch = os.path.join(ROOT, "bin", "sakura-launch")
+    os.execv(launch, [launch, PREAMBLE + text])
+
+
+def shlex_split(text):
+    import shlex
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return text.split()
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return
+    cmd, args = argv[0], argv[1:]
+    if "--help" in args or "-h" in args:
+        print(__doc__)
+        return
+    if cmd == "settings":
+        print(json.dumps(settings(), indent=1))
+        return
+    table = {"remind": cmd_remind, "list": cmd_list, "cancel": cmd_cancel, "job": cmd_job, "watch": cmd_watch, "tick": cmd_tick, "_job": cmd_job_run, "pending": cmd_pending,
+             "autoreply": cmd_autoreply, "todo": cmd_todo, "clock": cmd_clock, "log": cmd_log, "brief": cmd_brief, "roles": cmd_roles, "standup": cmd_standup, "ask": cmd_ask,
+             "set": cmd_set, "unset": lambda a: cmd_set(a, add=False)}
+    if cmd not in table:
+        sys.exit(f"pa: no command {cmd}. See: pa --help. For anything else: pa ask \"...\"")
+    table[cmd](args)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
