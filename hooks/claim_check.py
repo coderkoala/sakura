@@ -240,7 +240,7 @@ def stopped_at_step(answer, total):
 def continuation_reason(answer, prompt=""):
     """Block an empty final message, one that only announces work, or one that stops partway through."""
     a = (answer or "").strip()
-    if not a:
+    if not a.strip("`~ \n"):  # a lone code fence says nothing either
         return ("You ended the turn without writing an answer. Write the answer now, from the tool output above "
                 "(or, if something is still missing, run the tool call that gets it, then answer).")
     last = re.split(r"(?<=[.!?])\s+|\n+", a)[-1].strip(" *_`#>-")
