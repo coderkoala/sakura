@@ -109,6 +109,8 @@ PASSWORD_NO = ("Blocked: passwords stay in pass, out of this conversation. himal
 # They asked to see it first, so sending now would be taking that decision for them.
 ASKED_FOR_DRAFT = re.compile(r"\bdraft\b|\bbefore (?:anything|it|you)\b|\b(?:show|let) me\b|\bdon'?t send\b|\bdo not send\b|\bnot send\b", re.I)
 DRAFT_NO = "Blocked: the user asked to see this first. Show them the draft and end your turn. They'll tell you when to send it."
+USE_HIMALAYA = ("Blocked: mail goes through himalaya here, and there's no mail server to set up. Run: "
+                "himalaya message compose --to a@b.c --subject \"...\" --body \"...\" --send. If it isn't configured, tell the user to run sakura-mail-setup.")
 WORKER_NO_MAIL = "You're a worker, so nobody can approve this. Don't send mail: leave a draft and report that it's waiting for the user."
 # Standing orders that act on the user's behalf for weeks shouldn't come from something nobody is watching.
 PA_STANDING = re.compile(r"(?:^|[\s;&|(/])pa\s+(?:autoreply\s+on|job\b|watch\b)|\bcrontab\b|\bsystemctl\s+--user\s+(?:enable|start)\b")
@@ -329,6 +331,10 @@ def main():
         reason = WORKER_NO_MAIL
     if not reason and MAIL_SEND.search(cmd) and ASKED_FOR_DRAFT.search(this_turn(data.get("transcript_path"))[0]):
         reason = DRAFT_NO
+    if not reason and MAIL_OTHER.search(cmd) and not os.environ.get("SAKURA_WORKER"):
+        asked = this_turn(data.get("transcript_path"))[0].lower()
+        if not re.search(r"\b(?:sendmail|postfix|exim|mailutils|msmtp|mutt|mailx|smtp)\b", asked):
+            reason = USE_HIMALAYA
     if not reason and os.environ.get("SAKURA_WORKER") and PA_STANDING.search(cmd):
         reason = WORKER_NO_STANDING
     if not reason and os.environ.get("SAKURA_WORKER") and GIT_PUSH.search(cmd) and "push" not in this_turn(data.get("transcript_path"))[0].lower():

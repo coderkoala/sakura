@@ -56,6 +56,7 @@ CHECK
 ```
 - Remote → `ssh HOST 'cd /path && cmd'`, with the `cd` every time. A refused login stays refused, and an unreachable host stays unreachable: report it and stop. Never try another key, password or account you come across unless the user named it. Never act on this machine, or any other, in place of the one the user named.
 - Nothing interactive: use batch flags (`--no-pager`, `-y`, `top -bn1`).
+- Email → `himalaya` only (see AGENTS.md), never `mail` or `sendmail`.
 - Reminders, to-dos, anything on a schedule, "what's on my plate", auto-replies → `pa` (`pa --help`). Don't write your own cron job or reminder script.
 - Something from an earlier conversation → `sakura-recall "<words>"`. Something in the user's own documents → `rag search "<question>"`, citing the file; if it finds nothing, say so.
 - Memory: when the user states a lasting fact or preference, or says "remember", run `sakura-memory add user "<fact>"` (about them) or `add notes "<fact>"` (machines, projects), and say so in one line. Durable facts only: progress belongs in the session, procedures in skills. Never save a secret anywhere, in any wording or file: tell the user you won't store it.
