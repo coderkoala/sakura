@@ -75,7 +75,7 @@ def verdict(command):
 
 # What a coordinator session may run. It reads, plans and briefs; a worker does everything else.
 COORDINATOR_OK = {
-    "sakura-worker", "sakura-memory", "sakura-recall", "consult", "wikipedia", "web_search", "fetch_url", "curated_search",
+    "sakura-worker", "sakura-memory", "sakura-recall", "consult", "wikipedia", "web_search", "fetch_url", "curated_search", "live",
     "ls", "cat", "head", "tail", "wc", "rg", "grep", "find", "tree", "stat", "file", "pwd", "echo", "date", "which", "sort", "uniq", "cut", "true", "cd",
 }
 COORDINATOR_GIT = {"status", "log", "diff", "show", "branch", "rev-parse", "ls-files", "blame", "describe", "tag"}
@@ -90,6 +90,20 @@ scope: <files it may change>
 
 <what to do, in plain words>
 JOB"""
+
+
+# A script written straight into a directory on PATH skips the check that a kept tool has to pass, and doesn't follow the user
+# to other machines. Binaries and a cp to a place the user named aren't affected.
+PATH_DIR = r"(?:/usr/local/s?bin|/usr/s?bin|/opt/bin|(?:~|\$HOME|\$\{HOME\}|/home/[^/\s]+|/root)/(?:\.local/)?bin)/[\w.-]+"
+SCRIPT_ON_PATH = re.compile(r"(?:>>?\s*[\"']?|\btee\s+(?:-a\s+)?[\"']?)" + PATH_DIR)
+
+
+def script_on_path_verdict(cmd):
+    if "#!" not in cmd or not SCRIPT_ON_PATH.search(cmd):
+        return None
+    return ("Blocked: a command that should last goes through the gate, not straight onto PATH. Write the script to a file in this directory, then run:\n"
+            "sakura-tool keep NAME ./FILE --about \"one line\" <<'CHECK'\nprintf 'input\\n' | NAME | grep -qx 'expected'\nCHECK\n"
+            "It's on PATH in later sessions after that. If the user named this exact path, write the file elsewhere and cp it there.")
 
 
 def coordinator_verdict(cmd):
@@ -113,6 +127,8 @@ def coordinator_verdict(cmd):
             if sub == "remote" and words[2:] in ([], ["-v"]):
                 continue
             return no
+        if head == "sakura-tool" and words[1:] == ["list"]:
+            continue
         if head == "sed" and "-n" in words and not any(w.startswith("-i") for w in words):
             continue
         if head not in COORDINATOR_OK:
@@ -136,6 +152,8 @@ def main():
     reason = verdict(cmd)
     if not reason and os.environ.get("SAKURA_COORDINATOR"):
         reason = coordinator_verdict(cmd)
+    if not reason:
+        reason = script_on_path_verdict(cmd)
     if not reason and os.environ.get("SAKURA_WORKER") and re.search(r"\bsakura-worker\b", cmd):
         reason = "You're a worker, so you can't start another one. Do the work yourself, or report that it's too big."
     if reason:
@@ -146,15 +164,34 @@ def main():
         }}))
 
 
+def script_on_path_selftest():
+    deny = ["cat > /usr/local/bin/x <<'E'\n#!/bin/sh\necho\nE", "sudo tee /usr/local/bin/x > /dev/null <<'E'\n#!/bin/sh\nE",
+            "printf '#!/bin/sh\\n' > ~/.local/bin/x", "cat >> $HOME/bin/x <<'E'\n#!/bin/sh\nE", "tee -a /home/u/.local/bin/x <<'E'\n#!/bin/sh\nE",
+            "sudo bash -c 'cat > /usr/bin/x << \"I\"\n#!/bin/sh\nI'"]
+    allow = ["cat > ./x <<'E'\n#!/bin/sh\nE", "cp x /usr/local/bin/x", "curl -fsSL https://e/x -o ~/.local/bin/x", "cat /usr/local/bin/x",
+             "sudo install -m755 x /usr/local/bin/x", "echo 1 > /tmp/bin/x", "cat > /tmp/x <<'E'\n#!/bin/sh\nls /usr/local/bin/x\nE", "sakura-tool keep x ./x --about y --check z"]
+    bad = 0
+    for c in deny:
+        if not script_on_path_verdict(c):
+            print("should block:", c)
+            bad += 1
+    for c in allow:
+        if script_on_path_verdict(c):
+            print("should allow:", c)
+            bad += 1
+    return bad, len(deny) + len(allow)
+
+
 def coordinator_selftest():
     allow = ["git status", "git log --oneline -5", "git diff HEAD~1 | head -50", "sed -n '1,20p' a.py", "rg foo src",
              "sakura-worker --verify 'pytest -k x' 'fix > and < in parser'", "cat a 2>/dev/null", "sakura-memory state note 'done > ok'",
              "cd src && ls", "git remote -v", "sakura-worker <<'JOB'\nverify: python3 -c 'import a; assert a.f() > 1'\nscope: a.py\n\nfix f() > g(); rm -rf x\nJOB",
-             'sakura-worker --verify "python3 -c \\"assert 1 > 0\\"" brief',  "find . -name '*.py'", "git branch"]
+             'sakura-worker --verify "python3 -c \\"assert 1 > 0\\"" brief',  "find . -name '*.py'", "git branch", "sakura-tool list"]
     deny = ["sed -i s/a/b/ f", "echo x > f", "rm -rf build", "python3 a.py", "git commit -am x", "git push", "tee f", "cat a > b",
             "find . -delete", "find . -exec rm {} +", "ls; rm f", "echo $(rm f)", "git branch -D main", "git tag v1", "cp a b", "npm test",
             "git remote add x y", "ls && touch f", "cat a | sh", "cat > f <<'E'\nhello\nE", "python3 <<'E'\nprint(1)\nE",
-            "sakura-worker <<'J'\nbrief\nJ\nrm f"]
+            "sakura-worker <<'J'\nbrief\nJ\nrm f",
+            "sakura-tool keep a ./a --about x --check y", "sakura-tool remove a", "sakura-tool check", "sakura-tool list; rm f"]
     bad = 0
     for c in allow:
         if coordinator_verdict(c):
@@ -197,8 +234,9 @@ def selftest():
         if verdict(c):
             print("SHOULD ALLOW:", c, "->", verdict(c)[:60]); bad += 1
     cbad, ctotal = coordinator_selftest()
-    bad += cbad
-    total = len(deny) + len(allow) + ctotal
+    sbad, stotal = script_on_path_selftest()
+    bad += cbad + sbad
+    total = len(deny) + len(allow) + ctotal + stotal
     print(f"tool_guard selftest: {total - bad}/{total} ok")
     sys.exit(1 if bad else 0)
 

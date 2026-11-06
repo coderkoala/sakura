@@ -2,16 +2,19 @@
 """webkit — shared, zero-dependency web-knowledge core for Sakura.
 
 Used by both the sakura-web MCP server (server.py) and the web_search / fetch_url /
-wikipedia shell CLIs (../../bin/). Stdlib only. Each function returns plain text
-with source URLs so answers can be cited.
+wikipedia shell CLIs (../../bin/). Stdlib only: webtiers.py reaches the optional local tools.
+Each function returns plain text with source URLs so answers can be cited.
 """
 import json
 import re
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from html import unescape
 from html.parser import HTMLParser
+
+import webtiers
 
 UA = "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0"
 
@@ -151,6 +154,12 @@ def _ddg_html_results(query, max_results):
     return results, False
 
 
+def _engine_results(query, max_results):
+    """(results, blocked): the local SearXNG if it's running, otherwise DuckDuckGo directly."""
+    results = webtiers.searxng(query, max_results)
+    return (results, False) if results else _ddg_html_results(query, max_results)
+
+
 def _ddg_instant(query):
     """DuckDuckGo Instant Answer JSON API (not bot-blocked). Returns a short text answer or None."""
     try:
@@ -183,7 +192,7 @@ def web_search(query, max_results=8):
         parts.append(leader)
 
     # Supplement with real engine results only when this host isn't being blocked.
-    results, blocked = _ddg_html_results(query, max_results)
+    results, blocked = _engine_results(query, max_results)
     if results:
         lines = ["Other web results:"]
         for i, r in enumerate(results, 1):
@@ -197,8 +206,7 @@ def web_search(query, max_results=8):
             parts.append("DuckDuckGo Instant Answer:\n" + instant)
 
     if not parts:
-        return ("Wikipedia had no article and the search engines (DuckDuckGo, SearXNG) are serving "
-                "anti-bot/CAPTCHA pages to this host. Do NOT hand-roll curl/grep on a search engine — it "
+        return ("Wikipedia had no article and no search engine answered. Do NOT hand-roll curl/grep on a search engine — it "
                 "will not work. Try `wikipedia` with a cleaner query, or `fetch_url` on a specific known URL.")
     if blocked:
         parts.append("(Search engines are blocked from this host — the above is from Wikipedia/Wikidata, "
@@ -239,7 +247,9 @@ def curated_search(domain, query, max_results=8):
         avail = ", ".join(sorted(_SOURCES.get("domains", {})))
         return f"No curated sources for '{domain}'. Available domains: {avail}. Falling back to a plain web_search:\n\n" + web_search(query, max_results)
     scope = " OR ".join(f"site:{s}" for s in sites[:12])
-    results, blocked = _ddg_html_results(f"({scope}) {query}", max_results)
+    results, blocked = _engine_results(f"({scope}) {query}", max_results)
+    # Not every engine honours site: filters, and these answers are meant to come from these sites.
+    results = [r for r in results if any(urllib.parse.urlparse(r["url"]).netloc.endswith(s.split("/")[0]) for s in sites)]
     header = f"Curated '{domain}' sources: {', '.join(sites[:12])}\n\n"
     if results:
         lines = [f"Scoped search results for: {query}"]
@@ -334,14 +344,31 @@ def _render_feed(xml_text, url, max_items=30):
     return f"Source: {url} (RSS/Atom feed)\n\n" + "\n\n".join(lines) + extra
 
 
-def fetch_url(url, max_chars=20000):
+def _plain_fetch(url, timeout):
+    """(raw, final_url, ctype, status). A refusal comes back as a status; what isn't a refusal still raises."""
+    try:
+        raw, final, ctype = _get_full(url, timeout=timeout)
+        return raw, final, ctype, 200
+    except urllib.error.HTTPError as e:
+        if e.code not in webtiers.REFUSED_STATUS:
+            raise
+        return e.read().decode("utf-8", "replace"), url, "text/html", e.code
+
+
+def _page_text(raw, is_html):
+    return (webtiers.extract(raw) or html_to_text(raw)) if is_html else raw
+
+
+def fetch_url(url, max_chars=20000, deep=True):
+    """Readable text of a page. A page JavaScript has to build goes to headless Chromium unless deep=False, for callers on a
+    short clock. A site that refuses is reported as refusing, and never retried another way."""
     if not re.match(r"^https?://", url):
         return "Error: url must start with http:// or https://"
     max_chars = max(500, min(int(max_chars or 20000), 50000))
-    raw, final_url, ctype = _get_full(url, timeout=25)
+    raw, final_url, ctype, status = _plain_fetch(url, 25 if deep else 12)
 
     # A feed (direct, or a page that is really XML) renders as structured entries.
-    if _looks_like_feed(raw, ctype):
+    if status == 200 and _looks_like_feed(raw, ctype):
         rendered = _render_feed(raw, final_url)
         if rendered:
             clipped = rendered[:max_chars]
@@ -349,7 +376,18 @@ def fetch_url(url, max_chars=20000):
             return clipped + suffix
 
     is_html = "<" in raw[:2000]
-    text = html_to_text(raw) if is_html else raw
+    text = _page_text(raw, is_html)
+    if deep and is_html and not webtiers.challenged(status, raw, text) and webtiers.thin(text, raw):
+        got = webtiers.render(url)
+        if got:
+            html = got.get("html") or ""
+            built = _page_text(html, True)
+            if len(built.strip()) > len(text.strip()) or webtiers.challenged(got.get("status") or 200, html, built):
+                raw, final_url, status, text = html, got.get("url") or url, got.get("status") or 200, built
+    if webtiers.challenged(status, raw, text):
+        return (f"Source: {url}\n\nThis site refused automated reading (HTTP {status}, or a human check). Don't retry it another way. "
+                f"Use another source, or open it where the user can deal with it: sakura-browser open \"{url}\"")
+
     clipped = text[:max_chars]
     suffix = "" if len(text) <= max_chars else f"\n\n[truncated at {max_chars} chars]"
 
@@ -565,16 +603,15 @@ def latest_version(prompt):
     tool = next((name for name in _REGISTRY if re.search(r"\b" + re.escape(name) + r"\b", prompt, re.I)), None)
     if not tool:
         return None
-    kind, ident = _REGISTRY[tool]
-    ver, url = _registry_latest(kind, ident)
-    if not ver:
+    import lookups  # its GitHub path compares tags numerically; GitHub's own list isn't in version order
+    found = lookups.tool_latest(tool)
+    if not found:
         return None
     note = ""
     if re.search(r"\blts\b", prompt, re.I):
         note = (" (Note: not every project has a separate 'LTS' line — many just have fixed support windows per "
                 "release; check the project's support policy page for dates.)")
-    return (f"The latest published version of {tool} is {ver} (authoritative registry, fetched just now). "
-            f"Answer from this, not from training.{note}\nSource: {url}")
+    return f"{found}{note}\nAnswer from this, not from training."
 
 
 def version_context(prompt, cwd=".", extra_tools=None):
@@ -662,7 +699,7 @@ def wikipedia(query, sentences=6):
 TOOLS = [
     {
         "name": "web_search",
-        "description": "Search the live web via DuckDuckGo (no API key). Returns the top results with titles, snippets and source URLs. Use for current events, prices, releases and any fact that changes over time — then cite the URLs.",
+        "description": "Search the live web (no API key). Returns the top results with titles, snippets and source URLs. Use for current events, prices, releases and any fact that changes over time — then cite the URLs.",
         "inputSchema": {
             "type": "object",
             "required": ["query"],

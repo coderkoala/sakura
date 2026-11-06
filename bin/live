@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""live <what> ... — what's true right now, from sources that publish it. Answers carry their source and date.
+
+  live news "<topic>"              dated headlines. With no topic: recent world events
+  live weather "<place>"           now and the next days
+  live time "<place>"
+  live quakes [magnitude]
+  live fx USD NPR [amount]         exchange rate
+  live crypto BTC [USD]            spot price
+  live stock AAPL                  quote, may be delayed. Other exchanges: 7203.jp, vod.uk
+  live cve "<product or CVE id>"   vulnerabilities, and whether they're being exploited
+  live vuln npm lodash 4.17.0      known vulnerabilities in a package, optionally one version
+  live releases owner/repo         recent releases with their notes
+  live eol python                  which versions are still supported
+  live answers "<question>"        Stack Overflow
+  live issues "<words> repo:o/r"   GitHub issues
+  live discussion "<topic>"        Hacker News, past year
+  live papers "<topic>"            arXiv and Crossref
+  live stat Nepal population       World Bank: population, gdp, gdp per capita, inflation, unemployment, life expectancy, co2, internet
+  live research "<question>"       search, read the top pages, return what bears on it
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "mcp", "sakura-web"))
+import live as L
+
+COMMANDS = {"news": L.news, "weather": L.weather, "time": L.local_time, "quakes": L.quakes, "fx": L.fx, "crypto": L.crypto, "stock": L.stock,
+            "cve": L.cve, "vuln": L.vuln, "releases": L.releases, "eol": L.eol, "answers": L.answers, "issues": L.issues, "discussion": L.discussion,
+            "papers": L.papers, "stat": L.stat, "research": L.research}
+TEXT_ARG = {"news", "weather", "time", "cve", "eol", "answers", "issues", "discussion", "papers", "research"}
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] not in COMMANDS:
+        sys.exit(__doc__)
+    args = [" ".join(a[1:])] if a[0] in TEXT_ARG and a[1:] else a[1:]
+    try:
+        print(COMMANDS[a[0]](*args))
+    except TypeError:
+        sys.exit(__doc__)
+    except Exception as e:
+        sys.exit(f"live {a[0]}: couldn't get that from the source ({str(e)[:160]}). Try web_search.")
+
+
+if __name__ == "__main__":
+    main()

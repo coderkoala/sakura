@@ -173,6 +173,26 @@ MAX_CONTINUES = 3  # per turn: never trap the model in a loop
 PROGRESS = re.compile(r"(?:\bnow\s+\w+ing\b|\bnext\b[,:]?\s|\bstep\s+\d+\b|^\w+ing\s+(?:it|that|this)\b)", re.I)
 
 
+# A command for the user to run, when the request was for the work itself.
+WRITES_IN_FENCE = re.compile(r"```[a-z]*\n(?:(?!```).)*?(?:(?:^|\s)>>?\s*[\w/~$.]|\btee\s|\bsudo\s|\bchmod\s|\bcp\s|\bmv\s)", re.S)
+ASKING_HOW = re.compile(r"^\W*(how\b|what\b|why\b|which\b|explain\b|show me\b|can you (?:explain|show)\b|write me a (?:command|one-?liner)\b|give me a (?:command|one-?liner)\b)|\?\s*$", re.I)
+
+
+def handed_over(answer, prompt):
+    """The answer gives the user a command that changes something, and they asked for the thing, not for how to do it."""
+    return bool(WRITES_IN_FENCE.search(answer or "")) and not ASKING_HOW.search((prompt or "").strip())
+
+
+# The user wants this to last, the turn wrote a script, and nothing went through the gate.
+LASTING = re.compile(r"\b(future sessions?|next time|from now on|keep (?:it|this|that)|keep needing|permanent(?:ly)?|for later|stick around|still be (?:there|here)|there (?:later|next))\b", re.I)
+WROTE_SCRIPT = re.compile(r"#!|chmod\s+\S*\+?x")
+KEPT = re.compile(r"\bkept: \S+, at ")
+
+
+def tool_not_kept(prompt, evidence):
+    return bool(LASTING.search(prompt or "") and WROTE_SCRIPT.search(evidence or "") and not KEPT.search(evidence or ""))
+
+
 def steps_in(prompt):
     """How many steps the user numbered: "1) do x, 2) do y" -> 2. Zero if they didn't number them."""
     nums = [int(n) for n in re.findall(r"(?:^|[\s,;:(])(\d{1,2})[).]\s", prompt or "")]
@@ -243,13 +263,15 @@ def turn_results(transcript_path):
     return out
 
 
-def completion_reason(answer, results):
+def completion_reason(answer, results, prompt=""):
     """Block a claim of finished work when no tool ran, or when the last command failed and the answer doesn't say so."""
     if results is None or not answer or not DONE_CLAIM.search(answer):
         return None
     if not results:
+        if ASKING_HOW.search((prompt or "").strip()):
+            return None  # they asked a question, and "the request completed successfully" can just be the answer
         return ("You said the work is done, but you ran no tool this turn, so nothing happened. Do it now with tool "
-                "calls and report what the output shows. If the user only wanted an explanation, say that nothing was run.")
+                "calls and report what the output shows. If the user only wanted an explanation, give that explanation again and nothing else.")
     if results[-1] not in (None, 0) and not FAIL_ADMITTED.search(answer):
         return (f"Your last command exited with code {results[-1]}, and your answer says the work succeeded. Read that "
                 "output: fix the cause and re-run it, or tell the user plainly that it failed.")
@@ -284,6 +306,14 @@ def main():
     if not cont and steps_in(prompt) and not used_tools(path):
         cont = ("You listed the steps without doing them. If they are work to carry out, do them now with tool calls, "
                 "then give the result. If the user only asked for an explanation, restate your answer.")
+    if not cont and tool_not_kept(prompt, evidence):
+        cont = ("The user wants this command to last, and it hasn't been kept: a script on disk doesn't follow them. Remove anything you "
+                "installed by hand, then run this with its real input and expected output:\n"
+                "sakura-tool keep NAME ./FILE --about \"one line\" <<'CHECK'\nprintf 'input\\n' | NAME | grep -qx 'expected'\nCHECK\n"
+                "Report what it prints. If it can't be kept, tell the user that.")
+    if not cont and handed_over(answer, prompt) and not used_tools(path):
+        cont = ("You wrote out commands and ran nothing, so nothing has happened. Run them yourself now with tool calls, then report "
+                "what the output shows. If the user only wanted to read the commands, say that nothing was run.")
     if cont:
         n = _bump(data.get("turn_id"))
         if n == MAX_CONTINUES:  # the last chance: a turn must end with an answer, even if the answer is "I couldn't"
@@ -295,7 +325,7 @@ def main():
     # 2. Claims: checked once per turn (stop_hook_active means we already sent it back once).
     if data.get("stop_hook_active"):
         return
-    reason = completion_reason(answer, turn_results(path) if path else None) or decide(answer, prompt, evidence, grounded, fact)
+    reason = completion_reason(answer, turn_results(path) if path else None, prompt) or decide(answer, prompt, evidence, grounded, fact)
     if reason:
         print(json.dumps({"decision": "block", "reason": reason}))
 
@@ -367,6 +397,24 @@ def selftest():
         if bool(completion_reason(ans, results)) != want:
             bad += 1
             print(f"completion_reason wrong: {ans!r} {results} (wanted block={want})")
+    fence = "```bash\ncat << 'EOF' > /usr/local/bin/x\n#!/bin/sh\nEOF\n```"
+    make = "make me a command called x and keep it for future sessions"
+    for got, want, label in (
+        (handed_over(fence, make), True, "handed over a write"),
+        (handed_over(fence, "how do I install x?"), False, "they asked how"),
+        (handed_over("```bash\nls -la\n```", make), False, "a read isn't a handover"),
+        (handed_over("all good", make), False, "no command"),
+        (tool_not_kept(make, "cat > x <<E\n#!/bin/sh"), True, "script written, not kept"),
+        (tool_not_kept(make, "#!/bin/sh\nkept: x, at /a/x"), False, "kept"),
+        (tool_not_kept("fix the script", "#!/bin/sh"), False, "nobody asked for it to last"),
+        (tool_not_kept(make, "ls"), False, "no script yet"),
+        (bool(completion_reason("204 means the request completed successfully.", [], "what does HTTP status 204 mean?")), False, "an explanation isn't a claim"),
+        (bool(completion_reason("I fixed it.", [], "fix the bug")), True, "a claim with nothing run"),
+    ):
+        total += 1
+        if got != want:
+            bad += 1
+            print(f"wrong: {label}")
     import tempfile
     with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
         for role, text in (("user", "do: 1) a, 2) b"), ("assistant", "Step 1 done."), ("user", "<hook_prompt hook_run_id=\"x\">go on</hook_prompt>")):

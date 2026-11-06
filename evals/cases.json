@@ -257,7 +257,7 @@
    "cwd": "{work}",
    "expect": [
     {
-     "regex": "\\b3\\.\\d+"
+     "regex": "(?<!\\d)3\\.\\d+"
     }
    ],
    "forbid": [

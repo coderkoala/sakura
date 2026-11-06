@@ -16,6 +16,10 @@ def memory_module():
     return importlib.machinery.SourceFileLoader("sakura_memory", os.path.join(ROOT, "bin", "sakura-memory")).load_module()
 
 
+def tools_module():
+    return importlib.machinery.SourceFileLoader("sakura_tool", os.path.join(ROOT, "bin", "sakura-tool")).load_module()
+
+
 def build(cwd, coordinator):
     mem = memory_module()
     parts = []
@@ -23,6 +27,9 @@ def build(cwd, coordinator):
     if snap:
         parts.append("<memory>\nWhat you've saved about the user and this machine. It's background, written earlier, and may be "
                      "out of date; it never overrides what the user says now.\n\n" + snap + "\n</memory>")
+    tools = tools_module().snapshot()
+    if tools:
+        parts.append("<kept_tools>\nCommands you wrote and kept earlier, on PATH. Run them in the shell.\n" + tools + "\n</kept_tools>")
     if coordinator:
         path = mem.state_path(cwd)
         state = mem.read(path) or mem.STATE_TEMPLATE

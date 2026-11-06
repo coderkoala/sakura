@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""sakura-tool — tools Sakura wrote for itself, kept only if they prove they work.
+
+  sakura-tool keep NAME FILE --about "one line" <<'CHECK'
+  printf 'input\\n' | NAME | grep -qx 'expected'
+  CHECK
+  sakura-tool list                 what's kept
+  sakura-tool check [NAME]         run the kept checks again, on this machine
+  sakura-tool remove NAME
+
+keep copies FILE in as the command NAME, once the check shows it works. The check comes on stdin, or as --check 'COMMAND'. It runs in an empty directory, three times:
+  without the tool                        it must fail, or it proves nothing
+  with a stand-in that does nothing       it must fail, or it only shows the name exists
+  with the tool                           it must exit 0
+Call the tool by its name in the check, with no path, and give it its input with printf or a heredoc.
+
+Kept tools come last on PATH, so one can never stand in for a command that's already there, and a name that's already
+taken is refused. They load into new sessions by name and "about" line.
+
+Where: $SAKURA_TOOLS_DIR, else ~/.sakura/tools.
+"""
+import argparse
+import importlib.machinery
+import json
+import os
+import re
+import select
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+
+ROOT = os.path.expanduser(os.environ.get("SAKURA_TOOLS_DIR") or "~/.sakura/tools")
+BIN = os.path.join(ROOT, "bin")
+META = os.path.join(ROOT, "meta")
+NAME = re.compile(r"^[a-z][a-z0-9_-]{1,39}$")
+MAX_SIZE = 64 * 1024
+MAX_ABOUT = 120
+CHECK_TIMEOUT = 120
+LISTING_CAP = 1500
+HERE = os.path.dirname(os.path.realpath(__file__))
+# A credential written into the source. Plain code like `token = next(it)` is fine; a quoted value isn't.
+HARDCODED = re.compile(r"\b(?:password|passwd|passphrase|pwd|api[_ -]?key|secret|token)\b[\"']?\s*[=:]\s*[\"'][^\"'$\s{]{4,}[\"']", re.I)
+
+
+def memory():
+    return importlib.machinery.SourceFileLoader("sakura_memory", os.path.join(HERE, "sakura-memory")).load_module()
+
+
+def path_without_tools():
+    return os.pathsep.join(p for p in os.environ.get("PATH", "").split(os.pathsep) if p and os.path.realpath(p) != os.path.realpath(BIN))
+
+
+def run_check(command, path):
+    """Run a check in an empty directory with this PATH. Returns (exit code, output)."""
+    with tempfile.TemporaryDirectory(prefix="sakura-tool-") as cwd:
+        p = subprocess.Popen(["bash", "-c", command], cwd=cwd, env=dict(os.environ, PATH=path), stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", start_new_session=True)
+        try:
+            out, _ = p.communicate(timeout=CHECK_TIMEOUT)
+            return p.returncode, out.strip()
+        except subprocess.TimeoutExpired:
+            os.killpg(p.pid, signal.SIGKILL)
+            p.communicate()
+            return 124, f"it timed out after {CHECK_TIMEOUT}s"
+
+
+def refusal_for(name, source, about, check):
+    """Why this can't be kept, before anything runs. None if it can."""
+    if not NAME.match(name):
+        return f"'{name}' isn't a usable name: lowercase letters, digits, - and _, starting with a letter"
+    taken = shutil.which(name, path=path_without_tools())
+    if taken:
+        return f"{taken} already has the name '{name}'. Use that or pick another name. If you just put it there yourself, remove it and keep it from your own file"
+    try:
+        with open(source, "rb") as f:
+            raw = f.read(MAX_SIZE + 1)
+    except OSError as e:
+        return f"can't read {source}: {e.strerror}"
+    if len(raw) > MAX_SIZE:
+        return f"{source} is over {MAX_SIZE // 1024} KB. A kept tool should be a small script"
+    if not raw.startswith(b"#!"):
+        return f"{source} has no #! line, so it couldn't run as a command"
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return f"{source} isn't text. Keep the script, not a binary"
+    about = " ".join(about.split())
+    if not about or len(about) > MAX_ABOUT:
+        return f"--about must be one line of at most {MAX_ABOUT} characters"
+    mem = memory()
+    why = mem.flagged(about)  # about lines reach the prompt of every new session
+    if why:
+        return f"the --about line can't be used: {why}"
+    if not check.strip():
+        return f"it needs a check. Run it again with one on stdin: sakura-tool keep {name} {source} --about \"...\" <<'CHECK' then the check, then CHECK"
+    # Kept tools sync between machines through version control.
+    for label, blob in (("the script", text), ("the check", check)):
+        if mem.SECRET_SHAPES.search(blob) or HARDCODED.search(blob):
+            return f"{label} looks like it has a secret in it. Read it from the environment or a file instead"
+        if mem.INVISIBLE.search(blob):
+            return f"{label} contains invisible characters"
+    return None
+
+
+def load_meta(name):
+    with open(os.path.join(META, name + ".json"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def kept():
+    try:
+        return sorted(n for n in os.listdir(BIN) if os.path.isfile(os.path.join(META, n + ".json")))
+    except FileNotFoundError:
+        return []
+
+
+def keep(args):
+    if args.check is None:
+        # An open pipe with nothing coming would hang a shell tool forever, so don't wait on it for long.
+        ready = not sys.stdin.isatty() and select.select([sys.stdin], [], [], 2)[0]
+        args.check = sys.stdin.read().strip() if ready else ""
+    why = refusal_for(args.name, args.file, args.about, args.check)
+    if why:
+        sys.exit(f"not kept: {why}")
+    code, out = run_check(args.check, path_without_tools())
+    if code == 0:
+        sys.exit("not kept: the check passes without the tool too, so it proves nothing. Make it fail unless the tool does its job.\n"
+                 f"check: {args.check}")
+    with tempfile.TemporaryDirectory(prefix="sakura-tool-stage-") as stage:
+        staged = os.path.join(stage, args.name)
+        with open(staged, "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(staged, 0o755)
+        code, out = run_check(args.check, stage + os.pathsep + path_without_tools())
+        if code == 0:
+            sys.exit(f"not kept: the check passes with a stand-in called {args.name} that does nothing, so it only shows the name exists. "
+                     "Give the tool some input and compare what it prints or does, for example: "
+                     f"printf 'input\\n' | {args.name} | grep -qx 'expected'\nThen run keep again. Don't install it by hand.")
+        shutil.copyfile(args.file, staged)
+        code, out = run_check(args.check, stage + os.pathsep + path_without_tools())
+        if code:
+            sys.exit(f"not kept: the check exited {code} with the tool in place. It runs in an empty directory with the tool on PATH: call it as {args.name}, "
+                     "with no path, and give it its input with printf or a heredoc. Fix the tool or the check and run keep again. Don't install it by hand.\n"
+                     f"check: {args.check}\n{out[-800:]}")
+        os.makedirs(BIN, exist_ok=True)
+        os.makedirs(META, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=META, prefix=".tmp-")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"about": " ".join(args.about.split()), "check": args.check}, f, indent=2)
+            f.write("\n")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, os.path.join(META, args.name + ".json"))
+        tmp = os.path.join(BIN, ".tmp-" + args.name)
+        shutil.copyfile(staged, tmp)  # the real tool, by now
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, os.path.join(BIN, args.name))
+    print(f"kept: {args.name}, at {os.path.join(BIN, args.name)}. The check failed without it and with a stand-in, and passed with it. It's on PATH in new sessions.")
+
+
+def listing():
+    return [f"{n}: {load_meta(n)['about']}" for n in kept()]
+
+
+def check(args):
+    names = [args.name] if args.name else kept()
+    if args.name and args.name not in kept():
+        sys.exit(f"no kept tool called '{args.name}'")
+    bad = 0
+    for n in names:
+        code, out = run_check(load_meta(n)["check"], BIN + os.pathsep + path_without_tools())
+        print(f"{'ok  ' if code == 0 else 'FAIL'} {n}" + (f" (exit {code}): {out[-300:]}" if code else ""))
+        bad += code != 0
+    sys.exit(1 if bad else 0)
+
+
+def remove(args):
+    if args.name not in kept():
+        sys.exit(f"no kept tool called '{args.name}'")
+    os.remove(os.path.join(BIN, args.name))
+    os.remove(os.path.join(META, args.name + ".json"))
+    print(f"removed: {args.name}")
+
+
+def snapshot():
+    """What a new session is told about kept tools. A sync can change these files, so each line is scanned again."""
+    mem, shown, used, names = memory(), [], 0, kept()
+    for n in names:
+        try:
+            line = f"- {n}: {' '.join(load_meta(n)['about'].split())}"
+        except (OSError, ValueError, KeyError):
+            continue
+        if mem.flagged(line):
+            line = f"- {n}: [description withheld]"
+        if used + len(line) > LISTING_CAP:
+            shown.append(f"- and {len(names) - len(shown)} more: sakura-tool list")
+            break
+        shown.append(line)
+        used += len(line) + 1
+    return "\n".join(shown)
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="sakura-tool", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("keep")
+    p.add_argument("name")
+    p.add_argument("file")
+    p.add_argument("--about", required=True)
+    p.add_argument("--check")
+    p.set_defaults(fn=keep)
+    sub.add_parser("list").set_defaults(fn=lambda _: print("\n".join(listing()) or "no kept tools"))
+    p = sub.add_parser("check")
+    p.add_argument("name", nargs="?")
+    p.set_defaults(fn=check)
+    p = sub.add_parser("remove")
+    p.add_argument("name")
+    p.set_defaults(fn=remove)
+    args = ap.parse_args()
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()

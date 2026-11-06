@@ -92,14 +92,14 @@ def prefetch(prompt):
         if not _safe_to_fetch(url):
             continue
         try:
-            page = webkit.fetch_url(url, 6000)
+            page = webkit.fetch_url(url, 6000, deep=False)
         except Exception:
             continue  # the model reports a failed fetch itself; don't pretend it was fetched
         blocks.append(page)
         feed = FEED_HINT.search(page)
         if feed and _safe_to_fetch(feed.group(1)):
             try:
-                blocks.append(webkit.fetch_url(feed.group(1), 5000))
+                blocks.append(webkit.fetch_url(feed.group(1), 5000, deep=False))
             except Exception:
                 pass
     if not blocks:
@@ -126,6 +126,23 @@ def _title_matches(wiki, query):
     return bool(title & {w.lower() for w in re.findall(r"[^\W\d_]{3,}", query or "")})
 
 
+def _live(source, query, limit=25):
+    """A live lookup, on a clock: the hook has to finish, and a slow source can't hold up the answer."""
+    import threading
+    import live
+    got = []
+
+    def run():
+        try:
+            got.append(live.dispatch(source, query))
+        except Exception as e:
+            sys.stderr.write(f"[web_ground] live {source} failed: {e}\n")
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(limit)
+    return got[0] if got else None
+
+
 def by_intent(it, prompt, cwd):
     """Each guard encodes a way the words and the intent differ. No lookup beats a wrong one."""
     kind = it.get("intent")
@@ -133,6 +150,13 @@ def by_intent(it, prompt, cwd):
     if it.get("no_lookup") or it.get("time_scope") in ("hypothetical", "fiction"):
         return []
     out = []
+    source = it.get("live_source")
+    if source and source != "none" and it.get("time_scope") != "historical":
+        found = _live(source, it.get("live_query"))
+        if found:
+            out.append(_closing(it, found))
+            if kind != "tool_version":
+                return out
     if kind == "current_fact" and it.get("time_scope") == "historical":
         past = lookups.historical(it.get("query") or prompt, prompt)
         return [past + "\nAnswer from these rows, citing the source. Nothing else in this machine's files is relevant."] if past else []

@@ -33,9 +33,11 @@ MAX_FACT = 300
 STATE_CAP = 6000
 
 # What must never get into a file that's fed back to the model on every session and synced between machines.
-SECRET = re.compile(
+SECRET_SHAPES = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY|\bAKIA[0-9A-Z]{16}\b|\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_\w{20,}"
-    r"|\bsk-[A-Za-z0-9_-]{16,}|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bAIza[0-9A-Za-z_-]{30,}"
+    r"|\bsk-[A-Za-z0-9_-]{16,}|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bAIza[0-9A-Za-z_-]{30,}")
+SECRET = re.compile(
+    SECRET_SHAPES.pattern +
     r"|\b(?:password|passwd|passphrase|pwd|api[_ -]?key|secret|token)\b\s*(?:is|=|:)\s*\S{4,}"
     r"|\b(?:password|passwd|passphrase|pwd|api[_ -]?key|secret|token)\b\W+(?=\S*[\d!@#$%^&*_])\S{4,}", re.I)
 INJECTION = re.compile(

@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""sakura-browser — a browser on this machine that the agent drives, in a window the user can see.
+
+  sakura-browser open URL          load a page: prints its text and a numbered list of what can be clicked or typed in
+  sakura-browser read [chars]      the current page again
+  sakura-browser click N
+  sakura-browser type N "text" [--enter]
+  sakura-browser back
+  sakura-browser shot [FILE]       screenshot
+  sakura-browser status
+  sakura-browser close
+
+Logins and cookies stay in its own profile (~/.sakura/browser), between commands and sessions. CAPTCHAs, human checks and
+passwords are for the user: the agent is told to ask them, and can't act on that page until they've dealt with it.
+Needs sakura-web-setup. SAKURA_BROWSER_HEADLESS=1 hides the window.
+"""
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+DIR = os.path.expanduser(os.environ.get("SAKURA_BROWSER_DIR") or "~/.sakura/browser")
+SOCK = os.path.join(DIR, "sock")
+PYTHON = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "sakura", "webenv", "bin", "python")
+
+
+def connect(start):
+    deadline = time.time() + (40 if start else 0)
+    started = False
+    while True:
+        try:
+            s = socket.socket(socket.AF_UNIX)
+            s.connect(SOCK)
+            return s
+        except OSError:
+            if not start and time.time() >= deadline:
+                return None
+        if not started:
+            if not os.path.exists(PYTHON):
+                sys.exit("sakura-browser: not set up here. Run sakura-web-setup first.")
+            os.makedirs(DIR, mode=0o700, exist_ok=True)
+            with open(os.path.join(DIR, "daemon.log"), "ab") as log:
+                subprocess.Popen([PYTHON, os.path.join(ROOT, "mcp", "sakura-web", "browserd.py")], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+            started = True
+        if time.time() >= deadline:
+            sys.exit(f"sakura-browser: the browser didn't start. See {DIR}/daemon.log")
+        time.sleep(0.25)
+
+
+def main():
+    a = sys.argv[1:]
+    cmd = a[0] if a else ""
+    req = {"cmd": cmd, "attended": not os.environ.get("SAKURA_WORKER")}
+    try:
+        if cmd == "open":
+            req["url"] = a[1]
+        elif cmd == "read":
+            req["chars"] = a[1] if len(a) > 1 else None
+        elif cmd == "click":
+            req["ref"] = int(a[1])
+        elif cmd == "type":
+            req.update(ref=int(a[1]), text=a[2], enter="--enter" in a[3:])
+        elif cmd == "shot":
+            req["path"] = a[1] if len(a) > 1 else None
+        elif cmd not in ("back", "status", "close"):
+            sys.exit(__doc__)
+    except (IndexError, ValueError):
+        sys.exit(__doc__)
+    s = connect(cmd != "close")
+    if s is None:
+        print("closed")
+        return
+    with s:
+        s.sendall((json.dumps(req) + "\n").encode())
+        data = b""
+        while chunk := s.recv(65536):
+            data += chunk
+    if not data:
+        sys.exit("sakura-browser: the browser stopped. Run the command again to restart it.")
+    out = json.loads(data)
+    print(out["out"])
+    sys.exit(0 if out["ok"] else 1)
+
+
+if __name__ == "__main__":
+    main()

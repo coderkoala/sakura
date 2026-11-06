@@ -36,7 +36,7 @@ if [ -L "$SAKURA_HOME/AGENTS.md" ]; then rm -f "$SAKURA_HOME/AGENTS.md"; fi
 } > "$SAKURA_HOME/AGENTS.md"
 link "$ROOT/rules" "$SAKURA_HOME/rules"
 link "$ROOT/skills" "$HOME/.agents/skills"
-for tool in web_search wikipedia fetch_url curated_search consult sakura-model sakura-launch sakura-worker sakura-memory sakura-recall; do
+for tool in web_search wikipedia fetch_url curated_search consult sakura-model sakura-launch sakura-worker sakura-memory sakura-recall sakura-tool sakura-browser sakura-web-setup live; do
     ln -sf "$ROOT/bin/$tool" "$HOME/.local/bin/$tool"
 done
 
@@ -56,6 +56,7 @@ elif ! ollama list 2>/dev/null | grep -q 'qwen3.5-abliterated:9b'; then
 fi
 echo "  driver: $("$ROOT/bin/sakura-model" plan 2>&1 || true)"
 [ "$missing" = 1 ] || echo "  nothing else needed."
+[ -x "${XDG_DATA_HOME:-$HOME/.local/share}/sakura/webenv/bin/python" ] || echo "  optional: sakura-web-setup, for better search and fetching and the browser"
 echo
 echo "Run it with: sakura-launch"
 echo "For a ? key, add to ~/.bashrc:  alias '?'=sakura-launch"

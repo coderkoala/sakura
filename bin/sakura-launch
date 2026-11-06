@@ -13,7 +13,8 @@ case "${1:-}" in
 esac
 flags=(--dangerously-bypass-hook-trust)
 # ssh and scp that fail instead of waiting for a password nobody can type (see shims/ssh).
-PATH="$(dirname "$(dirname "$(readlink -f "$0")")")/shims:$PATH"
+# Tools Sakura kept for itself go last, so they can't stand in for anything already installed.
+PATH="$(dirname "$(dirname "$(readlink -f "$0")")")/shims:$PATH:${SAKURA_TOOLS_DIR:-$HOME/.sakura/tools}/bin"
 export PATH
 big="${SAKURA_BIG_MODEL:-huihui_ai/qwen3.5-abliterated:9b}"
 fast="${SAKURA_FAST_MODEL:-huihui_ai/qwen3.5-abliterated:2b}"
