@@ -306,6 +306,20 @@ def coordinator_verdict(cmd):
     return None
 
 
+# What changes something somewhere else (sakura-fix flags scripts by these, plus words like "deploy"). Kept here, in the
+# root-owned guard, not read from the environment: in a no-rerun ?fix session none of it runs, whether through the
+# script or typed by hand, as the eval did with deploy.sh's curl POST.
+SIDE_EFFECT = re.compile(
+    r"\bgit\s+push\b|\bdocker\s+push\b|\btwine\s+upload\b|\bgh\s+(?:release|pr)\s+create\b|\brsync\b|\bscp\b|\bsftp\b"
+    r"|\bkubectl\s+(?:apply|delete|rollout|scale|patch|create)\b|\bhelm\s+(?:install|upgrade|uninstall)\b"
+    r"|\bterraform\s+(?:apply|destroy)\b|\bansible-playbook\b"
+    r"|\bcurl\b[^\n]*?(?:-X\s*(?:POST|PUT|PATCH|DELETE)\b|--data|--form|\s-[dFT]\s|--upload-file)|\bwget\b[^\n]*--post"
+    r"|\brequests\.(?:post|put|patch|delete)\(|\burlopen\([^)\n]*data=|\bsmtplib\b|\bsendmail\b|\bhimalaya\b[^\n]*\bsend\b"
+    r"|\bmail\s+-s\b|\b(?:drop\s+(?:table|database)|delete\s+from|truncate\s+table)\b",
+    re.I)
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n.*?\n\s*\2\s*(?:\n|$)", re.S)
+
+
 def no_rerun_verdict(cmd, spec=None):
     """In a ?fix session for a command that isn't safe to run twice (sakura-fix decides), refuse running it again."""
     spec = spec if spec is not None else os.environ.get("SAKURA_FIX_NO_RERUN")
@@ -325,6 +339,14 @@ def no_rerun_verdict(cmd, spec=None):
     if re.search(r"(?:^|[;&|(`]\s*|\$\(\s*)sudo\b", cmd):
         return ("Nothing runs as root in this ?fix session: the command it's about isn't safe to run twice, and its lines run by hand are the same thing. "
                 "Fix the cause in the files, then tell the user what to run, including anything that needs sudo.")
+    for seg in re.split(r"&&|\|\||[;|\n]", HEREDOC.sub(" ", cmd)):  # an edit's text isn't a command
+        words = seg.split()
+        while words and re.match(r"^[A-Za-z_]\w*=", words[0]):
+            words = words[1:]
+        if words and os.path.basename(words[0]) not in GUARD_READERS | {"edit_file", "view_file"} and SIDE_EFFECT.search(seg):
+            return ("Nothing that changes anything elsewhere runs in this ?fix session (a POST, a push, a send, an rsync): that's "
+                    "what the command ?fix was asked about does, and typing its lines by hand is running it again. Fix the cause "
+                    "in the files, then tell the user to run it and what it should print.")
     if re.search(r"\b(?:ba|z|da|k)?sh\s+-n\s", cmd) and not re.search(r"[;&|]", cmd):
         return None  # a syntax check runs nothing
     for name in spec.get("scripts") or []:
@@ -502,7 +524,11 @@ def selftest():
                     ("cat deploy.sh", False), ("grep curl deploy.sh", False), ("sed -n 1,9p deploy.sh", False), ("ls", False), ("cp deploy.sh deploy.sh.bak", False),
                     ("sudo cp -r site/. / 2>&1; echo \"exit: $?\"", True), ("cd p && sudo ls /root", True), ("echo $(sudo id)", True),
                     ("bash -n deploy.sh", False), ("bash -n deploy.sh; ./deploy.sh", True),
-                    ("edit_file deploy.sh <<'E'\n@@old\nx\n@@new\ny\n@@end\nE", False)):
+                    ("edit_file deploy.sh <<'E'\n@@old\nx\n@@new\ny\n@@end\nE", False),
+                    ("curl -fsS http://127.0.0.1:1/releases -d version=$(cat VERSION); cp -r site/. x; echo deployed", True),
+                    ("git push origin main", True), ("rsync -a site/ host:/srv/", True), ("python3 -c 'import requests; requests.post(u)'", True),
+                    ("edit_file deploy.sh <<'E'\n@@old\ncurl -fsS http://x -d v=1\n@@new\ncurl -fsS http://x -d v=2\n@@end\nE", False),
+                    ("grep -n curl deploy.sh", False), ("curl -s http://127.0.0.1:1/health", False)):
         if bool(no_rerun_verdict(c, spec)) != want:
             print("no_rerun wrong:", c); bad += 1
     root_cases = (("sudo cp -r site/. /", True), ("cp -r site/. / 2>&1; echo $?", True), ("cp -r site/. \"/\"", True), ("mv x /", True),
@@ -525,7 +551,7 @@ def selftest():
     for c, want in guard_cases:
         if bool(guard_self_verdict(c)) != want:
             print("guard_self wrong:", c); bad += 1
-    bad_count_extra = 19 + len(root_cases) + len(guard_cases)  # the no_rerun, root_dest and guard_self cases above
+    bad_count_extra = 26 + len(root_cases) + len(guard_cases)  # the no_rerun, root_dest and guard_self cases above
     cbad, ctotal = coordinator_selftest()
     sbad, stotal = script_on_path_selftest()
     bad += cbad + sbad
