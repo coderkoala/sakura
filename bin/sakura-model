@@ -15,6 +15,9 @@ doesn't qualify keeps the 9b on Ollama; `up` failing is not an error for the cal
   sakura-model down     stop it and free the VRAM
   sakura-model status   is it up, and what does it hold
   sakura-model pull     download the model (15.6 GB), resumable, checksum verified
+  sakura-model models   every model that suits this machine, and which are missing
+  sakura-model pull-all download the missing ones, most needed first, while the disk allows
+                        (--background: as a user unit, so a first start doesn't wait for it)
 """
 import hashlib
 import json
@@ -167,6 +170,127 @@ def pull():
     return 0
 
 
+BIN = os.path.dirname(os.path.realpath(__file__))
+PULL_UNIT = "sakura-models"
+DISK_MARGIN_GIB = 10    # left free after the downloads, so a full disk never breaks the desktop
+
+
+def ollama_models():
+    """Ollama models Sakura uses, most needed first: (name, what for, min RAM GiB, download GiB).
+    Names come from where they're used (sakura-launch, consult, rag), so this list can't drift from them."""
+    from importlib.machinery import SourceFileLoader
+    roles = SourceFileLoader("consult", os.path.join(BIN, "consult")).load_module().ROLES
+    rag = os.environ.get("SAKURA_RAG_MODEL", "qwen3-embedding:0.6b")
+    big = os.environ.get("SAKURA_BIG_MODEL", "huihui_ai/qwen3.5-abliterated:9b")
+    fast = os.environ.get("SAKURA_FAST_MODEL", "huihui_ai/qwen3.5-abliterated:2b")
+    # RAM floors: the model loaded beside a desktop. Sizes: the Q4 downloads, measured 2026-11.
+    return [
+        (big, "the agent when the driver can't run, and the intent check", 0, 6.6),
+        (rag, "rag search", 0, 0.7),
+        (fast, "SAKURA_FAST=1", 0, 1.9),
+        (roles["coder-fast"], "consult coder-fast", 0, 1.9),
+        (roles["security"], "consult security", 16, 4.7),
+        (roles["prose"], "consult prose", 16, 4.9),
+        (roles["coder"], "consult coder", 24, 9.0),
+        (roles["reason"], "consult reason", 24, 9.0),
+    ]
+
+
+def ollama_have():
+    try:
+        tags = json.loads(urllib.request.urlopen(os.environ.get("OLLAMA_API_BASE", "http://127.0.0.1:11434") + "/api/tags", timeout=5).read())
+    except Exception:
+        return None
+    names = set()
+    for m in tags.get("models", []):
+        names.add(m["name"])
+        if m["name"].endswith(":latest"):
+            names.add(m["name"][:-7])
+    return names
+
+
+def free_gib(path):
+    while path and not os.path.exists(path):
+        path = os.path.dirname(path)
+    return shutil.disk_usage(path or "/").free / 2**30
+
+
+def model_plan():
+    """[(name, why, size GiB, state)] for this machine. state: have | missing | skip: reason."""
+    have = ollama_have()
+    ram = ram_gib()
+    rows = []
+    for name, why, min_ram, size in ollama_models():
+        if have is not None and name in have:
+            rows.append((name, why, size, "have"))
+        elif ram < min_ram:
+            rows.append((name, why, size, f"skip: {ram:.0f} GiB RAM, needs {min_ram}"))
+        else:
+            rows.append((name, why, size, "missing"))
+    ok, reason, cache = plan()
+    if ok or (os.path.isfile(MODEL) and os.path.getsize(MODEL) == SIZE):  # a busy card today doesn't make the file missing
+        rows.append((FILENAME, "the driver, on this machine's GPU", SIZE / 2**30, "have"))
+    elif cache:  # qualifies, only the file is missing
+        rows.append((FILENAME, "the driver, on this machine's GPU", SIZE / 2**30, "missing"))
+    else:
+        rows.append((FILENAME, "the driver, on this machine's GPU", SIZE / 2**30, f"skip: {reason}"))
+    return rows, have
+
+
+def models():
+    rows, have = model_plan()
+    if have is None:
+        print("Ollama isn't answering, so its models can't be checked: sudo systemctl start ollama")
+    for name, why, size, state in rows:
+        print(f"  {state:8.60s}  {size:5.1f} GiB  {name}  ({why})")
+    return 0
+
+
+def pull_all(background=False):
+    if background:
+        if subprocess.run(["systemctl", "--user", "is-active", "--quiet", PULL_UNIT]).returncode == 0:
+            print(f"already downloading: journalctl --user -u {PULL_UNIT}")
+            return 0
+        subprocess.run(["systemctl", "--user", "reset-failed", PULL_UNIT], capture_output=True)
+        # A unit doesn't inherit this shell, so the overrides that choose the models go with it.
+        keep = ("SAKURA_RAG_MODEL", "SAKURA_BIG_MODEL", "SAKURA_FAST_MODEL", "SAKURA_MODEL_DIR", "OLLAMA_API_BASE", "OLLAMA_MODELS", "NTFY_TOPIC", "NTFY_SERVER")
+        env = [f"--setenv={k}={os.environ[k]}" for k in keep if k in os.environ]
+        r = subprocess.run(["systemd-run", "--user", f"--unit={PULL_UNIT}", "--collect", "--quiet", "--nice=10",
+                            "-p", "IOSchedulingClass=idle", *env, os.path.realpath(__file__), "pull-all"])
+        if r.returncode == 0:
+            print(f"downloading Sakura's models in the background: journalctl --user -fu {PULL_UNIT}")
+        return r.returncode
+    rows, have = model_plan()
+    if have is None:
+        print("sakura-model: Ollama isn't answering; start it (sudo systemctl start ollama) and run sakura-model pull-all", file=sys.stderr)
+        return 1
+    ollama_dir = os.environ.get("OLLAMA_MODELS") or ("/usr/share/ollama/.ollama/models" if os.path.isdir("/usr/share/ollama") else os.path.expanduser("~/.ollama/models"))
+    got, skipped, failed = [], [], []
+    for name, why, size, state in rows:
+        if state != "missing":
+            continue
+        where = MODEL_DIR if name == FILENAME else ollama_dir
+        if free_gib(where) - size < DISK_MARGIN_GIB:
+            skipped.append(f"{name} ({size:.1f} GiB; {free_gib(where):.0f} GiB free, keeping {DISK_MARGIN_GIB})")
+            continue
+        print(f"pulling {name} ({size:.1f} GiB): {why}", flush=True)
+        rc = pull() if name == FILENAME else subprocess.run(["ollama", "pull", name]).returncode
+        (failed if rc else got).append(name)
+    for s in skipped:
+        print(f"skipped, not enough disk: {s}")
+    for f in failed:
+        print(f"failed: {f}; sakura-model pull-all retries it", file=sys.stderr)
+    if got or failed or skipped:
+        msg = f"{len(got)} downloaded" + (f", {len(failed)} failed" if failed else "") + (f", {len(skipped)} skipped for disk" if skipped else "")
+        print(msg)
+        notify = os.path.join(BIN, "notify")
+        if os.access(notify, os.X_OK):
+            subprocess.run([notify, "Sakura models", msg + ". sakura-model models shows the rest."], capture_output=True)
+    else:
+        print("every model that suits this machine is here")
+    return 1 if failed else 0
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "plan"
     if cmd == "plan":
@@ -184,6 +308,10 @@ def main():
         return 0
     if cmd == "pull":
         return pull()
+    if cmd == "models":
+        return models()
+    if cmd == "pull-all":
+        return pull_all(background="--background" in sys.argv[2:])
     print(__doc__)
     return 2
 

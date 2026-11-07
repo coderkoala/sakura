@@ -2,7 +2,8 @@
 # Install Sakura for this user. Safe to run again: it re-renders config and re-links everything.
 #   ./install.sh [--profile FILE]
 # FILE (default ~/.config/sakura/profile.md) holds your own notes for the agent, added to its instructions.
-# It downloads the engine from this version's release, but no models; it tells you what's still missing at the end.
+# It downloads the engine from this version's release, then every model that suits this machine in the background
+# (sakura-model models; SAKURA_NO_AUTOPULL=1 skips that). It tells you what's still missing at the end.
 set -eu
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 SAKURA_HOME="$HOME/.sakura"
@@ -82,9 +83,10 @@ if ! command -v sakura >/dev/null && [ ! -x "$HOME/.local/bin/sakura" ]; then
     need "the engine: it couldn't be downloaded, so build it: see $ROOT/patches/README.md"
 fi
 if ! command -v ollama >/dev/null; then
-    need "install Ollama: https://ollama.com/download"
-elif ! ollama list 2>/dev/null | grep -q 'qwen3.5-abliterated:9b'; then
-    need "ollama pull huihui_ai/qwen3.5-abliterated:9b"
+    need "install Ollama: https://ollama.com/download, then: sakura-model pull-all"
+elif [ "${SAKURA_NO_AUTOPULL:-0}" != 1 ] && "$ROOT/bin/sakura-model" models 2>/dev/null | grep -q '^  missing'; then
+    # Every model that suits this machine, most needed first, while the disk allows. sakura-model models lists them.
+    "$ROOT/bin/sakura-model" pull-all --background | sed 's/^/  /' || need "sakura-model pull-all"
 fi
 echo "  driver: $("$ROOT/bin/sakura-model" plan 2>&1 || true)"
 [ "$missing" = 1 ] || echo "  nothing else needed."

@@ -78,8 +78,24 @@ else
         exit 1
     fi
     if ! ollama list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$big"; then
-        echo "sakura: model $big isn't downloaded. Get it with: ollama pull $big" >&2
-        exit 1
+        # First start: there's nothing to run without it, so wait for this one; the rest come in the background below.
+        echo "sakura: first start, downloading $big (6.6 GB); the other models follow in the background." >&2
+        if ! ollama pull "$big"; then
+            echo "sakura: couldn't download $big. Try again with: ollama pull $big" >&2
+            exit 1
+        fi
+    fi
+fi
+
+# Every model that suits this machine (sakura-model models), fetched in the background when some are missing.
+# Checked once a day, not on every launch; workers never start downloads.
+if [ "$mode" != exec ] && [ "${SAKURA_NO_AUTOPULL:-0}" != 1 ] && command -v sakura-model >/dev/null 2>&1; then
+    stamp="${SAKURA_HOME:-$HOME/.sakura}/models-checked"
+    if [ "$(cat "$stamp" 2>/dev/null)" != "$(date +%F)" ]; then
+        date +%F > "$stamp" 2>/dev/null
+        if sakura-model models 2>/dev/null | grep -q '^  missing'; then
+            sakura-model pull-all --background >&2 || true
+        fi
     fi
 fi
 

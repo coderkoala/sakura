@@ -99,8 +99,8 @@ flowchart TD
 experts stay in RAM, served by the `llama-server` that ships with Ollama. The VRAM budget is read from the machine, so
 a desktop whose display holds VRAM gets a smaller cache. Anything else stays on the 9b on Ollama.
 
-Run `sakura-model pull` once per device (15.6 GB, checksum verified): nothing downloads it for you. Without it, or if
-the server can't start, `?` falls back to the 9b.
+On a machine that qualifies, the install and the first start download it in the background with the other models
+(15.6 GB, checksum verified). Until it's there, or if the server can't start, `?` falls back to the 9b.
 
 Measured on an RTX 4060 Laptop with 32 GB RAM, RAM and budget as noted (`evals/bench_server.py`, `evals/run.py`):
 
@@ -145,13 +145,15 @@ Linux with an NVIDIA GPU, Python 3.11+, git and [Ollama](https://ollama.com/down
 
 ```bash
 git clone https://github.com/coderkoala/sakura && cd sakura
-./install.sh                                   # tells you what's still missing
-ollama pull huihui_ai/qwen3.5-abliterated:9b
+./install.sh                                   # starts the model downloads; tells you what's still missing
 # the engine comes from the release; to build it yourself: SAKURA_NO_BINARY=1 and patches/README.md
 sakura-launch
 ```
 
-`sakura-model plan` says which driver your machine can run, and `sakura-model pull` fetches the bigger one (15.6 GB).
+The install and the first start fetch every model that suits the machine, in the background, most needed first: the 9b,
+the small helpers, the `consult` models that fit its RAM, and the driver if its GPU qualifies, while keeping 10 GB of disk free.
+`sakura-model models` lists them and what's missing; `sakura-model pull-all` fetches the rest now; `SAKURA_NO_AUTOPULL=1` turns it off.
+`sakura-model plan` says which driver your machine can run.
 To add your own notes for the agent, put them in `~/.config/sakura/profile.md` and run `./install.sh` again.
 
 ## Credit
