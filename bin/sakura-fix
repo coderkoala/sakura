@@ -6,6 +6,7 @@ screen showed. This turns that into a brief and opens Sakura where the command r
   --shell PID    whose failure to fix (the key passes the shell's own PID)
   --record FILE  read the failure from FILE instead (evals)
   --exec         one-shot, no TUI; prints the answer (evals, scripts)
+  --json         with --exec, print the run as JSON events
   --print        print the brief and stop
 """
 import os
@@ -92,13 +93,15 @@ def brief(status, when, cwd, command, screen, hint):
 
 
 def main(argv):
-    shell, record, mode, hint = None, None, "tui", []
+    shell, record, mode, hint, json_out = None, None, "tui", [], False
     it = iter(argv)
     for a in it:
         if a == "--shell":
             shell = next(it, None)
         elif a == "--record":
             record = next(it, None)
+        elif a == "--json":
+            json_out = True
         elif a in ("--exec", "--print"):
             mode = a[2:]
         elif a in ("-h", "--help"):
@@ -127,7 +130,7 @@ def main(argv):
         print(f"sakura-fix: {cwd} is gone, so this runs in {os.getcwd()}", file=sys.stderr)
     launch = ["sakura-launch"]
     if mode == "exec":
-        launch += ["--exec", "--skip-git-repo-check", text]
+        launch += ["--exec", "--skip-git-repo-check"] + (["--json"] if json_out else []) + [text]
     else:
         launch += [text]
     try:
