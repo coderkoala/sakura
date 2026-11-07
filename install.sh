@@ -30,6 +30,22 @@ render() {
 }
 render "$ROOT/config.toml" "$SAKURA_HOME/config.toml"
 render "$ROOT/hooks.json" "$SAKURA_HOME/hooks.json"
+# The guard runs from its root-owned copy once sakura-guard-install has put it there; then it's left out here, or it
+# would run twice, once from a copy Sakura can edit. Until then it stays, so no machine runs unguarded.
+if "$ROOT/bin/sakura-guard-install" --check >/dev/null 2>&1; then
+    python3 - "$SAKURA_HOME/hooks.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+for event, groups in list(d["hooks"].items()):
+    for g in groups:
+        g["hooks"] = [h for h in g["hooks"] if not any(n in h.get("command", "") for n in ("tool_guard.py", "claim_check.py"))]
+    d["hooks"][event] = [g for g in groups if g["hooks"]]
+    if not d["hooks"][event]:
+        del d["hooks"][event]
+json.dump(d, open(p, "w"), indent=2)
+PY
+fi
 if [ -L "$SAKURA_HOME/AGENTS.md" ]; then rm -f "$SAKURA_HOME/AGENTS.md"; fi
 {
     cat "$ROOT/AGENTS.md"
@@ -37,7 +53,7 @@ if [ -L "$SAKURA_HOME/AGENTS.md" ]; then rm -f "$SAKURA_HOME/AGENTS.md"; fi
 } > "$SAKURA_HOME/AGENTS.md"
 link "$ROOT/rules" "$SAKURA_HOME/rules"
 link "$ROOT/skills" "$HOME/.agents/skills"
-for tool in web_search wikipedia fetch_url curated_search consult sakura-model sakura-launch sakura-worker sakura-memory sakura-recall sakura-tool sakura-browser sakura-web-setup live view_file edit_file rag sakura-mail-setup pa sakura-fix; do
+for tool in web_search wikipedia fetch_url curated_search consult sakura-model sakura-guard-install sakura-launch sakura-worker sakura-memory sakura-recall sakura-tool sakura-browser sakura-web-setup live view_file edit_file rag sakura-mail-setup pa sakura-fix; do
     ln -sf "$ROOT/bin/$tool" "$HOME/.local/bin/$tool"
 done
 
@@ -89,6 +105,7 @@ elif [ "${SAKURA_NO_AUTOPULL:-0}" != 1 ] && "$ROOT/bin/sakura-model" models 2>/d
     "$ROOT/bin/sakura-model" pull-all --background | sed 's/^/  /' || need "sakura-model pull-all"
 fi
 echo "  driver: $("$ROOT/bin/sakura-model" plan 2>&1 || true)"
+"$ROOT/bin/sakura-guard-install" --check >/dev/null 2>&1 || need "the guard where Sakura can't edit it: sudo $ROOT/bin/sakura-guard-install"
 [ "$missing" = 1 ] || echo "  nothing else needed."
 [ -x "${XDG_DATA_HOME:-$HOME/.local/share}/sakura/webenv/bin/python" ] || echo "  optional: sakura-web-setup, for better search and fetching and the browser"
 echo

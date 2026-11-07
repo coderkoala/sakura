@@ -335,6 +335,40 @@ def no_rerun_verdict(cmd, spec=None):
     return None
 
 
+# The guard itself: Sakura may improve the rest of itself, never this. Reading it is fine; anything else isn't.
+GUARD_PARTS = re.compile(r"tool_guard\.py|claim_check\.py|/etc/codex\b|\bcodex/requirements|/usr/local/lib/sakura\b|sakura-guard-install")
+GUARD_READERS = {"cat", "less", "more", "head", "tail", "grep", "egrep", "rg", "view_file", "wc", "diff", "ls", "stat", "file",
+                 "sha256sum", "md5sum", "nl", "bat", "echo", "true", "cd", "pwd"}
+GUARD_NO = ("That's Sakura's guard. You can read it, but not change, move, replace, disable or reinstall it, by any route. "
+            "Everything else in Sakura you may improve. For the guard, tell the user what you'd change and why, and they decide.")
+
+
+def guard_self_verdict(cmd):
+    if not GUARD_PARTS.search(cmd):
+        return None
+    if re.search(r">|\$\(|`|<\(|\beval\b|\bbase64\b|\bxxd\b", cmd):
+        return GUARD_NO  # a write, or text built at run time
+    for seg in re.split(r"&&|\|\||[;|\n]", cmd):
+        words = seg.split()
+        while words and re.match(r"^[A-Za-z_]\w*=", words[0]):
+            words = words[1:]
+        if not words:
+            continue
+        first = os.path.basename(words[0])
+        if first in GUARD_READERS:
+            continue
+        if first == "sed" and len(words) > 1 and words[1] == "-n" and not any(w.startswith("-i") or w == "--in-place" for w in words):
+            continue
+        if first == "git" and len(words) > 1 and words[1] in ("diff", "log", "show", "status", "blame", "grep"):
+            continue
+        if re.fullmatch(r"python3?", first) and words[-1] == "--selftest" and len(words) <= 4:
+            continue
+        if first == "sakura-guard-install" and words[1:] == ["--check"]:
+            continue
+        return GUARD_NO
+    return None
+
+
 ROOT_DEST = re.compile(r"(?:^|[;&|(`]\s*|\$\(\s*)(?:sudo\s+(?:-\S+\s+)*)?(?:cp|mv|rsync)\s[^;&|\n]*\s[\"']?/[\"']?/?(?:\.)?[\"']?\s*(?:$|[;&|\n)]|2>)")
 
 
@@ -359,7 +393,7 @@ def main():
     if isinstance(cmd, list):
         cmd = " ".join(shlex.quote(c) for c in cmd)
     cmd = cmd or ""
-    reason = verdict(cmd)
+    reason = guard_self_verdict(cmd) or verdict(cmd)
     if not reason and os.environ.get("SAKURA_COORDINATOR"):
         reason = coordinator_verdict(cmd)
     if not reason:
@@ -477,7 +511,20 @@ def selftest():
     for c, want in root_cases:
         if bool(root_dest_verdict(c)) != want:
             print("root_dest wrong:", c); bad += 1
-    bad_count_extra = 19 + len(root_cases)  # the no_rerun and root_dest cases above
+    g = "~/dotfiles/sakura/hooks/tool_guard.py"
+    guard_cases = ((f"cat {g}", False), (f"sed -n 1,40p {g}", False), (f"grep -n deny {g} | head", False), (f"view_file {g} 1 50", False),
+                   ("git diff hooks/tool_guard.py", False), ("python3 hooks/tool_guard.py --selftest", False), ("sakura-guard-install --check", False),
+                   ("cat /etc/codex/requirements.toml", False), ("ls /usr/local/lib/sakura/guard", False), ("rg foo src", False),
+                   (f"edit_file {g} <<'E'\n@@old\nx\n@@new\ny\n@@end\nE", True), (f"sed -i s/a/b/ {g}", True), (f"echo x > {g}", True),
+                   (f"cp /tmp/x {g}", True), ("sudo rm /etc/codex/requirements.toml", True), ("sudo tee /etc/codex/requirements.toml", True),
+                   ("sudo chattr -i /usr/local/lib/sakura/guard/tool_guard.py", True), ("sudo sakura-guard-install", True),
+                   ("~/dotfiles/sakura/bin/sakura-guard-install --rev HEAD", True), ("git checkout HEAD~3 -- hooks/tool_guard.py", True),
+                   ("python3 -c \"open('hooks/claim_check.py','w')\"", True), ("cat hooks/tool_guard.py | tee hooks/claim_check.py", True),
+                   ("mv /etc/codex /etc/codex.off", True), ("cat x > /dev/null; rm hooks/tool_guard.py", True))
+    for c, want in guard_cases:
+        if bool(guard_self_verdict(c)) != want:
+            print("guard_self wrong:", c); bad += 1
+    bad_count_extra = 19 + len(root_cases) + len(guard_cases)  # the no_rerun, root_dest and guard_self cases above
     cbad, ctotal = coordinator_selftest()
     sbad, stotal = script_on_path_selftest()
     bad += cbad + sbad

@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# sudo sakura-guard-install [--rev REV]   install Sakura's guard where Sakura can't change it
+# sakura-guard-install --check            is it installed (exit 0), and from which revision
+#
+# Sakura may improve itself: its prompts, tools and other hooks live in this repo, which it can edit. The guard
+# can't be one of those, or the first "improvement" could be switching it off. So the guard (hooks/tool_guard.py and
+# hooks/claim_check.py) runs from a root-owned copy in /usr/local/lib/sakura/guard, declared as managed hooks in
+# /etc/codex/requirements.toml: the engine always runs managed hooks, and no user config, hook state or flag turns
+# them off. The copy comes from a COMMITTED revision (default HEAD), never the working tree, and only after its
+# selftest passes. install.sh then leaves the guard out of ~/.sakura/hooks.json, so it doesn't run twice.
+set -eu
+GUARD_DIR=/usr/local/lib/sakura/guard
+REQ=/etc/codex/requirements.toml
+MARK="# Written by sakura-guard-install. Edit hooks/ in the Sakura repo and rerun it instead."
+FILES="tool_guard.py claim_check.py"
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+rev=HEAD
+check=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --rev) rev="${2:?--rev needs a revision}"; shift 2 ;;
+        --check) check=1; shift ;;
+        *) sed -n '2,3p' "$0" >&2; exit 2 ;;
+    esac
+done
+
+installed() { [ -f "$GUARD_DIR/tool_guard.py" ] && [ -f "$GUARD_DIR/claim_check.py" ] && head -1 "$REQ" 2>/dev/null | grep -qxF "$MARK"; }
+if [ "$check" = 1 ]; then
+    if installed; then echo "guard installed from $(cat "$GUARD_DIR/REVISION" 2>/dev/null || echo '?')"; exit 0; fi
+    echo "guard not installed: sudo $ROOT/bin/sakura-guard-install"; exit 1
+fi
+
+[ "$(id -u)" = 0 ] || { echo "sakura-guard-install: run it with sudo" >&2; exit 1; }
+if [ -e "$REQ" ] && ! head -1 "$REQ" | grep -qxF "$MARK"; then
+    echo "sakura-guard-install: $REQ exists and isn't ours; merge the [hooks] section by hand" >&2; exit 1
+fi
+git=(git -C "$ROOT" -c "safe.directory=$ROOT")
+sha="$("${git[@]}" rev-parse --verify "$rev^{commit}")"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+for f in $FILES; do "${git[@]}" show "$sha:hooks/$f" > "$tmp/$f"; done
+if ! out="$(cd "$tmp" && python3 -I tool_guard.py --selftest 2>&1)"; then
+    echo "sakura-guard-install: the guard at $sha fails its selftest; not installing it" >&2
+    printf '%s\n' "$out" | tail -5 >&2; exit 1
+fi
+printf '%s\n' "$sha" > "$tmp/REVISION"
+cat > "$tmp/requirements.toml" <<EOF
+$MARK
+# Sakura's guard: managed hooks, so the engine always runs them and user config can't switch them off.
+
+[features]
+hooks = true
+
+[hooks]
+managed_dir = "$GUARD_DIR"
+
+[[hooks.PreToolUse]]
+matcher = "Bash"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "python3 -I $GUARD_DIR/tool_guard.py"
+timeout = 5
+
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = "python3 -I $GUARD_DIR/claim_check.py"
+timeout = 10
+statusMessage = "checking claims against sources"
+EOF
+install -d -o root -g root -m 755 /usr/local/lib/sakura "$GUARD_DIR" /etc/codex
+for f in $FILES REVISION; do install -o root -g root -m 644 "$tmp/$f" "$GUARD_DIR/$f"; done
+install -o root -g root -m 644 "$tmp/requirements.toml" "$REQ"
+echo "guard installed from $sha: $GUARD_DIR, declared in $REQ"
