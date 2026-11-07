@@ -321,11 +321,28 @@ def no_rerun_verdict(cmd, spec=None):
     command = squeeze(spec.get("command") or "")
     if command and command in squeeze(cmd):
         return no
+    # Running its lines by hand as root is running it too: the eval did `sudo cp -r site/. /` with WEB_ROOT unset.
+    if re.search(r"(?:^|[;&|(`]\s*|\$\(\s*)sudo\b", cmd):
+        return ("Nothing runs as root in this ?fix session: the command it's about isn't safe to run twice, and its lines run by hand are the same thing. "
+                "Fix the cause in the files, then tell the user what to run, including anything that needs sudo.")
+    if re.search(r"\b(?:ba|z|da|k)?sh\s+-n\s", cmd) and not re.search(r"[;&|]", cmd):
+        return None  # a syntax check runs nothing
     for name in spec.get("scripts") or []:
         # Running it, not reading it: at the start of a command, after a separator, or after something that runs a script.
         runs = r"(?:^|[;&|(`'\"]\s*|\$\(\s*|\b(?:sh|bash|zsh|dash|ksh|source|exec|python3?|perl|ruby|node|env|nohup|sudo|time|nice|xargs|timeout\s+\S+)\s+(?:-\S+\s+)*|(?:^|\s)\.\s+|(?:^|\s)[A-Za-z_]\w*=\S*\s+)"
         if re.search(runs + r"(?:\S*/)?" + re.escape(name) + r"(?![\w.-])", cmd):
             return no
+    return None
+
+
+ROOT_DEST = re.compile(r"(?:^|[;&|(`]\s*|\$\(\s*)(?:sudo\s+(?:-\S+\s+)*)?(?:cp|mv|rsync)\s[^;&|\n]*\s[\"']?/[\"']?/?(?:\.)?[\"']?\s*(?:$|[;&|\n)]|2>)")
+
+
+def root_dest_verdict(cmd):
+    """Copying or moving into bare / is never the fix; it's an empty variable, like an unset WEB_ROOT."""
+    if ROOT_DEST.search(cmd):
+        return ("That copies into / itself, which is never what's wanted; it usually means a path variable is empty. "
+                "Find why the destination is empty and fix that instead.")
     return None
 
 
@@ -349,7 +366,7 @@ def main():
         reason = script_on_path_verdict(cmd) or big_cat_verdict(cmd, data.get("cwd")) or packages_verdict(cmd) or overwrite_verdict(cmd, data.get("cwd")) or stand_in_verdict(cmd, data.get("transcript_path")) \
             or ssh_around_verdict(cmd, data.get("transcript_path")) or keep_around_verdict(cmd, data.get("transcript_path")) or one_file_sed_verdict(cmd)
     if not reason:
-        reason = no_rerun_verdict(cmd)
+        reason = no_rerun_verdict(cmd) or root_dest_verdict(cmd)
     if not reason and READS_PASSWORD.search(cmd):
         reason = PASSWORD_NO
     if not reason and os.environ.get("SAKURA_WORKER") and (MAIL_SEND.search(cmd) or MAIL_OTHER.search(cmd)):
@@ -448,10 +465,19 @@ def selftest():
     spec = json.dumps({"command": "./deploy.sh", "scripts": ["deploy.sh"]})
     for c, want in (("./deploy.sh", True), ("./deploy.sh 2>&1; true", True), ("bash deploy.sh", True), ("sh -x ./deploy.sh", True),
                     ("cd /x && ./deploy.sh", True), ("WEB_ROOT=/srv ./deploy.sh", True), ("/tmp/p/deploy.sh", True), ("'./deploy.sh 2>&1'", True),
-                    ("cat deploy.sh", False), ("grep curl deploy.sh", False), ("sed -n 1,9p deploy.sh", False), ("ls", False), ("cp deploy.sh deploy.sh.bak", False)):
+                    ("cat deploy.sh", False), ("grep curl deploy.sh", False), ("sed -n 1,9p deploy.sh", False), ("ls", False), ("cp deploy.sh deploy.sh.bak", False),
+                    ("sudo cp -r site/. / 2>&1; echo \"exit: $?\"", True), ("cd p && sudo ls /root", True), ("echo $(sudo id)", True),
+                    ("bash -n deploy.sh", False), ("bash -n deploy.sh; ./deploy.sh", True),
+                    ("edit_file deploy.sh <<'E'\n@@old\nx\n@@new\ny\n@@end\nE", False)):
         if bool(no_rerun_verdict(c, spec)) != want:
             print("no_rerun wrong:", c); bad += 1
-    bad_count_extra = 13  # the no_rerun cases above
+    root_cases = (("sudo cp -r site/. /", True), ("cp -r site/. / 2>&1; echo $?", True), ("cp -r site/. \"/\"", True), ("mv x /", True),
+                  ("rsync -a site/ /", True), ("sudo cp -r site/. /var/www/html/", False), ("cp x /usr/local/bin/", False),
+                  ("cp a b", False), ("cp -r site/. ./out/", False), ("cp /etc/hosts .", False))
+    for c, want in root_cases:
+        if bool(root_dest_verdict(c)) != want:
+            print("root_dest wrong:", c); bad += 1
+    bad_count_extra = 19 + len(root_cases)  # the no_rerun and root_dest cases above
     cbad, ctotal = coordinator_selftest()
     sbad, stotal = script_on_path_selftest()
     bad += cbad + sbad
