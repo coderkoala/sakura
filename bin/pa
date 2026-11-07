@@ -435,10 +435,12 @@ def cmd_tick(_):
 
 
 def cmd_job_run(args):
-    # A scheduled job reads things (news, mail), so it keeps the network, but it can only write to its own directory.
-    env = dict(os.environ, SAKURA_WORKER="1", SAKURA_WORKER_NET="1")
-    env.pop("SAKURA_COORDINATOR", None)
+    # A scheduled job reads things (news, mail), so it keeps the network, but it can only write to its own directory,
+    # and it sees the mail credentials only when the job is about mail. Keys, agents and sockets stay hidden.
     prompt = args[0]
+    about_mail = re.search(r"\b(?:e-?mails?|mail(?:box)?|inbox|himalaya|unread|repl(?:y|ies)|newsletters?)\b", prompt, re.I)
+    env = dict(os.environ, SAKURA_WORKER="1", SAKURA_WORKER_NET="1", SAKURA_WORKER_SECRETS="mail" if about_mail else "")
+    env.pop("SAKURA_COORDINATOR", None)
     work = os.path.join(DIR, "job-work")
     os.makedirs(work, exist_ok=True)
     try:

@@ -17,7 +17,8 @@ flags=(--dangerously-bypass-hook-trust)
 PATH="$(dirname "$(dirname "$(readlink -f "$0")")")/shims:$PATH:${SAKURA_TOOLS_DIR:-$HOME/.sakura/tools}/bin"
 export PATH
 # A worker's commands run with nobody watching, so they run behind the engine's own sandbox, not behind patterns:
-# no network unless SAKURA_WORKER_NET=1, and writes only to its directory, /tmp, ~/.cache and SAKURA_WORKER_WRITE (colon-separated).
+# no network unless SAKURA_WORKER_NET=1, writes only to its directory, /tmp, ~/.cache and SAKURA_WORKER_WRITE (colon-separated),
+# and no reading keys, agents or sockets that act as you unless SAKURA_WORKER_SECRETS names them (worker_hidden).
 # Two things would walk straight through it, so they go too: an exec-policy "allow" rule skips the sandbox entirely, and
 # rules/safe-reads.rules allows fetch_url and live, so a worker gets a home with no rules. MCP servers run outside it.
 worker_wall() {
@@ -38,23 +39,50 @@ worker_wall() {
         echo "sakura: the sandbox doesn't work on this machine, so the worker won't start. Unprivileged user namespaces are probably off: try 'sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0'. To run workers without a wall anyway, set SAKURA_WORKER_NO_WALL=1 yourself." >&2
         exit 78
     fi
-    local roots='"/tmp"' path rest
+    # One permission profile: :workspace (its directory and /tmp writable, .git read-only), plus ~/.cache and the
+    # job's write: paths, minus what acts as you (worker_hidden). The network is off unless the job asks for it.
+    local fs="" path rest net=false
+    fs_add() { local p="${1//\\/\\\\}"; fs+="${fs:+,}\"${p//\"/\\\"}\"=\"$2\""; }
     mkdir -p "$HOME/.cache"
-    roots+=",\"$HOME/.cache\""
+    fs_add "$HOME/.cache" write
     rest="${SAKURA_WORKER_WRITE:-}"
     while [ -n "$rest" ]; do
         path="${rest%%:*}"
         [ "$rest" = "$path" ] && rest="" || rest="${rest#*:}"
         path="${path/#\~/$HOME}"
         # The engine can't mount a path that isn't there, and then every command fails, so make it or leave it out.
-        [ -n "$path" ] && { [ -e "$path" ] || mkdir -p "$path" 2>/dev/null; } && [ -e "$path" ] && roots+=",\"$path\""
+        [ -n "$path" ] && { [ -e "$path" ] || mkdir -p "$path" 2>/dev/null; } && [ -e "$path" ] && fs_add "$path" write
     done
-    flags+=(--sandbox workspace-write -c 'approval_policy="never"' -c "sandbox_workspace_write.writable_roots=[$roots]")
-    if [ "${SAKURA_WORKER_NET:-0}" = 1 ]; then
-        flags+=(-c 'sandbox_workspace_write.network_access=true')
-    else
-        flags+=(-c 'sandbox_workspace_write.network_access=false' -c 'mcp_servers.sakura-web.enabled=false')
+    while IFS= read -r path; do
+        [ -n "$path" ] && fs_add "$path" deny
+    done < <(worker_hidden | while IFS= read -r p; do [ -n "$p" ] && readlink -m "$p"; done | awk '!seen[$0]++')  # real paths: bwrap can't mask through a symlink, and a repeated key is a TOML error
+    [ "${SAKURA_WORKER_NET:-0}" = 1 ] && net=true
+    local wall=(-c 'default_permissions="sakura-worker"' -c 'permissions.sakura-worker.extends=":workspace"'
+                -c "permissions.sakura-worker.filesystem={$fs}" -c "permissions.sakura-worker.network.enabled=$net")
+    # A profile the engine rejects would fail every command, so prove it first.
+    if ! sakura sandbox "${wall[@]}" -- true >/dev/null 2>&1; then
+        echo "sakura: the worker's sandbox profile didn't load, so the worker won't start: sakura sandbox ${wall[*]} -- true" >&2
+        exit 78
     fi
+    flags+=(-c 'approval_policy="never"' "${wall[@]}")
+    [ "$net" = true ] || flags+=(-c 'mcp_servers.sakura-web.enabled=false')
+}
+
+# What a worker can't read: keys, agents and sockets that act as you. A job gets a kind back by naming it
+# (SAKURA_WORKER_SECRETS, from its `secrets:` line: ssh, docker, mail, cloud, desktop). The sudo password and the
+# shell's secrets file stay hidden whatever the job says.
+worker_hidden() {
+    local run="/run/user/$(id -u)" h="$HOME" allow=" ${SAKURA_WORKER_SECRETS:-} "
+    allow="${allow//[:,]/ }"
+    case "$allow" in *" ssh "*) ;; *) printf '%s\n' "$h/.ssh" "$run/openssh_agent" "$run/keyring/ssh" "$run/gcr/ssh" "${SSH_AUTH_SOCK:-}" ;; esac
+    case "$allow" in *" docker "*) ;; *) printf '%s\n' /run/docker.sock /var/run/docker.sock "$run/docker.sock" /run/containerd/containerd.sock \
+        /run/podman/podman.sock "$run/podman" "$h/.docker" ;; esac
+    case "$allow" in *" mail "*) ;; *) printf '%s\n' "$h/.password-store" "$h/.gnupg" "$run/gnupg" "$h/.local/share/keyrings" "$run/keyring" \
+        "$h/.config/himalaya" "$h/.mbsyncrc" "$h/.msmtprc" ;; esac
+    case "$allow" in *" cloud "*) ;; *) printf '%s\n' "$h/.aws" "$h/.config/gcloud" "$h/.kube" "$h/.azure" "$h/.netrc" "$h/.git-credentials" \
+        "$h/.config/gh" "$h/.npmrc" "$h/.pypirc" "$h/.terraform.d" "$h/.cargo/credentials.toml" "$h/.config/rclone" ;; esac
+    case "$allow" in *" desktop "*) ;; *) printf '%s\n' "$run/bus" ;; esac
+    printf '%s\n' "$h/.config/sakura/sudo.pass" "$h/.secrets.local"
 }
 big="${SAKURA_BIG_MODEL:-huihui_ai/qwen3.5-abliterated:9b}"
 fast="${SAKURA_FAST_MODEL:-huihui_ai/qwen3.5-abliterated:2b}"

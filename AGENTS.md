@@ -83,7 +83,7 @@ network: yes
 JOB
 ```
 It passes only if the verify command exits 0, it retries once with the failure, and it returns a short report. Run one at a time.
-A worker runs in a sandbox: only its directory, /tmp and ~/.cache are writable, and there's no network or commit. Add `network: yes` (internet, ssh, downloads), `commit: yes` or `write: PATH` only if the job needs them, and leave out any it doesn't.
+A worker runs in a sandbox: only its directory, /tmp and ~/.cache are writable, and there's no network or commit. Add `network: yes` (internet, ssh, downloads), `commit: yes` or `write: PATH` only if the job needs them, and leave out any it doesn't. Keys, agents and sockets that act as the user are hidden from it: add `secrets: ssh` (keys, agent), `docker`, `mail` (password store, gpg, mail config), `cloud` (aws, gcloud, kube, gh) or `desktop` only when the job uses them, e.g. `secrets: ssh` to deploy over ssh.
 
 ## Skills
 Skills hold the procedures and tool lists for specialist work (pentesting, reversing, forensics, media, image

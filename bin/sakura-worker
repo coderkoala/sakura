@@ -10,6 +10,9 @@ Only one worker runs at a time, because the local model serves one request at a 
   --network      the job needs the network (the internet, ssh, a package download). Off by default.
   --commit       the job may commit. Otherwise .git is read-only. Changing git hooks or config still fails the job.
   --write PATH   somewhere else it may write, repeatable. Its directory, /tmp and ~/.cache are always writable.
+  --secrets KIND what it may read that acts as you, repeatable: ssh (keys, agent), docker (its socket), mail (password
+                 store, gpg, keyrings, mail config), cloud (aws, gcloud, kube, gh, netrc), desktop (the session bus).
+                 Hidden by default; the sudo password always is.
   --retries N    extra attempts after a failure (default 1)
   --timeout S    seconds per attempt (default 900)
 
@@ -18,7 +21,7 @@ The easy way, with no quoting to get wrong, is a job on stdin. Header lines come
   sakura-worker <<'JOB'
   verify: python3 -c 'import calc; assert calc.add(2, 3) == 5'
   scope: calc.py src/parser/*
-  network: yes        (optional, as are commit: yes and write: PATH)
+  network: yes        (optional, as are commit: yes, write: PATH and secrets: ssh mail ...)
 
   add() in calc.py subtracts. Make it add.
   JOB
@@ -47,12 +50,14 @@ Don't push or commit unless the job says to.
 Finish with: DONE or BLOCKED, what you changed, and what output proved it, in at most five lines.
 """
 
-def wall_note(network, commit, write):
+def wall_note(network, commit, write, secrets=()):
     """The worker should know where the wall is, so it reports the limit and doesn't spend the job probing it."""
     places = ", ".join(["this directory", "/tmp", "~/.cache"] + list(write))
-    missing = ([] if network else ["`network: yes`"]) + ([] if commit else ["`commit: yes`"]) + ["`write: PATH`"]
+    missing = ([] if network else ["`network: yes`"]) + ([] if commit else ["`commit: yes`"]) + ["`write: PATH`", "`secrets: KIND`"]
+    hidden = [k for k in ("ssh", "docker", "mail", "cloud", "desktop") if k not in secrets]
     return (f"You're in a sandbox. You can write only to {places}. The network is {'on' if network else 'off, and that includes localhost'}."
-            f"{'' if commit else ' .git is read-only.'} Run what the job needs anyway and read what happens: a command you didn't run has no result to report. "
+            f"{'' if commit else ' .git is read-only.'}"
+            f"{' Hidden from you: ' + ', '.join(hidden) + ' credentials and sockets.' if hidden else ''} Run what the job needs anyway and read what happens: a command you didn't run has no result to report. "
             f"Only when one really fails because of this sandbox, don't look for a way round it: report BLOCKED and which of {', '.join(missing)} the job needs.\n")
 
 
@@ -84,7 +89,7 @@ def parse_job(text):
     settings, lines = {}, text.strip().splitlines()
     i = 0
     while i < len(lines):
-        m = re.match(r"(verify|scope|retries|timeout|network|commit|write)\s*:\s*(.*)$", lines[i].strip(), re.I)
+        m = re.match(r"(verify|scope|retries|timeout|network|commit|write|secrets)\s*:\s*(.*)$", lines[i].strip(), re.I)
         if not m:
             break
         settings[m.group(1).lower()] = m.group(2).strip()
@@ -143,8 +148,9 @@ def launcher():
     return shutil.which("sakura-launch") or os.path.join(ROOT, "bin", "sakura-launch")
 
 
-def run_attempt(brief, cwd, timeout, log, network=False, write=()):
-    env = dict(os.environ, SAKURA_WORKER="1", SAKURA_WORKER_NET="1" if network else "0", SAKURA_WORKER_WRITE=":".join(write))
+def run_attempt(brief, cwd, timeout, log, network=False, write=(), secrets=()):
+    env = dict(os.environ, SAKURA_WORKER="1", SAKURA_WORKER_NET="1" if network else "0", SAKURA_WORKER_WRITE=":".join(write),
+               SAKURA_WORKER_SECRETS=" ".join(secrets))
     env.pop("SAKURA_COORDINATOR", None)
     # Not --ephemeral: the Stop verifier reads the transcript.
     cmd = [launcher(), "--exec", "--skip-git-repo-check", "--json", brief]
@@ -188,6 +194,7 @@ def main():
     ap.add_argument("--network", action="store_true")
     ap.add_argument("--commit", action="store_true")
     ap.add_argument("--write", action="append", default=[])
+    ap.add_argument("--secrets", action="append", default=[])
     ap.add_argument("--retries", type=int, default=1)
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("brief", nargs="*")
@@ -203,6 +210,7 @@ def main():
         args.network = args.network or yes("network")
         args.commit = args.commit or yes("commit")
         args.write = args.write or settings.get("write", "").split()
+        args.secrets = args.secrets or settings.get("secrets", "").replace(",", " ").split()
         args.retries = int(settings.get("retries", args.retries))
         args.timeout = int(settings.get("timeout", args.timeout))
     if not brief:
@@ -219,12 +227,13 @@ def main():
     if args.commit and control:
         write.append(os.path.dirname(next(p for p in control if os.path.basename(p) == "config")))
     before = git_changes(cwd)
-    preamble = PREAMBLE + wall_note(args.network, args.commit, args.write)
+    secrets = [k.lower() for k in args.secrets]
+    preamble = PREAMBLE + wall_note(args.network, args.commit, args.write, secrets)
     prompt = preamble + ("\nYou may change only: " + ", ".join(args.scope) + "\n" if args.scope else "") + "\nThe job:\n" + brief
     attempts = max(args.retries, 0) + 1
     status, why, res, verify_out, code = "FAILED", "", {}, "", None
     for n in range(1, attempts + 1):
-        res = run_attempt(prompt, cwd, args.timeout, log, args.network, write)
+        res = run_attempt(prompt, cwd, args.timeout, log, args.network, write, secrets)
         after = git_changes(cwd)
         files = changed_since(before, after)
         stray = out_of_scope(files, args.scope)

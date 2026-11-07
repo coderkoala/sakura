@@ -20,17 +20,16 @@ Measured on one machine with an 8 GB GPU. Results vary between runs, so treat th
 | Disposable workers and a coordinator | Guards on the main agent (pattern matching, not a sandbox) |
 | Long tasks that used to crash a 32k context | Tools it grows itself (a weak check can pass a weak tool) |
 | Local document search, office files, the shared browser | Anything on a second machine, or on real 6 GB hardware |
-| Reminders, briefs, watches, auto-reply | Workers with `network: yes` (they can still read your files and local sockets) |
+| Reminders, briefs, watches, auto-reply | Workers with `network: yes` (keys, agents and sockets hidden unless the job names them) |
 | A sandbox around workers: no network, writes only where the job allows | |
 
 ## Next: make what exists trustworthy
 
-1. **Hide secrets from networked workers.** Workers now run in the engine's sandbox (0.8.0), with no network unless the job asks. A worker with `network: yes` can still read `~/.ssh`, the password store and the Docker socket. Hide those from it unless the job names them.
-2. **Run evals in a disposable machine.** They run on the real host with sudo today, and have left containers and packages behind.
-3. **Real-world passes.** A real mail provider, including OAuth for those that require it. A real CAPTCHA in the visible window. A second device end to end.
-4. **`pa` across devices.** Reminders that follow you, firing once, not on all seven. Repeating calendar events. Reminders that work while logged out.
-5. **Runs in more places.** A build for older glibc and for ARM, and a real run on a 6 GB card.
-6. **Fewer tokens.** The prompt is about 7,100 tokens of 32,000. Every token removed is more room to work.
+1. **Run evals in a disposable machine.** They run on the real host with sudo today, and have left containers and packages behind.
+2. **Real-world passes.** A real mail provider, including OAuth for those that require it. A real CAPTCHA in the visible window. A second device end to end.
+3. **`pa` across devices.** Reminders that follow you, firing once, not on all seven. Repeating calendar events. Reminders that work while logged out.
+4. **Runs in more places.** A build for older glibc and for ARM, and a real run on a 6 GB card.
+5. **Fewer tokens.** The prompt is about 7,100 tokens of 32,000. Every token removed is more room to work.
 
 ## Then: the moments
 
