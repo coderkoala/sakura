@@ -336,7 +336,7 @@ def no_rerun_verdict(cmd, spec=None):
 
 
 # The guard itself: Sakura may improve the rest of itself, never this. Reading it is fine; anything else isn't.
-GUARD_PARTS = re.compile(r"tool_guard\.py|claim_check\.py|/etc/codex\b|\bcodex/requirements|/usr/local/lib/sakura\b|sakura-guard-install")
+GUARD_PARTS = re.compile(r"tool_guard\.py|claim_check\.py|undo_snapshot\.py|sakura/undo\b|/etc/codex\b|\bcodex/requirements|/usr/local/lib/sakura\b|sakura-guard-install")
 GUARD_READERS = {"cat", "less", "more", "head", "tail", "grep", "egrep", "rg", "view_file", "wc", "diff", "ls", "stat", "file",
                  "sha256sum", "md5sum", "nl", "bat", "echo", "true", "cd", "pwd"}
 GUARD_NO = ("That's Sakura's guard. You can read it, but not change, move, replace, disable or reinstall it, by any route. "
@@ -520,7 +520,8 @@ def selftest():
                    ("sudo chattr -i /usr/local/lib/sakura/guard/tool_guard.py", True), ("sudo sakura-guard-install", True),
                    ("~/dotfiles/sakura/bin/sakura-guard-install --rev HEAD", True), ("git checkout HEAD~3 -- hooks/tool_guard.py", True),
                    ("python3 -c \"open('hooks/claim_check.py','w')\"", True), ("cat hooks/tool_guard.py | tee hooks/claim_check.py", True),
-                   ("mv /etc/codex /etc/codex.off", True), ("cat x > /dev/null; rm hooks/tool_guard.py", True))
+                   ("mv /etc/codex /etc/codex.off", True), ("rm -rf ~/.local/state/sakura/undo", True), ("ls ~/.local/state/sakura/undo", False),
+                   ("edit_file hooks/undo_snapshot.py <<'E'\n@@old\nx\n@@new\ny\n@@end\nE", True), ("cat x > /dev/null; rm hooks/tool_guard.py", True))
     for c, want in guard_cases:
         if bool(guard_self_verdict(c)) != want:
             print("guard_self wrong:", c); bad += 1

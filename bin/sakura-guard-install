@@ -4,8 +4,8 @@
 #   --repo DIR   the Sakura checkout to take it from (default: the one this script is in), for running a pinned copy
 #
 # Sakura may improve itself: its prompts, tools and other hooks live in this repo, which it can edit. The guard
-# can't be one of those, or the first "improvement" could be switching it off. So the guard (hooks/tool_guard.py and
-# hooks/claim_check.py) runs from a root-owned copy in /usr/local/lib/sakura/guard, declared as managed hooks in
+# can't be one of those, or the first "improvement" could be switching it off. So the guard (hooks/tool_guard.py,
+# hooks/claim_check.py and hooks/undo_snapshot.py, the snapshots ?undo restores from) runs from a root-owned copy in /usr/local/lib/sakura/guard, declared as managed hooks in
 # /etc/codex/requirements.toml: the engine always runs managed hooks, and no user config, hook state or flag turns
 # them off. The copy comes from a COMMITTED revision (default HEAD), never the working tree, and only after its
 # selftest passes. install.sh then leaves the guard out of ~/.sakura/hooks.json, so it doesn't run twice.
@@ -13,7 +13,7 @@ set -eu
 GUARD_DIR=/usr/local/lib/sakura/guard
 REQ=/etc/codex/requirements.toml
 MARK="# Written by sakura-guard-install. Edit hooks/ in the Sakura repo and rerun it instead."
-FILES="tool_guard.py claim_check.py"
+FILES="tool_guard.py claim_check.py undo_snapshot.py"
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 rev=HEAD
 check=0
@@ -41,7 +41,7 @@ sha="$("${git[@]}" rev-parse --verify "$rev^{commit}")"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 for f in $FILES; do "${git[@]}" show "$sha:hooks/$f" > "$tmp/$f"; done
-if ! out="$(cd "$tmp" && python3 -I tool_guard.py --selftest 2>&1)"; then
+if ! out="$(cd "$tmp" && python3 -I tool_guard.py --selftest 2>&1 && python3 -I undo_snapshot.py --selftest 2>&1)"; then
     echo "sakura-guard-install: the guard at $sha fails its selftest; not installing it" >&2
     printf '%s\n' "$out" | tail -5 >&2; exit 1
 fi
@@ -63,6 +63,12 @@ matcher = "Bash"
 type = "command"
 command = "python3 -I $GUARD_DIR/tool_guard.py"
 timeout = 5
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "python3 -I $GUARD_DIR/undo_snapshot.py"
+timeout = 30
+statusMessage = "snapshotting for ?undo"
 
 [[hooks.Stop]]
 

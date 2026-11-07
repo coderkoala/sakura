@@ -36,6 +36,12 @@
             "type": "command",
             "command": "python3 __SAKURA_DIR__/hooks/tool_guard.py",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3 __SAKURA_DIR__/hooks/undo_snapshot.py",
+            "timeout": 30,
+            "statusMessage": "snapshotting for ?undo"
           }
         ]
       }

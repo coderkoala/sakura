@@ -4,10 +4,12 @@
 #   ?remind tomorrow, 10am birthday wish
 #   ?pa reply to all my emails saying I'm busy
 #   ?fix  fix the command that just failed (words after it are a hint)
+#   ?undo put back everything Sakura's last turn changed (again: redo)
 if command -v sakura-launch >/dev/null 2>&1; then
-    unalias '?' '??' '?pa' '?remind' '?fix' 2>/dev/null
+    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' 2>/dev/null
     alias '?'='sakura-launch'
     alias '?fix'='sakura-fix --shell $$'
+    alias '?undo'='sakura-undo'
     alias '??'='sakura-launch --coordinator'
     alias '?remind'='pa remind'
     alias '?pa'='pa ask'
