@@ -9,7 +9,10 @@ screen showed. This turns that into a brief and opens Sakura where the command r
   --json         with --exec, print the run as JSON events
   --print        print the brief and stop
 """
+import json
 import os
+import re
+import shlex
 import sys
 import time
 
@@ -65,7 +68,56 @@ def trim_screen(screen, limit=6000):
     return text[-limit:]
 
 
-def brief(status, when, cwd, command, screen, hint):
+# What makes a command unsafe to run twice: it changes something somewhere else, or can't be taken back. Checked in the
+# command and in the scripts it runs. Wrongly flagging a command costs one rerun by hand; missing one can deploy twice.
+UNREPEATABLE = re.compile(
+    r"\bdeploy\b|\bpublish\b|\brelease\s+create\b|\bgit\s+push\b|\bdocker\s+push\b|\btwine\s+upload\b"
+    r"|\bgh\s+(?:release|pr)\s+create\b|\brsync\b|\bscp\b|\bsftp\b|\bupload\b"
+    r"|\bkubectl\s+(?:apply|delete|rollout|scale|patch|create)\b|\bhelm\s+(?:install|upgrade|uninstall)\b"
+    r"|\bterraform\s+(?:apply|destroy)\b|\bansible-playbook\b"
+    r"|\bcurl\b[^\n]*?(?:-X\s*(?:POST|PUT|PATCH|DELETE)\b|--data|--form|\s-[dFT]\s|--upload-file)|\bwget\b[^\n]*--post"
+    r"|\brequests\.(?:post|put|patch|delete)\(|\burlopen\([^)\n]*data=|\bsmtplib\b|\bsendmail\b|\bhimalaya\b[^\n]*\bsend\b"
+    r"|\bmail\s+-s\b|\b(?:drop\s+(?:table|database)|delete\s+from|truncate\s+table)\b|\bmigrate\b",
+    re.I)
+
+
+def scripts_in(command, cwd):
+    """Files the command runs that we can read: words of it that are files in its directory or on a path."""
+    try:
+        words = shlex.split(command, comments=True)
+    except ValueError:
+        words = command.split()
+    found = []
+    for w in words:
+        if w.startswith("-") or "=" in w.split("/")[0]:
+            continue
+        path = w if os.path.isabs(w) else os.path.join(cwd, w)
+        if os.path.isfile(path) and os.path.getsize(path) < 262144 and path not in found:
+            found.append(path)
+    return found
+
+
+def unrepeatable(command, cwd):
+    """(why, scripts) when running the command again could do something twice, else (None, scripts)."""
+    scripts = scripts_in(command, cwd)
+    m = UNREPEATABLE.search(command)
+    if m:
+        return f"runs `{m.group(0).strip()}`", scripts
+    for path in scripts:
+        try:
+            text = open(path, errors="replace").read()
+        except OSError:
+            continue
+        if "\0" in text[:4096]:
+            continue
+        m = UNREPEATABLE.search(text)
+        if m:
+            line = text[:m.start()].count("\n") + 1
+            return f"runs `{m.group(0).strip()}` ({os.path.basename(path)} line {line})", scripts
+    return None, scripts
+
+
+def brief(status, when, cwd, command, screen, hint, why=None):
     parts = [
         "This command just failed in my shell. Fix what's wrong with it.",
         "",
@@ -79,16 +131,26 @@ def brief(status, when, cwd, command, screen, hint):
         parts += ["", "What the terminal showed (the command's output is near the end):", "```", trim_screen(screen), "```"]
     else:
         parts += ["", "Its output wasn't saved."]
-    parts += [
-        "",
-        "1. Find out why it failed. If you need its output, run it again, but only if running it twice is harmless, "
-        "like a build, a test or a read. If it sends, pushes, deploys, deletes, pays or changes something on another "
-        "machine, don't run it: read the files it uses, and ask me for the output if that isn't enough.",
-        "2. Fix the cause. Don't delete, skip or weaken the check or test that failed, and don't change something "
-        "unrelated just to make it pass.",
-        "3. Prove it: run the same command again and show what it printed. If running it again isn't harmless, say "
-        "so and tell me what to run. If you can't fix it, say what you found and what you need from me.",
-    ]
+    if why:
+        parts += [
+            "",
+            f"1. Don't run it again: it {why}, so running it twice could do that twice. A guard refuses it, and anything "
+            "else that runs the same script. Find the cause by reading the files it uses, and ask me for the output if "
+            "that isn't enough.",
+            "2. Fix the cause. Don't delete, skip or weaken the check that failed, and don't change something unrelated "
+            "just to make it pass.",
+            "3. Then tell me to run it myself, and what it should print. If you can't fix it, say what you found and "
+            "what you need from me.",
+        ]
+    else:
+        parts += [
+            "",
+            "1. Find out why it failed. If you need its output, run it again.",
+            "2. Fix the cause. Don't delete, skip or weaken the check or test that failed, and don't change something "
+            "unrelated just to make it pass.",
+            "3. Prove it: run the same command again and show what it printed. If you can't fix it, say what you found "
+            "and what you need from me.",
+        ]
     return "\n".join(parts)
 
 
@@ -119,11 +181,17 @@ def main(argv):
               "Run the command again, then ?fix. (Is shell/sakura.bash sourced?)", file=sys.stderr)
         return 1
     status, when, cwd, command, screen = got
-    text = brief(status, when, cwd, command, screen, " ".join(hint).strip())
+    why, scripts = unrepeatable(command, cwd)
+    text = brief(status, when, cwd, command, screen, " ".join(hint).strip(), why)
+    if why:
+        # tool_guard refuses running these again for this session: the command itself, and the scripts it runs.
+        os.environ["SAKURA_FIX_NO_RERUN"] = json.dumps({"command": command, "scripts": [os.path.basename(p) for p in scripts]})
     if mode == "print":
         print(text)
         return 0
     print(f"sakura: fixing `{command}` (exit {status}{', ' + ago(when) if when else ''}, in {cwd})", file=sys.stderr)
+    if why:
+        print(f"sakura: it won't run it again, because it {why}. You'll rerun it yourself.", file=sys.stderr)
     if os.path.isdir(cwd):
         os.chdir(cwd)
     else:

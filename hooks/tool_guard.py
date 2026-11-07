@@ -306,6 +306,29 @@ def coordinator_verdict(cmd):
     return None
 
 
+def no_rerun_verdict(cmd, spec=None):
+    """In a ?fix session for a command that isn't safe to run twice (sakura-fix decides), refuse running it again."""
+    spec = spec if spec is not None else os.environ.get("SAKURA_FIX_NO_RERUN")
+    if not spec:
+        return None
+    try:
+        spec = json.loads(spec)
+    except ValueError:
+        return None
+    squeeze = lambda t: re.sub(r"\s+", " ", t).strip()
+    no = ("That's the command ?fix was asked about, and it isn't safe to run twice, so the user runs it, not you. "
+          "Read its files to find the cause, fix it, and tell the user to run it and what it should print.")
+    command = squeeze(spec.get("command") or "")
+    if command and command in squeeze(cmd):
+        return no
+    for name in spec.get("scripts") or []:
+        # Running it, not reading it: at the start of a command, after a separator, or after something that runs a script.
+        runs = r"(?:^|[;&|(`'\"]\s*|\$\(\s*|\b(?:sh|bash|zsh|dash|ksh|source|exec|python3?|perl|ruby|node|env|nohup|sudo|time|nice|xargs|timeout\s+\S+)\s+(?:-\S+\s+)*|(?:^|\s)\.\s+|(?:^|\s)[A-Za-z_]\w*=\S*\s+)"
+        if re.search(runs + r"(?:\S*/)?" + re.escape(name) + r"(?![\w.-])", cmd):
+            return no
+    return None
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
         return selftest()
@@ -325,6 +348,8 @@ def main():
     if not reason:
         reason = script_on_path_verdict(cmd) or big_cat_verdict(cmd, data.get("cwd")) or packages_verdict(cmd) or overwrite_verdict(cmd, data.get("cwd")) or stand_in_verdict(cmd, data.get("transcript_path")) \
             or ssh_around_verdict(cmd, data.get("transcript_path")) or keep_around_verdict(cmd, data.get("transcript_path")) or one_file_sed_verdict(cmd)
+    if not reason:
+        reason = no_rerun_verdict(cmd)
     if not reason and READS_PASSWORD.search(cmd):
         reason = PASSWORD_NO
     if not reason and os.environ.get("SAKURA_WORKER") and (MAIL_SEND.search(cmd) or MAIL_OTHER.search(cmd)):
@@ -420,10 +445,17 @@ def selftest():
     for c in allow:
         if verdict(c):
             print("SHOULD ALLOW:", c, "->", verdict(c)[:60]); bad += 1
+    spec = json.dumps({"command": "./deploy.sh", "scripts": ["deploy.sh"]})
+    for c, want in (("./deploy.sh", True), ("./deploy.sh 2>&1; true", True), ("bash deploy.sh", True), ("sh -x ./deploy.sh", True),
+                    ("cd /x && ./deploy.sh", True), ("WEB_ROOT=/srv ./deploy.sh", True), ("/tmp/p/deploy.sh", True), ("'./deploy.sh 2>&1'", True),
+                    ("cat deploy.sh", False), ("grep curl deploy.sh", False), ("sed -n 1,9p deploy.sh", False), ("ls", False), ("cp deploy.sh deploy.sh.bak", False)):
+        if bool(no_rerun_verdict(c, spec)) != want:
+            print("no_rerun wrong:", c); bad += 1
+    bad_count_extra = 13  # the no_rerun cases above
     cbad, ctotal = coordinator_selftest()
     sbad, stotal = script_on_path_selftest()
     bad += cbad + sbad
-    total = len(deny) + len(allow) + ctotal + stotal
+    total = len(deny) + len(allow) + ctotal + stotal + bad_count_extra
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, "big"), "w") as f:
