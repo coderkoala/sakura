@@ -53,7 +53,7 @@ if [ -L "$SAKURA_HOME/AGENTS.md" ]; then rm -f "$SAKURA_HOME/AGENTS.md"; fi
 } > "$SAKURA_HOME/AGENTS.md"
 link "$ROOT/rules" "$SAKURA_HOME/rules"
 link "$ROOT/skills" "$HOME/.agents/skills"
-for tool in web_search wikipedia fetch_url curated_search consult sakura-model sakura-guard-install sakura-launch sakura-worker sakura-memory sakura-recall sakura-tool sakura-browser sakura-web-setup live view_file edit_file rag sakura-mail-setup pa sakura-fix sakura-undo; do
+for tool in web_search wikipedia fetch_url curated_search consult sakura-model sakura-guard-install sakura-launch sakura-worker sakura-memory sakura-recall sakura-tool sakura-browser sakura-web-setup live view_file edit_file rag sakura-mail-setup pa sakura-fix sakura-undo sakura-recap; do
     ln -sf "$ROOT/bin/$tool" "$HOME/.local/bin/$tool"
 done
 
@@ -110,4 +110,4 @@ echo "  driver: $("$ROOT/bin/sakura-model" plan 2>&1 || true)"
 [ -x "${XDG_DATA_HOME:-$HOME/.local/share}/sakura/webenv/bin/python" ] || echo "  optional: sakura-web-setup, for better search and fetching and the browser"
 echo
 echo "Run it with: sakura-launch"
-echo "For the ? keys (?, ??, ?fix, ?undo, ?remind, ?pa), add to ~/.bashrc:  source $ROOT/shell/sakura.bash"
+echo "For the ? keys (?, ??, ?fix, ?undo, ?recap, ?remind, ?pa), add to ~/.bashrc:  source $ROOT/shell/sakura.bash"

@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+"""sakura-recap — what Sakura did, from the record (the `?recap` key). No model writes it, so nothing in it is made up.
+
+  ?recap                today
+  ?recap yesterday      or: week, 3d, 2026-11-05
+  ?recap --full         every command, not only the ones that could write, failed or were refused
+  ?recap --all          include sessions in /tmp and ~/.sakura/eval (evals)
+  ?recap --json         the same, as JSON lines, one per turn
+
+Per turn: what you asked, what it did that could write, what failed, what the guard refused, which files changed (from the ?undo
+snapshots), the last command before its answer (what the answer rests on), the answer, and the key to undo it.
+Read from the engine's session transcripts (~/.sakura/sessions) and the undo store.
+"""
+import datetime as dt
+import glob
+import importlib.machinery
+import json
+import os
+import re
+import subprocess
+import sys
+
+SESSIONS = os.path.join(os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura")), "sessions")
+MANAGED = "/usr/local/lib/sakura/guard/undo_snapshot.py"
+REPO = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "hooks", "undo_snapshot.py")
+u = importlib.machinery.SourceFileLoader("undo_snapshot", MANAGED if os.path.isfile(MANAGED) else REPO).load_module()
+
+
+def days_for(arg, today=None):
+    today = today or dt.date.today()
+    if arg in (None, "today"):
+        return [today]
+    if arg == "yesterday":
+        return [today - dt.timedelta(days=1)]
+    if arg == "week":
+        return [today - dt.timedelta(days=i) for i in range(6, -1, -1)]
+    m = re.fullmatch(r"(\d+)d", arg)
+    if m:
+        return [today - dt.timedelta(days=i) for i in range(int(m.group(1)) - 1, -1, -1)]
+    return [dt.date.fromisoformat(arg)]
+
+
+def local(ts):
+    return dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone()
+
+
+def command_of(payload):
+    try:
+        args = json.loads(payload.get("arguments") or "{}")
+    except ValueError:
+        return None
+    cmd = args.get("cmd") or args.get("command")
+    if isinstance(cmd, list):
+        cmd = " ".join(cmd[2:] if cmd[:2] in (["bash", "-lc"], ["/bin/bash", "-lc"]) else cmd)
+    return cmd
+
+
+def first_words(text, n=160):
+    for line in (text or "").splitlines():
+        line = line.strip()
+        plain = re.sub(r"[*#`>_\-|:]+", " ", line).strip()
+        if line and not line.startswith("<") and len(plain.split()) >= 3:  # skip bare headings like **Results:**
+            return line[:n] + ("…" if len(line) > n else "")
+    return ""
+
+
+def parse(path):
+    """Turns of one session: [{session, turn, cwd, start, asked, commands: [{cmd, exit, refused}], answer}]."""
+    turns, by_call, current = {}, {}, None
+    meta = {}
+    with open(path, errors="replace") as f:
+        for line in f:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            kind, p = d.get("type"), d.get("payload") or {}
+            if kind == "session_meta":
+                meta = p
+            elif kind == "turn_context":
+                current = p.get("turn_id")
+                turns.setdefault(current, {"session": meta.get("session_id") or meta.get("id"), "turn": current,
+                                           "cwd": p.get("cwd") or meta.get("cwd"), "start": d.get("timestamp"),
+                                           "asked": "", "commands": [], "answer": "", "origin": meta.get("originator", "")})
+            elif kind == "event_msg" and p.get("type") == "item_completed" and (p.get("item") or {}).get("type") == "UserMessage":
+                t = turns.get(p.get("turn_id") or current)
+                if t is not None and not t["asked"]:
+                    t["asked"] = first_words(" ".join(c.get("text", "") for c in p["item"].get("content", []) if isinstance(c, dict)))
+            elif kind == "response_item" and p.get("type") == "function_call":
+                cmd = command_of(p)
+                tid = ((p.get("internal_chat_message_metadata_passthrough") or {}).get("turn_id")) or current
+                if cmd and tid in turns:
+                    entry = {"cmd": cmd, "exit": None, "refused": None}
+                    turns[tid]["commands"].append(entry)
+                    by_call[p.get("call_id")] = entry
+            elif kind == "response_item" and p.get("type") == "function_call_output":
+                entry = by_call.get(p.get("call_id"))
+                out = p.get("output") if isinstance(p.get("output"), str) else json.dumps(p.get("output"))
+                if entry is not None and out:
+                    m = re.match(r"Command blocked by \w+ hook: (.*?)(?:\. Command:|$)", out, re.S)
+                    if m:
+                        entry["refused"] = first_words(m.group(1), 140)
+                    m = re.search(r"Process exited with code (-?\d+)", out)
+                    if m:
+                        entry["exit"] = int(m.group(1))
+            elif kind == "event_msg" and p.get("type") == "task_complete":
+                t = turns.get(p.get("turn_id") or current)
+                if t is not None:
+                    t["answer"] = first_words(p.get("last_agent_message") or "", 240)
+    return [t for t in turns.values() if t["asked"] or t["commands"]]
+
+
+def files_changed(turn, records):
+    """[(status, path)] the turn changed, from its undo snapshot to the next snapshot of the same directory (or now)."""
+    key = u._key(f"{turn['session']}-{turn['turn']}")
+    rec = next((r for r in records if r["key"] == key), None)
+    if not rec:
+        return [], None
+    out = []
+    for e in rec["dirs"]:
+        later = [r for r in records if r["time"] > rec["time"] and any(x["dir"] == e["dir"] for x in r["dirs"])]
+        try:
+            if later:
+                nxt = min(later, key=lambda r: r["time"])
+                after = next(x["commit"] for x in nxt["dirs"] if x["dir"] == e["dir"])
+                diff = u._git(e["store"], e["dir"], "diff-tree", "-r", "-z", "--no-renames", "--name-status", e["commit"], after)
+            else:
+                diff = u._git(e["store"], e["dir"], "diff", "-z", "--no-renames", "--name-status", e["commit"]) if os.path.isdir(e["dir"]) else b""
+                # untracked files the snapshot doesn't know yet count as created
+                diff += b"".join(b"A\0" + p + b"\0" for p in u._git(e["store"], e["dir"], "ls-files", "-z", "--others", "--exclude-standard").split(b"\0") if p)
+        except Exception:
+            continue
+        parts = diff.decode(errors="replace").split("\0")
+        for status, path in zip(parts[0::2], parts[1::2]):
+            if path:
+                out.append((status[:1], os.path.join(e["dir"], path)))
+    seen = {p for _, p in out}
+    for f in rec["files"]:
+        p = f["path"]
+        if p in seen:
+            continue
+        if f["saved"] is None:
+            if os.path.lexists(p):
+                out.append(("A", p))
+        elif not os.path.exists(p):
+            out.append(("D", p))
+        else:
+            try:
+                if open(p, "rb").read() != open(f["saved"], "rb").read():
+                    out.append(("M", p))
+            except OSError:
+                pass
+    return out, rec
+
+
+def short(p):
+    home = os.path.expanduser("~")
+    return "~" + p[len(home):] if p == home or p.startswith(home + "/") else p
+
+
+def one_line(cmd, n=110):
+    c = " ".join(cmd.split())
+    return c[:n] + ("…" if len(c) > n else "")
+
+
+def recap(days, include_tmp=False, full=False, as_json=False, out=sys.stdout):
+    records = u.records()
+    turns = []
+    for day in days:
+        for path in sorted(glob.glob(os.path.join(SESSIONS, f"{day:%Y}", f"{day:%m}", f"{day:%d}", "*.jsonl"))):
+            for t in parse(path):
+                if not include_tmp and ((t["cwd"] or "").startswith("/tmp/") or "/.sakura/eval/" in (t["cwd"] or "")):
+                    continue
+                turns.append(t)
+    turns.sort(key=lambda t: t["start"] or "")
+    totals = {"turns": 0, "commands": 0, "changed": 0, "failed": 0, "refused": 0, "files": 0}
+    last_day = None
+    for t in turns:
+        changed = [c for c in t["commands"] if not c["refused"] and not u.read_only(c["cmd"])]
+        failed = [c for c in t["commands"] if c["exit"] not in (None, 0) and not c["refused"]]
+        refused = [c for c in t["commands"] if c["refused"]]
+        files, rec = files_changed(t, records)
+        proof = next((c for c in reversed(t["commands"]) if not c["refused"]), None)
+        totals["turns"] += 1
+        totals["commands"] += len(t["commands"])
+        totals["changed"] += len(changed)
+        totals["failed"] += len(failed)
+        totals["refused"] += len(refused)
+        totals["files"] += len(files)
+        if as_json:
+            out.write(json.dumps({**t, "changed": [c["cmd"] for c in changed], "failed": failed, "refused": refused,
+                                  "files": files, "undo_key": rec["key"] if rec else None, "undone": bool(rec and rec["undone"])}) + "\n")
+            continue
+        when = local(t["start"]) if t["start"] else None
+        if when and when.date() != last_day:
+            last_day = when.date()
+            out.write(f"\n{when:%A %d %B}\n")
+        how = "worker/exec" if t["origin"] == "codex_exec" else "session"
+        out.write(f"\n{when:%H:%M}  {short(t['cwd'] or '?')}  ({how}; {len(t['commands'])} commands, {len(changed)} acted"
+                  f"{f', {len(failed)} failed' if failed else ''}{f', {len(refused)} refused' if refused else ''})\n")
+        if t["asked"]:
+            out.write(f"  asked     {t['asked']}\n")
+        shown = t["commands"] if full else [c for c in t["commands"] if c in changed or c in failed or c in refused]
+        for c in shown:
+            mark = "refused " if c["refused"] else ("failed  " if c in failed else ("acted   " if c in changed else "ran     "))
+            tail = f"  (exit {c['exit']})" if c in failed else ""
+            out.write(f"  {mark}  {one_line(c['cmd'])}{tail}\n")
+            if c["refused"]:
+                out.write(f"            guard: {c['refused']}\n")
+        if files:
+            out.write("  files     " + ", ".join(f"{s} {short(p)}" for s, p in files[:12]) + (f" (+{len(files) - 12} more)" if len(files) > 12 else "") + "\n")
+        if proof and t["answer"]:
+            out.write(f"  last ran  {one_line(proof['cmd'], 90)}" + (f"  (exit {proof['exit']})" if proof["exit"] is not None else "") + "\n")
+        elif t["answer"] and not t["commands"]:
+            out.write("  last ran  nothing: the answer rests on no command\n")
+        if t["answer"]:
+            out.write(f"  answered  {t['answer']}\n")
+        if rec:
+            out.write(f"  to undo   {'nothing: already undone' if rec['undone'] else 'run sakura-undo --key ' + rec['key']}\n")
+    if not as_json:
+        if not turns:
+            out.write("Nothing on record for " + (f"{days[0]}" if len(days) == 1 else f"{days[0]} to {days[-1]}") +
+                      (" (sessions in /tmp hidden; --all shows them)" if not include_tmp else "") + ".\n")
+        else:
+            out.write(f"\n{totals['turns']} turns, {totals['commands']} commands: {totals['changed']} acted (could write), "
+                      f"{totals['failed']} failed, {totals['refused']} refused by the guard; {totals['files']} files changed.\n")
+    return totals
+
+
+def selftest():
+    import tempfile
+    global SESSIONS
+    bad = 0
+    with tempfile.TemporaryDirectory() as t:
+        u.STATE = os.path.join(t, "state")
+        SESSIONS = os.path.join(t, "sessions")
+        proj = os.path.join(t, "home", "proj")
+        os.makedirs(proj)
+        with open(os.path.join(proj, "a.py"), "w") as f:
+            f.write("x = 1\n")
+        day = dt.date(2026, 11, 7)
+        d = os.path.join(SESSIONS, "2026", "11", "07")
+        os.makedirs(d)
+        S, T = "sess-1", "turn-1"
+        u.snapshot("sed -i s/1/2/ a.py", proj, S, T)  # what the hook does before the command
+        with open(os.path.join(proj, "a.py"), "w") as f:
+            f.write("x = 2\n")
+        with open(os.path.join(proj, "b.py"), "w") as f:
+            f.write("new\n")
+        ev = [
+            {"type": "session_meta", "timestamp": "2026-11-07T10:00:00Z", "payload": {"session_id": S, "cwd": proj, "originator": "codex_tui"}},
+            {"type": "turn_context", "timestamp": "2026-11-07T10:00:01Z", "payload": {"turn_id": T, "cwd": proj}},
+            {"type": "event_msg", "payload": {"type": "item_completed", "turn_id": T, "item": {"type": "UserMessage", "content": [{"type": "text", "text": "bump x to 2 and add b.py"}]}}},
+            {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": json.dumps({"cmd": "cat a.py"}), "call_id": "c1"}},
+            {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1", "output": "Process exited with code 0\nOutput:\nx = 1\n"}},
+            {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": json.dumps({"cmd": "sed -i s/1/2/ a.py && echo new > b.py"}), "call_id": "c2"}},
+            {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c2", "output": "Process exited with code 0\n"}},
+            {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": json.dumps({"cmd": "rm /usr/local/lib/sakura/guard/tool_guard.py"}), "call_id": "c3"}},
+            {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c3", "output": "Command blocked by PreToolUse hook: That's Sakura's guard. You can read it. Command: rm …"}},
+            {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": json.dumps({"cmd": "python3 -m pytest"}), "call_id": "c4"}},
+            {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c4", "output": "Process exited with code 1\n"}},
+            {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": T, "last_agent_message": "Done: x is 2 and b.py exists."}},
+        ]
+        with open(os.path.join(d, "rollout-x.jsonl"), "w") as f:
+            f.write("\n".join(json.dumps(e) for e in ev) + "\n")
+        import io
+        buf = io.StringIO()
+        tot = recap([day], include_tmp=True, out=buf)
+        text = buf.getvalue()
+        checks = {
+            "one turn": tot["turns"] == 1,
+            "four commands": tot["commands"] == 4,
+            "two acted (the sed and pytest, not the cat or the refused rm)": tot["changed"] == 2,
+            "one failed": tot["failed"] == 1,
+            "one refused, with the guard's reason": tot["refused"] == 1 and "guard: That's Sakura's guard" in text,
+            "files from the snapshot: M a.py, A b.py": "M " in text and "a.py" in text and "A " in text and "b.py" in text,
+            "the ask and the answer": "bump x to 2" in text and "Done: x is 2" in text,
+            "the undo key": "sakura-undo --key" in text,
+            "/tmp hidden by default": True,
+        }
+        if proj.startswith("/tmp/"):
+            buf2 = io.StringIO()
+            checks["/tmp hidden by default"] = recap([day], out=buf2)["turns"] == 0
+        for name, ok in checks.items():
+            if not ok:
+                print("FAIL:", name); bad += 1
+        if bad:
+            print(text)
+        print(f"sakura-recap selftest: {len(checks) - bad}/{len(checks)} ok")
+    return 1 if bad else 0
+
+
+def main():
+    args = sys.argv[1:]
+    if "-h" in args or "--help" in args:
+        print(__doc__.strip())
+        return 0
+    if "--selftest" in args:
+        return selftest()
+    flags = {a for a in args if a.startswith("--")}
+    rest = [a for a in args if not a.startswith("--")]
+    try:
+        days = days_for(rest[0] if rest else None)
+    except ValueError:
+        print(f"sakura-recap: don't know the day {rest[0]!r}; try today, yesterday, week, 3d or 2026-11-05", file=sys.stderr)
+        return 2
+    recap(days, include_tmp="--all" in flags, full="--full" in flags, as_json="--json" in flags)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
