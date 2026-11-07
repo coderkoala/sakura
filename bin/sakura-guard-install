@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # sudo sakura-guard-install [--rev REV]   install Sakura's guard where Sakura can't change it
 # sakura-guard-install --check            is it installed (exit 0), and from which revision
+#   --repo DIR   the Sakura checkout to take it from (default: the one this script is in), for running a pinned copy
 #
 # Sakura may improve itself: its prompts, tools and other hooks live in this repo, which it can edit. The guard
 # can't be one of those, or the first "improvement" could be switching it off. So the guard (hooks/tool_guard.py and
@@ -20,6 +21,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --rev) rev="${2:?--rev needs a revision}"; shift 2 ;;
         --check) check=1; shift ;;
+        --repo) ROOT="$(cd "${2:?--repo needs a directory}" && pwd)"; shift 2 ;;
         *) sed -n '2,3p' "$0" >&2; exit 2 ;;
     esac
 done
