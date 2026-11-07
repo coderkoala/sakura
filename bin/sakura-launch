@@ -45,7 +45,9 @@ worker_wall() {
     while [ -n "$rest" ]; do
         path="${rest%%:*}"
         [ "$rest" = "$path" ] && rest="" || rest="${rest#*:}"
-        [ -n "$path" ] && roots+=",\"${path/#\~/$HOME}\""
+        path="${path/#\~/$HOME}"
+        # The engine can't mount a path that isn't there, and then every command fails, so make it or leave it out.
+        [ -n "$path" ] && { [ -e "$path" ] || mkdir -p "$path" 2>/dev/null; } && [ -e "$path" ] && roots+=",\"$path\""
     done
     flags+=(--sandbox workspace-write -c 'approval_policy="never"' -c "sandbox_workspace_write.writable_roots=[$roots]")
     if [ "${SAKURA_WORKER_NET:-0}" = 1 ]; then
