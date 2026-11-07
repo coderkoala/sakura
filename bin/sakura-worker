@@ -38,6 +38,8 @@ import time
 
 RUNS = os.path.expanduser("~/.sakura/runs")
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "hooks"))
+from claim_check import reported_unrun  # noqa: E402
 TAIL = 800
 PREAMBLE = """You're a worker: you do this one job, report and end. Nobody will answer questions, so make the standard call yourself.
 Run things and read their output; don't assume. Stay inside the job: if something else is broken, mention it and leave it.
@@ -50,8 +52,8 @@ def wall_note(network, commit, write):
     places = ", ".join(["this directory", "/tmp", "~/.cache"] + list(write))
     missing = ([] if network else ["`network: yes`"]) + ([] if commit else ["`commit: yes`"]) + ["`write: PATH`"]
     return (f"You're in a sandbox. You can write only to {places}. The network is {'on' if network else 'off, and that includes localhost'}."
-            f"{'' if commit else ' .git is read-only.'} This is enforced, so there's no way round it: if the job can't be done inside it, "
-            f"report BLOCKED and which of {', '.join(missing)} the job needs.\n")
+            f"{'' if commit else ' .git is read-only.'} Run what the job needs anyway and read what happens: a command you didn't run has no result to report. "
+            f"Only when one really fails because of this sandbox, don't look for a way round it: report BLOCKED and which of {', '.join(missing)} the job needs.\n")
 
 
 def git_control_files(cwd):
@@ -155,7 +157,7 @@ def run_attempt(brief, cwd, timeout, log, network=False, write=()):
             timed_out = True
             os.killpg(p.pid, 15)
             p.wait()
-    final, commands, failed = "", 0, 0
+    final, commands, failed, ran = "", 0, 0, []
     with open(log, encoding="utf-8", errors="replace") as f:
         for line in f:
             try:
@@ -164,14 +166,15 @@ def run_attempt(brief, cwd, timeout, log, network=False, write=()):
                 continue
             item = ev.get("item", {}) if isinstance(ev, dict) else {}
             if ev.get("type") == "thread.started":  # a later attempt shares the log: only count this one
-                final, commands, failed = "", 0, 0
+                final, commands, failed, ran = "", 0, 0, []
             if ev.get("type") == "item.completed":
                 if item.get("type") == "agent_message" and item.get("text"):
                     final = item["text"]
                 elif item.get("type") == "command_execution":
                     commands += 1
+                    ran.append(" ".join((item.get("command") or "").split()))
                     failed += item.get("exit_code") not in (0, None)
-    return {"final": final.strip(), "commands": commands, "failed": failed, "timed_out": timed_out, "code": p.returncode}
+    return {"final": final.strip(), "commands": commands, "failed": failed, "timed_out": timed_out, "code": p.returncode, "ran": ran}
 
 
 def tail(text, n=TAIL):
@@ -269,6 +272,9 @@ def main():
     else:
         print("changed: " + (", ".join(files[:20]) + (f" and {len(files) - 20} more" if len(files) > 20 else "") if files else "nothing"))
     print(f"commands: {res.get('commands', 0)} run, {res.get('failed', 0)} failed")
+    unproven = reported_unrun(res.get("final", ""), "", res.get("ran", []), True)
+    if unproven:
+        print("UNPROVEN: the report gives results for commands it never ran: " + ", ".join(f"`{c}`" for c in unproven[:5]))
     print("worker's report: " + (tail(res.get("final", ""), 900) or "(none)"))
     print(f"transcript: {log}")
     sys.exit(0 if status != "FAILED" else 1)

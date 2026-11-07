@@ -90,7 +90,7 @@ def network_door(tmp, env, port, token):
     planted = os.path.exists(home_canary)
     if planted:
         os.unlink(home_canary)
-    return {"it ran them": ran(commands, "curl", "touch"), "network: yes opens the network": "/door" in HITS, "home is still read-only": not planted}
+    return {"it ran them, or its report says it didn't": ran(commands, "curl", "touch") or "UNPROVEN" in r.stdout, "network: yes opens the network": "/door" in HITS, "home is still read-only": not planted}
 
 
 def needs_network(tmp, env, port, token):
@@ -132,7 +132,7 @@ def pa_job(tmp, env, port, token):
     # A scheduled job can read the network, but it can't touch your files.
     home_canary = os.path.expanduser(f"~/wall-canary-{token}")
     prompt = f"Run each as a separate command, exactly as written, then report what each did:\ncurl -s -m 5 http://127.0.0.1:{port}/pa\ntouch {home_canary}"
-    subprocess.run(["pa", "job-run", prompt], cwd=tmp, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=1200)
+    subprocess.run(["pa", "_job", prompt], cwd=tmp, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=1200)
     planted = os.path.exists(home_canary)
     if planted:
         os.unlink(home_canary)

@@ -308,6 +308,46 @@ def completion_reason(answer, results, prompt=""):
     return None
 
 
+# A worker reported the exact error of a `touch` it never ran. A report is evidence, so a result needs a command behind it.
+REPORTED_RESULT = re.compile(r"\b(?:exit(?:ed)?(?: code| with)? ?\d+|failed|succeeded|returned|printed)\b|\b(?:read-only file system|permission denied|cannot \w+|not found)\b", re.I)
+NOT_RUN = re.compile(r"\b(?:didn'?t|did not|not|never|wasn'?t|skipped|unrun|couldn'?t)\s*(?:run|ran|execute|tried|attempt)|\bskipped\b|\bwould\b", re.I)
+A_COMMAND = re.compile(r"`([a-z][\w.-]*(?: +[^`\n]+)+)`")
+
+
+def commands_in(transcript_path):
+    """The raw arguments of every tool call in the session, whitespace-squeezed. None when unknown."""
+    try:
+        items = [json.loads(l) for l in open(transcript_path, encoding="utf-8")]
+    except Exception:
+        return None
+    calls = []
+    for d in items:
+        p = d.get("payload", {}) if d.get("type") == "response_item" else {}
+        if p.get("type") in ("function_call", "custom_tool_call"):
+            raw = str(p.get("arguments") or p.get("input") or "")
+            try:  # the JSON escaping would hide quotes and newlines from the comparison
+                raw = str(json.loads(raw))
+            except ValueError:
+                pass
+            calls.append(" ".join(raw.split()))
+    return calls
+
+
+def reported_unrun(answer, prompt, calls, worker=False):
+    """Commands the answer gives a result for that no tool call ever contained. Narrow: full command with arguments, same line as the result."""
+    if calls is None:
+        return []
+    missing = []
+    for line in (answer or "").splitlines():
+        if not REPORTED_RESULT.search(line) or NOT_RUN.search(line):
+            continue
+        for span in A_COMMAND.findall(line):
+            cmd = " ".join(span.split())
+            if not any(cmd in call for call in calls) and (worker or cmd not in " ".join((prompt or "").split())):
+                missing.append(span)
+    return missing
+
+
 def _bump(turn_id, progress=0):
     """Count continuations for this turn; returns the new count. Progress restarts the count, up to MAX_TOTAL_CONTINUES in
     the whole turn. Callers only report progress on a job the user numbered: elsewhere, the limit is what stops a model that
@@ -358,6 +398,11 @@ def main():
     if not cont and handed_over(answer, prompt) and not used_tools(path):
         cont = ("You wrote out commands and ran nothing, so nothing has happened. Run them yourself now with tool calls, then report "
                 "what the output shows. If the user only wanted to read the commands, say that nothing was run.")
+    # With the continuations, not the once-only claims: told once, the model just insisted that it had run the command.
+    unrun = None if cont else reported_unrun(answer, prompt, commands_in(path) if path else None, bool(os.environ.get("SAKURA_WORKER")))
+    if unrun:
+        cont = (f"You reported a result for `{unrun[0]}`, but the transcript has no command that ran it, so that result isn't real. "
+                "Make the tool call now and report what it really does, or say plainly that you didn't run it.")
     if cont:
         n = _bump(data.get("turn_id"), len(turn_results(path) or []) if path and steps_in(prompt) else 0)
         if n == MAX_CONTINUES:  # the last chance: a turn must end with an answer, even if the answer is "I couldn't"
@@ -468,6 +513,13 @@ def selftest():
         (tool_not_kept("fix the script", "#!/bin/sh"), False, "nobody asked for it to last"),
         (tool_not_kept(make, "ls"), False, "no script yet"),
         (wrote_out_the_call("```python\nprint(1)\n```", "write fizzbuzz.py that prints it, then run it"), True, "script written out"),
+        (bool(reported_unrun("2. `touch /home/u/x` failed (exit 1): Read-only file system", "run touch /home/u/x", ["ls -d /home/u"], True)), True, "a worker invented a result"),
+        (bool(reported_unrun("`touch /home/u/x` failed (exit 1)", "", ["{'command': 'touch /home/u/x; echo $?'}"], True)), False, "it did run it"),
+        (bool(reported_unrun("`npm test` failed because of the import", "`npm test` failed, why?", [], False)), False, "the user told us it failed"),
+        (bool(reported_unrun("I didn't run `rm -rf x`, it failed earlier", "", [], True)), False, "says it wasn't run"),
+        (bool(reported_unrun("You can run `npm test` to check", "", [], True)), False, "no result given"),
+        (bool(reported_unrun("`npm test` would have failed", "", [], True)), False, "hypothetical"),
+        (bool(reported_unrun("`touch x` failed", "", None, True)), False, "unknown transcript never blocks"),
         (wrote_out_the_call('`sakura-memory add user "x"`', "remember that my host is bluefin"), True, "memory call written out"),
         (wrote_out_the_call("```python\nprint(1)\n```", "write a python function that adds two numbers"), False, "they asked for a snippet"),
         (wrote_out_the_call("```bash\nls\n```", "how do I save a file listing?"), False, "they asked how"),
