@@ -17,14 +17,15 @@ Measured on one machine with an 8 GB GPU. Results vary between runs, so treat th
 |---|---|
 | Multi-step work over ssh, with honest failure | Email with a real provider (tested on a local server only) |
 | Live facts from primary sources | CAPTCHA hand-off on a real site (tested on a local page) |
-| Disposable workers and a coordinator | Guards against a determined model (pattern matching, not a sandbox) |
+| Disposable workers and a coordinator | Guards on the main agent (pattern matching, not a sandbox) |
 | Long tasks that used to crash a 32k context | Tools it grows itself (a weak check can pass a weak tool) |
 | Local document search, office files, the shared browser | Anything on a second machine, or on real 6 GB hardware |
-| Reminders, briefs, watches, auto-reply | |
+| Reminders, briefs, watches, auto-reply | Workers with `network: yes` (they can still read your files and local sockets) |
+| A sandbox around workers: no network, writes only where the job allows | |
 
 ## Next: make what exists trustworthy
 
-1. **A real wall around workers.** Run them with no network unless the job needs it, and a read-only view of everything outside their scope. A blocked worker has already tried Postfix and hand-written SMTP, so more patterns won't end this.
+1. **Hide secrets from networked workers.** Workers now run in the engine's sandbox (0.8.0), with no network unless the job asks. A worker with `network: yes` can still read `~/.ssh`, the password store and the Docker socket. Hide those from it unless the job names them.
 2. **Run evals in a disposable machine.** They run on the real host with sudo today, and have left containers and packages behind.
 3. **Real-world passes.** A real mail provider, including OAuth for those that require it. A real CAPTCHA in the visible window. A second device end to end.
 4. **`pa` across devices.** Reminders that follow you, firing once, not on all seven. Repeating calendar events. Reminders that work while logged out.
