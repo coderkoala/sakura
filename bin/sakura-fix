@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""sakura-fix [hint...] — fix the command that just failed. This is what the `?fix` key runs.
+
+The shell (shell/sakura.bash) remembers the last failed command, its directory and exit status, and inside tmux what the
+screen showed. This turns that into a brief and opens Sakura where the command ran, so there's nothing to copy or explain.
+  --shell PID    whose failure to fix (the key passes the shell's own PID)
+  --record FILE  read the failure from FILE instead (evals)
+  --exec         one-shot, no TUI; prints the answer (evals, scripts)
+  --print        print the brief and stop
+"""
+import os
+import sys
+import time
+
+USAGE = "usage: sakura-fix [--shell PID | --record FILE] [--exec | --print] [hint...]"
+
+
+def record_dir():
+    return os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", f"sakura-fix-{os.getuid()}")
+
+
+def read_record(path):
+    """(status, when, cwd, command, screen) or None. The command is everything after the third line."""
+    try:
+        with open(path, errors="replace") as f:
+            lines = f.read().split("\n")
+    except OSError:
+        return None
+    if len(lines) < 4 or not lines[0].strip().isdigit():
+        return None
+    command = "\n".join(lines[3:]).rstrip("\n")
+    if not command.strip():
+        return None
+    try:
+        when = int(lines[1])
+    except ValueError:
+        when = 0
+    screen = ""
+    try:
+        with open(path + ".screen", errors="replace") as f:
+            screen = f.read()
+    except OSError:
+        pass
+    return int(lines[0]), when, lines[2], command, screen
+
+
+def ago(when):
+    if not when:
+        return ""
+    s = max(0, int(time.time()) - when)
+    if s < 90:
+        return "just now"
+    if s < 5400:
+        return f"{s // 60} minutes ago"
+    if s < 172800:
+        return f"{s // 3600} hours ago"
+    return f"{s // 86400} days ago"
+
+
+def trim_screen(screen, limit=6000):
+    """The last lines of the screen, without the trailing blank ones or the prompt that came back."""
+    lines = screen.rstrip().split("\n")
+    text = "\n".join(lines[-80:])
+    return text[-limit:]
+
+
+def brief(status, when, cwd, command, screen, hint):
+    parts = [
+        "This command just failed in my shell. Fix what's wrong with it.",
+        "",
+        f"Command: {command}",
+        f"Directory: {cwd}",
+        f"Exit status: {status}" + (f" ({ago(when)})" if when else ""),
+    ]
+    if hint:
+        parts.append(f"From me: {hint}")
+    if screen.strip():
+        parts += ["", "What the terminal showed (the command's output is near the end):", "```", trim_screen(screen), "```"]
+    else:
+        parts += ["", "Its output wasn't saved."]
+    parts += [
+        "",
+        "1. Find out why it failed. If you need its output, run it again, but only if running it twice is harmless, "
+        "like a build, a test or a read. If it sends, pushes, deploys, deletes, pays or changes something on another "
+        "machine, don't run it: read the files it uses, and ask me for the output if that isn't enough.",
+        "2. Fix the cause. Don't delete, skip or weaken the check or test that failed, and don't change something "
+        "unrelated just to make it pass.",
+        "3. Prove it: run the same command again and show what it printed. If running it again isn't harmless, say "
+        "so and tell me what to run. If you can't fix it, say what you found and what you need from me.",
+    ]
+    return "\n".join(parts)
+
+
+def main(argv):
+    shell, record, mode, hint = None, None, "tui", []
+    it = iter(argv)
+    for a in it:
+        if a == "--shell":
+            shell = next(it, None)
+        elif a == "--record":
+            record = next(it, None)
+        elif a in ("--exec", "--print"):
+            mode = a[2:]
+        elif a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        else:
+            hint.append(a)
+    if record is None:
+        if not shell:
+            shell = str(os.getppid())
+        record = os.path.join(record_dir(), shell)
+    got = read_record(record)
+    if got is None:
+        print("sakura-fix: nothing has failed in this shell yet, so there's nothing to fix. "
+              "Run the command again, then ?fix. (Is shell/sakura.bash sourced?)", file=sys.stderr)
+        return 1
+    status, when, cwd, command, screen = got
+    text = brief(status, when, cwd, command, screen, " ".join(hint).strip())
+    if mode == "print":
+        print(text)
+        return 0
+    print(f"sakura: fixing `{command}` (exit {status}{', ' + ago(when) if when else ''}, in {cwd})", file=sys.stderr)
+    if os.path.isdir(cwd):
+        os.chdir(cwd)
+    else:
+        print(f"sakura-fix: {cwd} is gone, so this runs in {os.getcwd()}", file=sys.stderr)
+    launch = ["sakura-launch"]
+    if mode == "exec":
+        launch += ["--exec", "--skip-git-repo-check", text]
+    else:
+        launch += [text]
+    try:
+        os.execvp(launch[0], launch)
+    except OSError as e:
+        print(f"sakura-fix: couldn't start sakura-launch: {e}", file=sys.stderr)
+        return 127
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
