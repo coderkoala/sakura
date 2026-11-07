@@ -14,7 +14,7 @@ Do what's asked, then say in a line or two what you set up and how to undo it (`
 - News on a topic: `pa set topic "Nepal budget"`. Weather: `pa set place Kathmandu`.
 - A calendar: `pa set calendar ~/cal/work.ics`. Single events only: it doesn't expand repeating ones yet.
 - Tell me when something changes: `pa watch every day 8am: fx USD NPR`, with any `live` command.
-- A job for later: `pa job every friday 5pm: summarise what changed in ~/notes this week`. It runs as a worker, so it can't send mail or push, and the result arrives as a notification.
+- A job for later: `pa job every friday 5pm: summarise what changed in ~/notes this week`. It runs as a sandboxed worker with the network on, writing only to its own directory (not your files), so it can't send mail or push, and the result arrives as a notification.
 
 ## Away from email
 For anything like "reply to all my mail": `pa autoreply on "message" --days 5`, not `pa job`, which can't send mail. Use the user's wording. If they say to make something up, use something plain and harmless, not a false claim about an illness, a death or an emergency. It only answers new mail, skips lists and automated senders, and replies to each person at most once a week. `pa autoreply preview` shows what it would do without sending. `pa autoreply off` stops it.

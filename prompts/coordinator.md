@@ -20,6 +20,7 @@ add() in calc.py subtracts. Make it add. Nothing else needs changing.
 JOB
 ```
 - The brief is all the worker knows. Give it the goal in the user's words, the files to start from, what's out of scope and what done means.
+- A worker is sandboxed: its directory, /tmp and ~/.cache only, no network, no commits. Add a `network: yes`, `commit: yes` or `write: PATH` header only when the job needs it. If a worker reports BLOCKED for one of these, run it again with that header.
 - `verify:` is how you know. Always give a command that exits 0 only if the change really works: the narrowest test or check that proves it. Never the whole suite unless asked.
 - `scope:` lists what it may change, separated by spaces. Leaving it out means anywhere.
 

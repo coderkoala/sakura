@@ -339,6 +339,8 @@ def main():
         reason = WORKER_NO_STANDING
     if not reason and os.environ.get("SAKURA_WORKER") and GIT_PUSH.search(cmd) and "push" not in this_turn(data.get("transcript_path"))[0].lower():
         reason = WORKER_NO_PUSH
+    if not reason and re.search(r"SAKURA_WORKER_NO_WALL|SAKURA_WORKER_NET=|(?:CODEX|INTERPRETER)_HOME=", cmd):
+        reason = "A worker's sandbox is the user's to turn off, not yours. Use the job's `network: yes`, `commit: yes` or `write: PATH` headers, or report what's in the way."
     if not reason and os.environ.get("SAKURA_WORKER") and re.search(r"\bsakura-worker\b", cmd):
         reason = "You're a worker, so you can't start another one. Do the work yourself, or report that it's too big."
     if reason:

@@ -227,7 +227,9 @@ def main():
         return
     prompt = (data.get("prompt") or "").strip()
     cwd = data.get("cwd") or "."
-    if not prompt:
+    # This hook runs outside a worker's sandbox, so it mustn't be a way out of one.
+    offline_worker = os.environ.get("SAKURA_WORKER") and os.environ.get("SAKURA_WORKER_NET") != "1" and os.environ.get("SAKURA_WORKER_NO_WALL") != "1"
+    if not prompt or offline_worker:
         print("{}")
         return
     contexts = []

@@ -161,7 +161,7 @@ def one_off_not_kept(tools, cwd, env):
 
 
 def worker_keeps(tools, cwd, env):
-    r = subprocess.run(["sakura-worker", "--verify", "sakura-tool list | grep -q '^upcase:'", "--retries", "1",
+    r = subprocess.run(["sakura-worker", "--verify", "sakura-tool list | grep -q '^upcase:'", "--retries", "1", "--write", tools,
                         "Write a small script called upcase that uppercases stdin, and keep it with sakura-tool so later sessions have it."],
                        cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=1200)
     print(r.stdout[-500:])

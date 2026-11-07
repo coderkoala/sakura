@@ -435,17 +435,23 @@ def cmd_tick(_):
 
 
 def cmd_job_run(args):
-    env = dict(os.environ, SAKURA_WORKER="1")
+    # A scheduled job reads things (news, mail), so it keeps the network, but it can only write to its own directory.
+    env = dict(os.environ, SAKURA_WORKER="1", SAKURA_WORKER_NET="1")
     env.pop("SAKURA_COORDINATOR", None)
     prompt = args[0]
+    work = os.path.join(DIR, "job-work")
+    os.makedirs(work, exist_ok=True)
     try:
-        out = subprocess.run([os.path.join(ROOT, "bin", "sakura-launch"), "--exec", "--skip-git-repo-check", "--json", prompt], cwd=os.path.expanduser("~"), env=env,
-                             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=1800).stdout
+        out = subprocess.run([os.path.join(ROOT, "bin", "sakura-launch"), "--exec", "--skip-git-repo-check", "--json", prompt], cwd=work, env=env,
+                             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=1800)
     except subprocess.TimeoutExpired:
         notify("Scheduled job", f"{prompt[:60]}: ran out of time")
         return
+    if out.returncode == 78:  # the sandbox isn't available, and a job doesn't run without it
+        notify("Scheduled job", f"{prompt[:60]}: didn't run. {out.stderr.strip()[:200]}")
+        return
     final = ""
-    for line in out.splitlines():
+    for line in out.stdout.splitlines():
         try:
             item = json.loads(line).get("item", {})
         except ValueError:

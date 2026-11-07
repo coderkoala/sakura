@@ -16,6 +16,44 @@ flags=(--dangerously-bypass-hook-trust)
 # Tools Sakura kept for itself go last, so they can't stand in for anything already installed.
 PATH="$(dirname "$(dirname "$(readlink -f "$0")")")/shims:$PATH:${SAKURA_TOOLS_DIR:-$HOME/.sakura/tools}/bin"
 export PATH
+# A worker's commands run with nobody watching, so they run behind the engine's own sandbox, not behind patterns:
+# no network unless SAKURA_WORKER_NET=1, and writes only to its directory, /tmp, ~/.cache and SAKURA_WORKER_WRITE (colon-separated).
+# Two things would walk straight through it, so they go too: an exec-policy "allow" rule skips the sandbox entirely, and
+# rules/safe-reads.rules allows fetch_url and live, so a worker gets a home with no rules. MCP servers run outside it.
+worker_wall() {
+    if [ "${SAKURA_WORKER_NO_WALL:-0}" = 1 ]; then
+        echo "sakura: this worker has no sandbox, because SAKURA_WORKER_NO_WALL=1" >&2
+        return
+    fi
+    local real="${SAKURA_HOME:-$HOME/.sakura}" home entry
+    home="$real/.worker-home"
+    mkdir -p "$home"
+    for entry in "$real"/* "$real"/.[!.]*; do
+        case "${entry##*/}" in rules|.worker-home|'*'|'.[!.]*') continue ;; esac
+        ln -sfn "$entry" "$home/${entry##*/}"
+    done
+    rm -f "$home/rules"
+    export CODEX_HOME="$home" INTERPRETER_HOME="$home"
+    if ! sakura sandbox -c 'sandbox_mode="workspace-write"' -- true >/dev/null 2>&1; then
+        echo "sakura: the sandbox doesn't work on this machine, so the worker won't start. Unprivileged user namespaces are probably off: try 'sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0'. To run workers without a wall anyway, set SAKURA_WORKER_NO_WALL=1 yourself." >&2
+        exit 78
+    fi
+    local roots='"/tmp"' path rest
+    mkdir -p "$HOME/.cache"
+    roots+=",\"$HOME/.cache\""
+    rest="${SAKURA_WORKER_WRITE:-}"
+    while [ -n "$rest" ]; do
+        path="${rest%%:*}"
+        [ "$rest" = "$path" ] && rest="" || rest="${rest#*:}"
+        [ -n "$path" ] && roots+=",\"${path/#\~/$HOME}\""
+    done
+    flags+=(--sandbox workspace-write -c 'approval_policy="never"' -c "sandbox_workspace_write.writable_roots=[$roots]")
+    if [ "${SAKURA_WORKER_NET:-0}" = 1 ]; then
+        flags+=(-c 'sandbox_workspace_write.network_access=true')
+    else
+        flags+=(-c 'sandbox_workspace_write.network_access=false' -c 'mcp_servers.sakura-web.enabled=false')
+    fi
+}
 big="${SAKURA_BIG_MODEL:-huihui_ai/qwen3.5-abliterated:9b}"
 fast="${SAKURA_FAST_MODEL:-huihui_ai/qwen3.5-abliterated:2b}"
 
@@ -44,6 +82,7 @@ else
 fi
 
 if [ "$mode" = exec ]; then
+    [ -n "${SAKURA_WORKER:-}" ] && worker_wall
     exec sakura exec "${flags[@]}" "$@"
 fi
 if [ "$#" -gt 0 ]; then

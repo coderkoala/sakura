@@ -43,7 +43,7 @@ CHECK
 ```
 - The check runs in an empty directory, calling the tool by name. It must fail without the tool and against a do-nothing stand-in, and exit 0 with the real one.
 - Kept tools are on PATH in later sessions and listed at the start of each one. A name that's already a command is refused.
-- `sakura-tool list`, `sakura-tool check [NAME]`, `sakura-tool remove NAME`. A worker can keep a tool too. Never put a secret in one.
+- `sakura-tool list`, `sakura-tool check [NAME]`, `sakura-tool remove NAME`. A worker can keep a tool only with `write: ~/.sakura/tools` in its job. Never put a secret in one.
 
 ## Files and your own documents
 - `view_file FILE [start] [end]` reads with line numbers, 200 lines at a time. `edit_file FILE` applies @@old/@@new/@@end blocks from a heredoc, exact text only; `--all` replaces every match, `--create` makes a new file.
@@ -76,11 +76,13 @@ Run one job in a fresh context, with no quoting to get wrong:
 sakura-worker <<'JOB'
 verify: <command that exits 0 only if it worked>
 scope: <files it may change>
+network: yes
 
 <the brief>
 JOB
 ```
 It passes only if the verify command exits 0, it retries once with the failure, and it returns a short report. Run one at a time.
+A worker runs in a sandbox: only its directory, /tmp and ~/.cache are writable, and there's no network or commit. Add `network: yes` (internet, ssh, downloads), `commit: yes` or `write: PATH` only if the job needs them, and leave out any it doesn't.
 
 ## Skills
 Skills hold the procedures and tool lists for specialist work (pentesting, reversing, forensics, media, image
