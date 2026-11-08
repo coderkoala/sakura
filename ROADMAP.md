@@ -23,7 +23,7 @@ Measured on one machine with an 8 GB GPU. Results vary between runs, so treat th
 | Reminders, briefs, watches, auto-reply | Workers with `network: yes` (keys, agents and sockets hidden unless the job names them) |
 | A sandbox around workers: no network, writes only where the job allows | |
 | `?fix`, `?undo`, `?recap` | `?tonight` on a real night's queue (the eval runs one) |
-| `?tour` (9/9), `?tonight` (11/11) | `?teach` (1/3: it writes the script, then stops before `sakura-tool keep`) and `?learn` (no eval: nothing but a reader can grade a lesson) |
+| `?tour` (9/9), `?tonight` (11/11) | `?teach` (2/3 at best, 1/3 often: with the guard now sending the turn back until something is kept, the 3B-active model still loses its way in `sakura-tool keep`'s check about half the time) and `?learn` (no eval: nothing but a reader can grade a lesson) |
 | The guardian's checks (deterministic) | The guardian's disk projection, until it has a fortnight of samples |
 | `look` (OCR and the vision model), `ledger`, `schema`, `procwatch`, `dq`, `pa offer`, `docpack`, `fleet`, workers in worktrees (`evals/abilities.py`, 28/28) | `hear`, `say`, `clip`, `?pr`, `?review`, `?red`, `?try`, `?morning`, `pa mail` rules, `?decide`/`?why` (smoke-tested by hand) |
 
