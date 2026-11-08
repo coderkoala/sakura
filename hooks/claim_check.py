@@ -389,6 +389,14 @@ def main():
                 "installed by hand, then run this with its real input and expected output:\n"
                 "sakura-tool keep NAME ./FILE --about \"one line\" <<'CHECK'\nprintf 'input\\n' | NAME | grep -qx 'expected'\nCHECK\n"
                 "Report what it prints. If it can't be kept, tell the user that.")
+    # A ?teach session exists to keep a tool (or set a pa job). The model writes the script, tests it, and stops; told once, it keeps it.
+    if not cont and os.environ.get("SAKURA_TEACH") and path:
+        cmds = " \n".join(commands_in(path) or [])
+        if not re.search(r"\bsakura-tool\s+keep\b", cmds) and not re.search(r"(?:^|[\s;&|])pa\s+(?:job|watch|remind)\b", cmds) and not re.search(r"\bBLOCKED\b", answer):
+            cont = ("This is a ?teach session: it ends with a kept tool or a scheduled job, and neither has happened. Nothing limits your tool "
+                    "calls. If the script works, keep it now:\nsakura-tool keep NAME ./FILE --about \"one line\" <<'CHECK'\nprintf 'input\\n' | NAME | grep -qx "
+                    "'expected'\nCHECK\nIf the check fails, read why, fix the script or the check, and keep again. If it's a scheduled thing, run the `pa job` "
+                    "line. Then report what was kept and how to call it. If it truly can't be kept, say BLOCKED and why.")
     if not cont and path and bare_done(answer, prompt, turn_results(path)):
         cont = ("The user numbered their steps, and you've run fewer commands than there are steps. Check each one with a command, do what's "
                 "missing, and report what each one's output showed.")
