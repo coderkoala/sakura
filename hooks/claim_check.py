@@ -412,7 +412,10 @@ def main():
         cont = (f"You reported a result for `{unrun[0]}`, but the transcript has no command that ran it, so that result isn't real. "
                 "Make the tool call now and report what it really does, or say plainly that you didn't run it.")
     if cont:
-        n = _bump(data.get("turn_id"), len(turn_results(path) or []) if path and steps_in(prompt) else 0)
+        # Progress resets the in-a-row count: numbered steps done, or in a ?teach session every command run, so the keep nag
+        # can't be what caps a model that is still working.
+        progress = len(turn_results(path) or []) if path and steps_in(prompt) else (len(commands_in(path) or []) if path and os.environ.get("SAKURA_TEACH") else 0)
+        n = _bump(data.get("turn_id"), progress)
         if n == MAX_CONTINUES:  # the last chance: a turn must end with an answer, even if the answer is "I couldn't"
             cont = ("Stop trying new things now. Write your final answer from what you've seen: what worked, what didn't, "
                     "and what's blocking. If it couldn't be done, say that plainly. Make no more tool calls.")
