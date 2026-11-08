@@ -1,61 +1,148 @@
 {
-  "_comment": "Curated, authoritative sources per domain. curated_search scopes DuckDuckGo to these with site: filters. Personas map to a domain via _personas. Edit freely.",
-  "domains": {
-    "security": [
-      "book.hacktricks.xyz", "hacktricks.xyz", "gtfobins.github.io", "lolbas-project.github.io",
-      "exploit-db.com", "nvd.nist.gov", "cve.mitre.org", "attack.mitre.org",
-      "portswigger.net", "pentestmonkey.net", "packetstormsecurity.com", "ired.team",
-      "github.com", "owasp.org"
-    ],
-    "osint": [
-      "osintframework.com", "shodan.io", "censys.io", "haveibeenpwned.com",
-      "viewdns.info", "crt.sh", "github.com", "en.wikipedia.org"
-    ],
-    "reversing": [
-      "hex-rays.com", "ired.team", "malpedia.caad.fkie.fraunhofer.de", "man7.org",
-      "ghidra-sre.org", "github.com", "stackoverflow.com"
-    ],
-    "forensics": [
-      "forensics.wiki", "sans.org", "man7.org", "github.com", "nvd.nist.gov"
-    ],
-    "networking": [
-      "wiki.archlinux.org", "man7.org", "tldp.org", "serverfault.com",
-      "datatracker.ietf.org", "networklessons.com"
-    ],
-    "sysadmin": [
-      "wiki.archlinux.org", "man7.org", "tldp.org", "serverfault.com",
-      "askubuntu.com", "unix.stackexchange.com"
-    ],
-    "devops": [
-      "kubernetes.io", "docs.docker.com", "docs.ansible.com", "developer.hashicorp.com",
-      "stackoverflow.com", "github.com"
-    ],
-    "database": [
-      "postgresql.org", "dev.mysql.com", "sqlite.org", "mariadb.com",
-      "use-the-index-luke.com", "stackoverflow.com"
-    ],
-    "programming": [
-      "stackoverflow.com", "developer.mozilla.org", "docs.python.org",
-      "doc.rust-lang.org", "pkg.go.dev", "github.com"
-    ],
-    "gaming": [
-      "pcgamingwiki.com", "nexusmods.com", "wiki.gg", "fandom.com", "moddb.com", "steamcommunity.com"
-    ],
-    "language": [
-      "en.wiktionary.org", "jisho.org", "tatoeba.org", "en.wikipedia.org"
-    ],
-    "general": [
-      "en.wikipedia.org", "britannica.com", "stackexchange.com"
-    ]
-  },
-  "_personas": {
-    "pentest-operator": "security", "exploit-dev": "security", "ctf-toolbox": "security",
-    "security-engineer": "security", "mitm-tester": "security", "credential-auditor": "security",
-    "osint-analyst": "osint", "reverse-engineer": "reversing", "forensics-dfir": "forensics",
-    "pcap-analyst": "networking", "network-engineer": "networking", "sysadmin": "sysadmin",
-    "homelab": "sysadmin", "devops-engineer": "devops", "database-engineer": "database",
-    "performance-engineer": "programming", "game-modder": "gaming", "game-master": "gaming",
-    "wine-helper": "gaming", "translator": "language", "kb": "general", "research-analyst": "general",
-    "author": "general", "data-analyst": "programming"
-  }
+ "_comment": "Curated, authoritative sources per domain. curated_search scopes DuckDuckGo to these with site: filters. Personas map to a domain via _personas. Edit freely.",
+ "domains": {
+  "security": [
+   "book.hacktricks.xyz",
+   "hacktricks.xyz",
+   "gtfobins.github.io",
+   "lolbas-project.github.io",
+   "exploit-db.com",
+   "nvd.nist.gov",
+   "cve.mitre.org",
+   "attack.mitre.org",
+   "portswigger.net",
+   "pentestmonkey.net",
+   "packetstormsecurity.com",
+   "ired.team",
+   "github.com",
+   "owasp.org"
+  ],
+  "osint": [
+   "osintframework.com",
+   "shodan.io",
+   "censys.io",
+   "haveibeenpwned.com",
+   "viewdns.info",
+   "crt.sh",
+   "github.com",
+   "en.wikipedia.org"
+  ],
+  "reversing": [
+   "hex-rays.com",
+   "ired.team",
+   "malpedia.caad.fkie.fraunhofer.de",
+   "man7.org",
+   "ghidra-sre.org",
+   "github.com",
+   "stackoverflow.com"
+  ],
+  "forensics": [
+   "forensics.wiki",
+   "sans.org",
+   "man7.org",
+   "github.com",
+   "nvd.nist.gov"
+  ],
+  "networking": [
+   "wiki.archlinux.org",
+   "man7.org",
+   "tldp.org",
+   "serverfault.com",
+   "datatracker.ietf.org",
+   "networklessons.com"
+  ],
+  "sysadmin": [
+   "wiki.archlinux.org",
+   "man7.org",
+   "tldp.org",
+   "serverfault.com",
+   "askubuntu.com",
+   "unix.stackexchange.com"
+  ],
+  "devops": [
+   "kubernetes.io",
+   "docs.docker.com",
+   "docs.ansible.com",
+   "developer.hashicorp.com",
+   "stackoverflow.com",
+   "github.com"
+  ],
+  "database": [
+   "postgresql.org",
+   "dev.mysql.com",
+   "sqlite.org",
+   "mariadb.com",
+   "use-the-index-luke.com",
+   "stackoverflow.com"
+  ],
+  "programming": [
+   "stackoverflow.com",
+   "developer.mozilla.org",
+   "docs.python.org",
+   "doc.rust-lang.org",
+   "pkg.go.dev",
+   "github.com"
+  ],
+  "gaming": [
+   "pcgamingwiki.com",
+   "nexusmods.com",
+   "wiki.gg",
+   "fandom.com",
+   "moddb.com",
+   "steamcommunity.com"
+  ],
+  "language": [
+   "en.wiktionary.org",
+   "jisho.org",
+   "tatoeba.org",
+   "en.wikipedia.org"
+  ],
+  "general": [
+   "en.wikipedia.org",
+   "britannica.com",
+   "stackexchange.com"
+  ]
+ },
+ "_personas": {
+  "pentest-operator": "security",
+  "exploit-dev": "security",
+  "ctf-toolbox": "security",
+  "security-engineer": "security",
+  "mitm-tester": "security",
+  "credential-auditor": "security",
+  "osint-analyst": "osint",
+  "reverse-engineer": "reversing",
+  "forensics-dfir": "forensics",
+  "pcap-analyst": "networking",
+  "network-engineer": "networking",
+  "sysadmin": "sysadmin",
+  "homelab": "sysadmin",
+  "devops-engineer": "devops",
+  "database-engineer": "database",
+  "performance-engineer": "programming",
+  "game-modder": "gaming",
+  "game-master": "gaming",
+  "wine-helper": "gaming",
+  "translator": "language",
+  "kb": "general",
+  "research-analyst": "general",
+  "author": "general",
+  "data-analyst": "programming"
+ },
+ "wine-helper": [
+  "protondb.com",
+  "pcgamingwiki.com",
+  "appdb.winehq.org",
+  "forum.winehq.org",
+  "wiki.winehq.org",
+  "github.com/GloriousEggroll",
+  "github.com/Open-Wine-Components",
+  "docs.lutris.net",
+  "lutris.net",
+  "docs.usebottles.com",
+  "steamcommunity.com",
+  "areweanticheatyet.com",
+  "github.com/Matoking/protontricks",
+  "nexusmods.com"
+ ]
 }
