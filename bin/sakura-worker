@@ -13,6 +13,9 @@ Only one worker runs at a time, because the local model serves one request at a 
   --secrets KIND what it may read that acts as you, repeatable: ssh (keys, agent), docker (its socket), mail (password
                  store, gpg, keyrings, mail config), cloud (aws, gcloud, kube, gh, netrc), desktop (the session bus).
                  Hidden by default; the sudo password always is.
+  --worktree     run in a fresh `git worktree` of this repo (under ~/.cache/sakura-worktrees), so a second worker can run
+                 beside it on disjoint files. Changes stay in the worktree, uncommitted: the report names it, and
+                 `git -C WORKTREE diff | git apply` or `git merge` brings them over. The worktree is kept until you remove it.
   --retries N    extra attempts after a failure (default 1)
   --timeout S    seconds per attempt (default 900)
 
@@ -89,7 +92,7 @@ def parse_job(text):
     settings, lines = {}, text.strip().splitlines()
     i = 0
     while i < len(lines):
-        m = re.match(r"(verify|scope|retries|timeout|network|commit|write|secrets)\s*:\s*(.*)$", lines[i].strip(), re.I)
+        m = re.match(r"(verify|scope|retries|timeout|network|commit|write|secrets|worktree)\s*:\s*(.*)$", lines[i].strip(), re.I)
         if not m:
             break
         settings[m.group(1).lower()] = m.group(2).strip()
@@ -195,6 +198,7 @@ def main():
     ap.add_argument("--commit", action="store_true")
     ap.add_argument("--write", action="append", default=[])
     ap.add_argument("--secrets", action="append", default=[])
+    ap.add_argument("--worktree", action="store_true")
     ap.add_argument("--retries", type=int, default=1)
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("brief", nargs="*")
@@ -211,6 +215,7 @@ def main():
         args.commit = args.commit or yes("commit")
         args.write = args.write or settings.get("write", "").split()
         args.secrets = args.secrets or settings.get("secrets", "").replace(",", " ").split()
+        args.worktree = args.worktree or yes("worktree")
         args.retries = int(settings.get("retries", args.retries))
         args.timeout = int(settings.get("timeout", args.timeout))
     if not brief:
@@ -218,6 +223,21 @@ def main():
     cwd = os.getcwd()
     os.makedirs(RUNS, exist_ok=True)
     slug = re.sub(r"\W+", "-", brief[:40]).strip("-").lower() or "job"
+    worktree = None
+    if args.worktree:
+        if args.commit:
+            sys.exit("sakura-worker: worktree: yes and commit: yes don't go together; the coordinator merges a worktree's changes")
+        top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True).stdout.strip()
+        if not top:
+            sys.exit("sakura-worker: worktree: yes needs a git repo")
+        base = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "sakura-worktrees")
+        os.makedirs(base, exist_ok=True)
+        worktree = os.path.join(base, f"{os.path.basename(top)}-{time.strftime('%Y%m%d-%H%M%S')}-{slug[:20]}")
+        wt = subprocess.run(["git", "-C", top, "worktree", "add", "--detach", "-q", worktree, "HEAD"], capture_output=True, text=True)
+        if wt.returncode:
+            sys.exit("sakura-worker: couldn't make a worktree: " + wt.stderr.strip())
+        cwd = worktree
+        brief += f"\n\nYou're working in a git worktree of the repo ({worktree}), detached at HEAD. Change files here; don't commit or push."
     log = os.path.join(RUNS, f"{time.strftime('%Y%m%d-%H%M%S')}-{slug}.jsonl")
     lock = open(os.path.join(RUNS, ".lock"), "w")
     fcntl.flock(lock, fcntl.LOCK_EX)
@@ -285,6 +305,8 @@ def main():
     if unproven:
         print("UNPROVEN: the report gives results for commands it never ran: " + ", ".join(f"`{c}`" for c in unproven[:5]))
     print("worker's report: " + (tail(res.get("final", ""), 900) or "(none)"))
+    if worktree:
+        print(f"worktree: {worktree}  (bring its changes over: git -C {worktree} diff | git apply; remove it: git worktree remove --force {worktree})")
     print(f"transcript: {log}")
     sys.exit(0 if status != "FAILED" else 1)
 

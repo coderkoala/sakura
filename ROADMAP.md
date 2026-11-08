@@ -68,9 +68,9 @@ Shipped: **`?learn`: a mentor, not an answer machine.** See the README.
 
 **For everyone who isn't a developer.** Forms, letters, tax paperwork and small-business records, in the language you think in, starting with English and नेपाली, with the documents staying at home.
 
-## Next abilities (2026-11-08 brainstorm, in build order)
+## Abilities (2026-11-08 brainstorm). Built the same day unless marked.
 
-Not more harnesses: things it can't do yet.
+Not more harnesses: things it couldn't do before. Built means it runs and was smoke-tested by hand; only `?tour`, `?tonight` and the worker wall have evals. The rest need evals before the table above can claim them.
 1. **Hardware economy in `sakura-model`:** keep the system prompt's KV cache warm between turns; unload the driver after 20 idle minutes and reload on the next `?`; refuse a long eval or night job when the GPU is hot or has thrown an Xid this boot.
 2. **Eyes:** `look FILE` with a local vision model that fits 8 GB: screenshots, error dialogs, scans, receipts, whiteboards.
 3. **`?pr` and `?review`:** a PR from the branch with a body from the diff and commits; findings on a PR's diff. All through `gh`.
@@ -87,7 +87,7 @@ Not more harnesses: things it can't do yet.
 14. **Worktree workers:** each worker in its own `git worktree`, so two lanes are safe.
 15. **Morning page:** brief, guardian, last night's report and the calendar on one screen at the day's first `?`.
 16. **Mail that acts:** triage rules learned from you; calendar invites accepted or declined.
-17. **Lazy skills and per-topic tool reference, a 2b router for classification, so the 9b and the driver wake only for real work.**
+17. **Not built yet: lazy skills and per-topic tool reference, a 2b router for classification, so the 9b and the driver wake only for real work.** It changes the prompt, so it waits for a full eval pass.
 18. **Receipts and forms:** OCR into a ledger; tax paperwork in नेपाली and English from templates.
 
 ## Not doing

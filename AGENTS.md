@@ -55,6 +55,7 @@ CHECK
 - `fleet` lists the user's machines (up, RAM, GPU), `fleet pick gpu|ram|cpu` names the best one, `fleet run "cmd"` runs on all. "Run it on the box with a free GPU" → `ssh "$(fleet pick gpu)" ...`.
 - `schema [TABLE | refs COLUMN]` is the project's database schema from its migrations, no connection needed.
 - `hear [FILE|SECONDS]` is speech to text (local whisper); `say "text"` speaks. `hear --notes FILE` turns a recording into notes and reminders.
+- `ledger add FILE` reads a receipt into the user's ledger (`ledger list|sum`). `docpack add laravel@13` fetches a docs pack for offline `rag search`.
 - `sakura-pr` opens a PR from this branch with a body from the diff; `sakura-review [PR]` reviews one. Asked for either, run them rather than doing it by hand.
 
 ## Files and your own documents
@@ -97,7 +98,7 @@ network: yes
 JOB
 ```
 It passes only if the verify command exits 0, it retries once with the failure, and it returns a short report. Run one at a time.
-A worker runs in a sandbox: only its directory, /tmp and ~/.cache are writable, and there's no network or commit. Add `network: yes` (internet, ssh, downloads), `commit: yes` or `write: PATH` only if the job needs them, and leave out any it doesn't. Keys, agents and sockets that act as the user are hidden from it: add `secrets: ssh` (keys, agent), `docker`, `mail` (password store, gpg, mail config), `cloud` (aws, gcloud, kube, gh) or `desktop` only when the job uses them, e.g. `secrets: ssh` to deploy over ssh.
+A worker runs in a sandbox: only its directory, /tmp and ~/.cache are writable, and there's no network or commit. Add `network: yes` (internet, ssh, downloads), `commit: yes`, `write: PATH` or `worktree: yes` (its own git worktree, so two workers on disjoint files can run back to back without treading on each other; you merge) only if the job needs them, and leave out any it doesn't. Keys, agents and sockets that act as the user are hidden from it: add `secrets: ssh` (keys, agent), `docker`, `mail` (password store, gpg, mail config), `cloud` (aws, gcloud, kube, gh) or `desktop` only when the job uses them, e.g. `secrets: ssh` to deploy over ssh.
 
 ## Skills
 Skills hold the procedures and tool lists for specialist work (pentesting, reversing, forensics, media, image

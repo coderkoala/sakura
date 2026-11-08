@@ -250,6 +250,16 @@ def cmd_run(_):
         lines += ["Worker:", "```", out[-3000:], "```", ""]
         if stat:
             lines += ["Changes in the working tree:", "```", stat.rstrip(), "```", ""]
+            if status in ("PASSED", "UNVERIFIED"):
+                try:  # a push you can answer from bed: yes commits it, nothing else happens
+                    msg = f"night shift: {' '.join(job['brief'].split())[:60]}"
+                    import shlex
+                    d = shlex.quote(job["dir"])
+                    subprocess.run([os.path.join(ROOT, "bin", "pa"), "offer", f"commit night job #{job['id']} in {job['dir']}", "--",
+                                    "bash", "-c", f"git -C {d} add -A -- . && git -C {d} commit -qm {shlex.quote(msg)}"],
+                                   capture_output=True, timeout=30)
+                except (OSError, subprocess.SubprocessError):
+                    pass
             if full:
                 lines += ["<details><summary>diff</summary>", "", "```diff", full.rstrip(), "```", "</details>", ""]
         else:

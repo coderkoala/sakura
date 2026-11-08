@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""sakura-red TEST | "sentence" — red to green. Start from a failing test, or a sentence that becomes one, and iterate until it
+passes with the smallest diff. The `?red` key.
+
+  ?red tests/test_price.py::test_tax         an existing failing test (pytest id, a file, or a test name)
+  ?red "total() should round to 2 decimals"  write that test first, see it fail, then make it pass
+  --cmd "make test"                           how tests run here, if it can't be told from the repo
+  --print / --exec
+Rules it's given: the test isn't weakened, the diff stays small, every claim comes with the test's output.
+"""
+import os
+import subprocess
+import sys
+
+
+def sh(cmd):
+    try:
+        return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def test_command():
+    if os.path.exists("Makefile") and sh("grep -E '^test:' Makefile"):
+        return "make test"
+    if os.path.exists("composer.json"):
+        return "vendor/bin/phpunit" if os.path.exists("vendor/bin/phpunit") else "php artisan test"
+    if os.path.exists("package.json"):
+        return "npm test"
+    if os.path.exists("pyproject.toml") or os.path.exists("pytest.ini") or sh("ls tests test_*.py 2>/dev/null"):
+        return "python3 -m pytest -q"
+    if os.path.exists("Cargo.toml"):
+        return "cargo test"
+    if os.path.exists("go.mod"):
+        return "go test ./..."
+    return None
+
+
+def brief(target, cmd, is_test):
+    how = cmd or "work out how tests run here from the manifests, and say which command you chose"
+    head = (f"Make this failing test pass: {target}" if is_test else
+            f"Test-first: write a test for this, watch it fail, then make it pass: {target}")
+    return "\n".join([
+        head, "",
+        f"How tests run here: {how}. Run the narrowest selection that includes the test, never the whole suite.",
+        "Steps, each proven by output you show:",
+        "1. Red: run the test and show the failure." + ("" if is_test else " First write the test where the repo keeps tests, in its style, asserting the behaviour in my sentence, no more."),
+        "2. Green: change the code under test, not the test. The smallest change that makes it pass; no drive-by refactors, no new dependencies.",
+        "3. Run the same test again and show it passing. Then run the tests next to it (same file or module) to show nothing else broke.",
+        "4. Finish with `git diff --stat` and a two-line summary: what was wrong, what changed.",
+        "If after three attempts it still fails, stop and tell me what you learned and what you'd try next; don't loosen the assertion or skip the test.",
+    ])
+
+
+def main(argv):
+    mode, cmd, words = "tui", None, []
+    it = iter(argv)
+    for a in it:
+        if a == "--cmd":
+            cmd = next(it, None)
+        elif a in ("--print", "--exec"):
+            mode = a[2:]
+        elif a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        else:
+            words.append(a)
+    target = " ".join(words).strip()
+    if not target:
+        print(__doc__.strip())
+        return 2
+    is_test = len(words) == 1 and ("::" in target or target.startswith("test") or "/" in target or target.endswith((".py", ".php", ".ts", ".js", ".rs", ".go")) or "Test" in target)
+    text = brief(target, cmd or test_command(), is_test)
+    if mode == "print":
+        print(text)
+        return 0
+    launch = ["sakura-launch"] + (["--exec", "--skip-git-repo-check", text] if mode == "exec" else [text])
+    os.execvp(launch[0], launch)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

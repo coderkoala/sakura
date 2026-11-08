@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""docpack — offline documentation packs for your exact stack, searchable with `rag`, so Sakura answers from the right
+version with no internet.
+
+  docpack add laravel@13         a known pack (see list below), fetched once into ~/.sakura/docs and indexed
+  docpack add NAME GIT_URL [BRANCH] [SUBDIR]   any docs repo
+  docpack list                   what's here, and the known packs
+  docpack update [NAME]          pull and re-index
+  docpack remove NAME
+  docpack search "question"      the same as rag search, limited to the packs
+Known: laravel@12 laravel@13 (laravel/docs), vue@3 (vuejs/docs), php (php/doc-en, big), tailwind (tailwindlabs/tailwindcss.com),
+django@5.2 (django/django docs/), postgres (postgres/postgres doc/src/sgml), rust (rust-lang/book), go (golang/go doc/), python@3.13 (python/cpython Doc/).
+Once added, `rag search` finds them, and the model is told at session start which packs it has.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+DIR = os.path.join(os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura")), "docs")
+META = os.path.join(DIR, "packs.json")
+KNOWN = {
+    "laravel@12": ("https://github.com/laravel/docs", "12.x", ""),
+    "laravel@13": ("https://github.com/laravel/docs", "13.x", ""),
+    "vue@3": ("https://github.com/vuejs/docs", "main", "src"),
+    "php": ("https://github.com/php/doc-en", "master", "reference"),
+    "tailwind": ("https://github.com/tailwindlabs/tailwindcss.com", "main", "src/docs"),
+    "django@5.2": ("https://github.com/django/django", "stable/5.2.x", "docs"),
+    "postgres": ("https://github.com/postgres/postgres", "master", "doc/src/sgml"),
+    "rust": ("https://github.com/rust-lang/book", "main", "src"),
+    "go": ("https://github.com/golang/go", "master", "doc"),
+    "python@3.13": ("https://github.com/python/cpython", "3.13", "Doc"),
+}
+
+
+def load():
+    try:
+        return json.load(open(META))
+    except (OSError, ValueError):
+        return {}
+
+
+def save(d):
+    os.makedirs(DIR, exist_ok=True)
+    json.dump(d, open(META, "w"), indent=1)
+
+
+def rag(*args):
+    return subprocess.run(["rag", *args], check=False).returncode
+
+
+def add(args):
+    if not args:
+        sys.exit("usage: docpack add NAME [GIT_URL [BRANCH] [SUBDIR]]")
+    name = args[0]
+    if len(args) == 1:
+        if name not in KNOWN:
+            sys.exit(f"docpack: {name} isn't a known pack; give its git URL. Known: {', '.join(KNOWN)}")
+        url, branch, sub = KNOWN[name]
+    else:
+        url, branch, sub = args[1], (args[2] if len(args) > 2 else "HEAD"), (args[3] if len(args) > 3 else "")
+    safe = name.replace("/", "_")
+    dest = os.path.join(DIR, safe)
+    os.makedirs(DIR, exist_ok=True)
+    if not os.path.isdir(os.path.join(dest, ".git")):
+        cmd = ["git", "clone", "--depth", "1", "--filter=blob:none", "--no-tags"] + (["--branch", branch] if branch != "HEAD" else []) + [url, dest]
+        if sub:
+            cmd.insert(2, "--sparse")
+        print(f"fetching {url} ({branch}) …")
+        if subprocess.run(cmd).returncode:
+            shutil.rmtree(dest, ignore_errors=True)
+            sys.exit("docpack: the clone failed")
+        if sub:
+            subprocess.run(["git", "-C", dest, "sparse-checkout", "set", sub], check=False)
+    path = os.path.join(dest, sub) if sub else dest
+    packs = load()
+    packs[name] = {"url": url, "branch": branch, "subdir": sub, "path": path}
+    save(packs)
+    print(f"indexing {path} …")
+    rag("index", path)
+    print(f"{name}: ready. rag search \"...\" finds it; the model is told it has it.")
+
+
+def update(args):
+    packs = load()
+    for name, p in packs.items():
+        if args and name != args[0]:
+            continue
+        dest = os.path.join(DIR, name.replace("/", "_"))
+        print(f"updating {name} …")
+        subprocess.run(["git", "-C", dest, "pull", "-q", "--ff-only"], check=False)
+        rag("index", p["path"])
+
+
+def remove(args):
+    packs = load()
+    if not args or args[0] not in packs:
+        sys.exit("usage: docpack remove NAME  (one of: " + ", ".join(packs) + ")")
+    p = packs.pop(args[0])
+    rag("forget", p["path"])
+    shutil.rmtree(os.path.join(DIR, args[0].replace("/", "_")), ignore_errors=True)
+    save(packs)
+    print(f"removed {args[0]}")
+
+
+def listing(_):
+    packs = load()
+    if packs:
+        print("here:")
+        for name, p in packs.items():
+            print(f"  {name:<14} {p['url']} ({p['branch']}){' /' + p['subdir'] if p['subdir'] else ''}")
+    else:
+        print("no packs yet")
+    print("known: " + ", ".join(KNOWN))
+
+
+def snapshot():
+    """One line for the session prompt, or ''."""
+    packs = load()
+    return ("Offline docs packs, searchable with rag search: " + ", ".join(packs)) if packs else ""
+
+
+def main(argv):
+    cmds = {"add": add, "list": listing, "update": update, "remove": remove, "search": lambda a: rag("search", *a), "snapshot": lambda a: print(snapshot())}
+    if not argv or argv[0] in ("-h", "--help") or argv[0] not in cmds:
+        print(__doc__.strip())
+        return 0 if argv[:1] in (["-h"], ["--help"]) else 2
+    return cmds[argv[0]](argv[1:]) or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

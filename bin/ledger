@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""ledger — receipts and small-business records, at home. A photo or scan goes in, a row comes out; nothing leaves the machine.
+
+  ledger add receipt.jpg [note...]    read the receipt (OCR, then the local vision model for what OCR can't give), append a row
+  ledger add --manual 2026-11-08 "Bhatbhateni" 1250 NPR groceries
+  ledger list [YYYY-MM]               the rows, newest first (default: this month)
+  ledger sum [YYYY-MM] [--by vendor|category]
+  ledger csv                          the whole file (~/.sakura/ledger.csv), for a spreadsheet or dq
+  ledger fix ID date|vendor|amount|currency|category VALUE
+Each row: id, date, vendor, amount, currency, category, note, file. Receipt images are kept next to the ledger in
+~/.sakura/ledger/, named by id, so the paper can go. Amounts in words you can check: the row prints after each add.
+"""
+import csv
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+HOME = os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura"))
+FILE = os.path.join(HOME, "ledger.csv")
+STORE = os.path.join(HOME, "ledger")
+FIELDS = ["id", "date", "vendor", "amount", "currency", "category", "note", "file"]
+CURRENCIES = {"rs": "NPR", "rs.": "NPR", "npr": "NPR", "रु": "NPR", "₹": "INR", "inr": "INR", "$": "USD", "usd": "USD", "€": "EUR", "eur": "EUR", "£": "GBP", "gbp": "GBP"}
+BIN = os.path.dirname(os.path.realpath(__file__))
+
+
+def rows():
+    try:
+        with open(FILE, newline="", encoding="utf-8") as f:
+            return list(csv.DictReader(f))
+    except OSError:
+        return []
+
+
+def write_all(items):
+    os.makedirs(HOME, exist_ok=True)
+    with open(FILE + ".tmp", "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, FIELDS)
+        w.writeheader()
+        w.writerows(items)
+    os.replace(FILE + ".tmp", FILE)
+
+
+def ocr(path):
+    try:
+        return subprocess.run([os.path.join(BIN, "look"), "--text", path], capture_output=True, text=True, timeout=120).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def ask_model(path):
+    q = ('Read this receipt. Answer with one JSON object only, no prose: {"date": "YYYY-MM-DD or null", "vendor": "shop or company name", '
+         '"total": number or null, "currency": "ISO code like NPR, INR, USD, or null", "category": "one of groceries, food, transport, fuel, '
+         'utilities, rent, office, hardware, software, health, clothing, travel, other"}')
+    try:
+        out = subprocess.run([os.path.join(BIN, "look"), path, q], capture_output=True, text=True, timeout=400).stdout
+        m = re.search(r"\{.*\}", out, re.S)
+        return json.loads(m.group(0)) if m else {}
+    except Exception:
+        return {}
+
+
+def parse_text(text):
+    """(date, vendor, amount, currency) from OCR text, each possibly None."""
+    date = None
+    for pat, fmt in ((r"\b(20\d\d)[-/.](\d{1,2})[-/.](\d{1,2})\b", "ymd"), (r"\b(\d{1,2})[-/.](\d{1,2})[-/.](20\d\d)\b", "dmy")):
+        m = re.search(pat, text)
+        if m:
+            y, mo, d = (m.group(1), m.group(2), m.group(3)) if fmt == "ymd" else (m.group(3), m.group(2), m.group(1))
+            try:
+                date = dt.date(int(y), int(mo), int(d)).isoformat()
+                break
+            except ValueError:
+                pass
+    amount = None
+    for m in re.finditer(r"(?i)(grand\s+total|total\s+amount|net\s+total|amount\s+due|total|balance)\D{0,20}?([\d,]+(?:\.\d{1,2})?)", text):
+        try:
+            v = float(m.group(2).replace(",", ""))
+            amount = v if amount is None or m.group(1).lower().startswith(("grand", "net", "amount")) else max(amount, v)
+        except ValueError:
+            pass
+    if amount is None:
+        nums = [float(n.replace(",", "")) for n in re.findall(r"\b\d{1,3}(?:,\d{3})*(?:\.\d{2})\b|\b\d{2,7}(?:\.\d{2})?\b", text) if n.replace(",", "").replace(".", "").isdigit()]
+        amount = max(nums) if nums else None
+    cur = None
+    for k, v in CURRENCIES.items():
+        if re.search(r"(?<!\w)" + re.escape(k) + r"(?!\w)", text, re.I):
+            cur = v
+            break
+    vendor = None
+    for line in text.splitlines():
+        line = line.strip()
+        if len(line) >= 3 and not re.search(r"\d{3}", line) and not re.match(r"(?i)(receipt|invoice|bill|tax|vat|pan|date|time|cash|thank)", line):
+            vendor = line[:40]
+            break
+    return date, vendor, amount, cur
+
+
+def add(args):
+    if args[:1] == ["--manual"]:
+        a = args[1:]
+        if len(a) < 3:
+            sys.exit('usage: ledger add --manual DATE "VENDOR" AMOUNT [CURRENCY] [CATEGORY] [note...]')
+        rec = {"date": a[0], "vendor": a[1], "amount": a[2], "currency": a[3] if len(a) > 3 else "NPR", "category": a[4] if len(a) > 4 else "other",
+               "note": " ".join(a[5:]), "file": ""}
+    else:
+        if not args or not os.path.isfile(args[0]):
+            sys.exit("usage: ledger add FILE [note...]")
+        path, note = args[0], " ".join(args[1:])
+        text = ocr(path)
+        date, vendor, amount, cur = parse_text(text)
+        guess = {}
+        if amount is None or vendor is None or date is None:
+            guess = ask_model(path)
+        rec = {"date": date or guess.get("date") or dt.date.today().isoformat(), "vendor": (vendor or guess.get("vendor") or "unknown").strip(),
+               "amount": f"{(amount if amount is not None else guess.get('total') or 0):.2f}", "currency": cur or guess.get("currency") or "NPR",
+               "category": guess.get("category") or "other", "note": note, "file": ""}
+        os.makedirs(STORE, exist_ok=True)
+    items = rows()
+    rec["id"] = str(max([int(r["id"]) for r in items] + [0]) + 1)
+    if rec["file"] == "" and args[:1] != ["--manual"]:
+        dest = os.path.join(STORE, f"{rec['id']}{os.path.splitext(args[0])[1].lower()}")
+        shutil.copy2(args[0], dest)
+        rec["file"] = dest
+    items.append(rec)
+    write_all(items)
+    print(f"#{rec['id']}  {rec['date']}  {rec['vendor']}  {rec['amount']} {rec['currency']}  {rec['category']}" + (f"  {rec['note']}" if rec["note"] else ""))
+    if rec["amount"] in ("0.00",) or rec["vendor"] == "unknown":
+        print("  (couldn't read all of it; fix with: ledger fix", rec["id"], "amount|vendor|date VALUE)")
+
+
+def month_of(args):
+    for a in args:
+        if re.fullmatch(r"20\d\d-\d\d", a):
+            return a
+    return dt.date.today().strftime("%Y-%m")
+
+
+def listing(args):
+    month = month_of(args)
+    items = [r for r in rows() if r["date"].startswith(month)] if "--all" not in args else rows()
+    for r in sorted(items, key=lambda r: (r["date"], int(r["id"])), reverse=True):
+        print(f"#{r['id']:<4} {r['date']}  {r['vendor'][:24]:<24} {float(r['amount']):>10.2f} {r['currency']}  {r['category']:<10} {r['note']}")
+    if not items:
+        print(f"nothing in {month}")
+
+
+def total(args):
+    month = month_of(args)
+    by = args[args.index("--by") + 1] if "--by" in args and args.index("--by") + 1 < len(args) else None
+    items = [r for r in rows() if r["date"].startswith(month)]
+    sums = {}
+    for r in items:
+        key = (r.get(by) or "?", r["currency"]) if by else ("all", r["currency"])
+        sums[key] = sums.get(key, 0) + float(r["amount"] or 0)
+    for (k, cur), v in sorted(sums.items(), key=lambda kv: -kv[1]):
+        print(f"{month}  {k:<24} {v:>12.2f} {cur}")
+    if not sums:
+        print(f"nothing in {month}")
+
+
+def fix(args):
+    if len(args) < 3 or args[1] not in FIELDS[1:6]:
+        sys.exit("usage: ledger fix ID date|vendor|amount|currency|category VALUE")
+    items = rows()
+    r = next((x for x in items if x["id"] == args[0]), None)
+    if not r:
+        sys.exit(f"no row #{args[0]}")
+    r[args[1]] = " ".join(args[2:])
+    write_all(items)
+    print(f"#{r['id']}  {r['date']}  {r['vendor']}  {r['amount']} {r['currency']}  {r['category']}")
+
+
+def main(argv):
+    cmds = {"add": add, "list": listing, "sum": total, "fix": fix, "csv": lambda a: sys.stdout.write(open(FILE).read() if os.path.exists(FILE) else "")}
+    if not argv or argv[0] in ("-h", "--help") or argv[0] not in cmds:
+        print(__doc__.strip())
+        return 0 if argv[:1] in (["-h"], ["--help"]) else 2
+    return cmds[argv[0]](argv[1:]) or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

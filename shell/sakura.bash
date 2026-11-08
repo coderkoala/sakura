@@ -17,9 +17,10 @@
 #   look FILE|screen|clip [question]  eyes: a local vision model, or --text for OCR
 #   ?try [lang] question   a scratch directory, run a snippet, keep nothing
 #   ?hear   speak a request instead of typing it;  ?morning  the day on one screen (also shown at the first ? of the day)
+#   ?red TEST|"sentence"   red to green: a failing test (or one written from a sentence) made to pass
 #   ?go [request]  a session that doesn't stop to ask (sakura-trust on makes every ? like this)
 if command -v sakura-launch >/dev/null 2>&1; then
-    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' '?pr' '?review' '?try' '?hear' '?morning' 2>/dev/null
+    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' '?pr' '?review' '?try' '?hear' '?morning' '?red' 2>/dev/null
     alias '?'='sakura-launch'
     alias '?fix'='sakura-fix --shell $$'
     alias '?undo'='sakura-undo'
@@ -33,6 +34,7 @@ if command -v sakura-launch >/dev/null 2>&1; then
     alias '?go'='SAKURA_TRUST=1 sakura-launch'
     alias '?pr'='sakura-pr'
     alias '?try'='sakura-try'
+    alias '?red'='sakura-red'
     alias '?morning'='sakura-morning'
     __sakura_hear() { local t; t="$(hear "$@")" || return 1; printf 'heard: %s\n' "$t"; sakura-launch "$t"; }
     alias '?hear'='__sakura_hear'
@@ -49,7 +51,7 @@ if command -v sakura-launch >/dev/null 2>&1; then
     __sakura_quote_line() {
         local head rest
         case "$READLINE_LINE" in
-            '?remind '*|'?pa '*|'?fix '*|'? '*|'?? '*|'?learn '*|'?teach '*|'?tour '*|'?recall '*|'?go '*|'?pr '*|'?try '*) ;;
+            '?remind '*|'?pa '*|'?fix '*|'? '*|'?? '*|'?learn '*|'?teach '*|'?tour '*|'?recall '*|'?go '*|'?pr '*|'?try '*|'?red '*) ;;
             *) return 0 ;;
         esac
         head=${READLINE_LINE%% *}

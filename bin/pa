@@ -13,6 +13,9 @@ Auto-reply  pa autoreply on "I'm on a deadline and will reply when I can."     [
 Settings    pa set role developer     pa set repo ~/code/app     pa set place Kathmandu     pa unset repo ~/code/app     pa settings
 Anything    pa ask "..."     opens Sakura as your PA
 
+Mail       pa mail urgent "boss@"   pa mail mute "newsletter"   who comes first in the brief, and who's hidden
+Offers     pa offer "commit last night's diff" -- git commit -am night   a push that ends in "reply: yes ID"; `pa listen` (NTFY_TOPIC)
+           runs the offered command when you reply from your phone, and nothing else. `pa yes ID` / `pa no ID` here.
 Stored in $SAKURA_PA_DIR, else ~/.sakura/pa. A timer checks once a minute, and anything missed while the machine was off fires when it's back.
 """
 import fcntl
@@ -367,6 +370,101 @@ def notify(title, body):
         subprocess.run([command, title, str(body)], capture_output=True, timeout=15)
     except (OSError, subprocess.TimeoutExpired):
         pass
+
+
+# ── Offers: a push you can answer ─────────────────────────────────────────────
+# `pa offer "what" -- command` sends a notification ending in "reply: yes ID". `pa listen` subscribes to the ntfy topic
+# (NTFY_TOPIC) and runs only an offered command, only once, only within its day: nothing else that arrives is a command.
+
+OFFER_TTL = 86400
+REPLY = re.compile(r"^\s*(yes|ok|do it|go|no|skip)\s*#?(\w+)?\s*$", re.I)
+
+
+def offers():
+    return load("offers.json", [])
+
+
+def cmd_offer(args):
+    if "--" not in args or not args[:args.index("--")] or not args[args.index("--") + 1:]:
+        sys.exit('usage: pa offer "what saying yes does" -- COMMAND...')
+    i = args.index("--")
+    text, command = " ".join(args[:i]), args[i + 1:]
+    with Lock():
+        items = [o for o in offers() if o["expires"] > time.time() and not o.get("done")]
+        oid = hashlib.sha1(f"{time.time()}{text}".encode()).hexdigest()[:4]
+        items.append({"id": oid, "text": text, "command": command, "cwd": os.getcwd(), "expires": time.time() + OFFER_TTL})
+        save("offers.json", items)
+    notify("Sakura asks", f"{text}  reply: yes {oid}")
+    print(f"offer {oid}: {text} → yes {oid}" + ("" if os.environ.get("NTFY_TOPIC") else "  (no NTFY_TOPIC, so the reply can only come from `pa yes ID` here)"))
+
+
+def cmd_yes(args, accept=True):
+    if not args:
+        sys.exit("usage: pa yes ID | pa no ID")
+    with Lock():
+        items = offers()
+        o = next((x for x in items if x["id"] == args[0] and not x.get("done")), None)
+        if not o:
+            sys.exit(f"pa: no open offer {args[0]}")
+        if o["expires"] < time.time():
+            sys.exit(f"pa: offer {args[0]} expired")
+        o["done"] = True
+        save("offers.json", items)
+    if not accept:
+        notify("Sakura", f"skipped: {o['text']}")
+        return
+    r = subprocess.run(o["command"], cwd=o["cwd"] if os.path.isdir(o["cwd"]) else None, capture_output=True, text=True, timeout=1800, stdin=subprocess.DEVNULL)
+    out = (r.stdout + r.stderr).strip()
+    notify("Sakura did it" if r.returncode == 0 else "Sakura: that failed", f"{o['text']}: {out[-200:] or 'done'}")
+    print(out)
+
+
+def cmd_listen(_):
+    """Subscribe to the ntfy topic and act on replies to offers. Runs forever; `pa listen --install` makes it a user service."""
+    topic = os.environ.get("NTFY_TOPIC")
+    if not topic:
+        sys.exit("pa listen: set NTFY_TOPIC (the same topic `notify` pushes to)")
+    server = os.environ.get("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
+    import urllib.request
+    while True:
+        try:
+            with urllib.request.urlopen(f"{server}/{topic}/json?since=30s", timeout=600) as r:
+                for line in r:
+                    try:
+                        ev = json.loads(line)
+                    except ValueError:
+                        continue
+                    if ev.get("event") != "message":
+                        continue
+                    m = REPLY.match(ev.get("message", ""))
+                    if not m:
+                        continue  # not a reply to an offer: ignored, whatever it says
+                    word, oid = m.group(1).lower(), m.group(2)
+                    if not oid:
+                        open_ = [o for o in offers() if not o.get("done") and o["expires"] > time.time()]
+                        if len(open_) != 1:
+                            continue
+                        oid = open_[0]["id"]
+                    try:
+                        cmd_yes([oid], accept=word in ("yes", "ok", "do it", "go"))
+                    except SystemExit:
+                        pass
+        except Exception:
+            time.sleep(15)
+
+
+def cmd_listen_install(_):
+    units = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "systemd", "user")
+    os.makedirs(units, exist_ok=True)
+    topic, server = os.environ.get("NTFY_TOPIC", ""), os.environ.get("NTFY_SERVER", "https://ntfy.sh")
+    if not topic:
+        sys.exit("pa listen --install: set NTFY_TOPIC first")
+    with open(os.path.join(units, "sakura-pa-listen.service"), "w") as f:
+        f.write(f"[Unit]\nDescription=Sakura PA: answers to offers over ntfy\nAfter=network-online.target\n[Service]\nEnvironment=NTFY_TOPIC={topic}\nEnvironment=NTFY_SERVER={server}\n"
+                f"ExecStart={os.path.realpath(__file__)} listen\nRestart=always\nRestartSec=20\n[Install]\nWantedBy=default.target\n")
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    subprocess.run(["systemctl", "--user", "enable", "--now", "sakura-pa-listen.service"], capture_output=True)
+    print(f"listening on {server}/{topic} for replies to offers (systemctl --user status sakura-pa-listen)")
 
 
 def cmd_pending(_):
@@ -787,7 +885,38 @@ def sec_mail(s):
     found = json.loads(r.stdout)
     found = found.get("envelopes", found) if isinstance(found, dict) else found
     unread = [e for e in found if "seen" not in " ".join(map(str, e.get("flags", []))).lower()]
-    return ([f"{len(unread)} unread"] if unread else []) + [f"{sender_of(e)}: {str(e.get('subject'))[:70]}" for e in unread[:5]]
+    rules = s.get("mail_rules", {})
+    def hit(e, kind):
+        text = f"{sender_of(e)} {e.get('subject', '')}".lower()
+        return any(p.lower() in text for p in rules.get(kind, []))
+    unread = [e for e in unread if not hit(e, "mute")]
+    urgent = [e for e in unread if hit(e, "urgent")]
+    rest = [e for e in unread if e not in urgent]
+    return ([f"{len(unread)} unread" + (f", {len(urgent)} urgent" if urgent else "")] if unread else []) + \
+        [f"! {sender_of(e)}: {str(e.get('subject'))[:70]}" for e in urgent[:5]] + [f"{sender_of(e)}: {str(e.get('subject'))[:70]}" for e in rest[:5]]
+
+
+def cmd_mail(args):
+    """Triage rules the brief applies: `pa mail urgent "boss@"`, `pa mail mute "newsletter"`, `pa mail rules`, `pa mail forget "text"`."""
+    st = settings()
+    rules = st.setdefault("mail_rules", {"urgent": [], "mute": []})
+    if not args or args[0] == "rules":
+        for kind in ("urgent", "mute"):
+            print(f"{kind}: " + (", ".join(rules.get(kind, [])) or "(none)"))
+        return
+    kind, text = args[0], " ".join(args[1:]).strip()
+    if kind in ("urgent", "mute") and text:
+        if text not in rules.setdefault(kind, []):
+            rules[kind].append(text)
+        save("settings.json", st)
+        print(f"{kind}: {text}  (matched against sender and subject in the brief)")
+    elif kind == "forget" and text:
+        for k in ("urgent", "mute"):
+            rules[k] = [r for r in rules.get(k, []) if r != text]
+        save("settings.json", st)
+        print("forgotten")
+    else:
+        sys.exit('usage: pa mail urgent|mute "text" | pa mail rules | pa mail forget "text"')
 
 
 def _ics_events(path_, day):
@@ -1142,7 +1271,7 @@ PREAMBLE = """You're acting as the user's personal assistant. `pa` does most of 
 `pa --help` has the rest. Do it, and say in a line or two what you set up and how to undo it.
 
 The request: """
-DIRECT = {"remind", "list", "cancel", "brief", "roles", "standup", "todo", "clock", "log", "watch", "job", "autoreply", "settings"}
+DIRECT = {"remind", "list", "cancel", "brief", "roles", "standup", "todo", "clock", "log", "watch", "job", "autoreply", "settings", "mail", "offer", "yes", "no"}
 
 
 def cmd_ask(args):
@@ -1178,7 +1307,8 @@ def main(argv):
         return
     table = {"remind": cmd_remind, "list": cmd_list, "cancel": cmd_cancel, "job": cmd_job, "watch": cmd_watch, "tick": cmd_tick, "_job": cmd_job_run, "pending": cmd_pending,
              "autoreply": cmd_autoreply, "todo": cmd_todo, "clock": cmd_clock, "log": cmd_log, "brief": cmd_brief, "roles": cmd_roles, "standup": cmd_standup, "ask": cmd_ask,
-             "set": cmd_set, "unset": lambda a: cmd_set(a, add=False)}
+             "set": cmd_set, "unset": lambda a: cmd_set(a, add=False), "offer": cmd_offer, "yes": cmd_yes, "mail": cmd_mail, "no": lambda a: cmd_yes(a, accept=False),
+             "listen": lambda a: cmd_listen_install(a) if "--install" in a else cmd_listen(a)}
     if cmd not in table:
         sys.exit(f"pa: no command {cmd}. See: pa --help. For anything else: pa ask \"...\"")
     table[cmd](args)

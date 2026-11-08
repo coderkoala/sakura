@@ -30,6 +30,12 @@ def build(cwd, coordinator):
     tools = tools_module().snapshot()
     if tools:
         parts.append("<kept_tools>\nCommands you wrote and kept earlier, on PATH. Run them in the shell.\n" + tools + "\n</kept_tools>")
+    try:
+        packs = importlib.machinery.SourceFileLoader("docpack", os.path.join(ROOT, "bin", "docpack")).load_module().snapshot()
+        if packs:
+            parts.append("<docs>\n" + packs + ". For these, answer from `rag search`, not memory.\n</docs>")
+    except Exception:
+        pass
     if coordinator:
         path = mem.state_path(cwd)
         state = mem.read(path) or mem.STATE_TEMPLATE
