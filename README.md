@@ -132,7 +132,14 @@ Measured on an RTX 4060 Laptop with 32 GB RAM, RAM and budget as noted (`evals/b
 | Reading a long prompt | ~2,000 tok/s | 503 tok/s | 584 tok/s |
 
 The lower budget stands in for a 6 GB card by limiting the cache; it hasn't run on a real one. Other models loaded by
-`consult` compete for the same VRAM while this server is awake (it sleeps after 30 idle minutes).
+`consult` compete for the same VRAM while this server is awake (it leaves VRAM after 20 idle minutes and reuses the system
+prompt's KV cache between turns).
+
+**Choosing a driver.** `sakura-model driver` lists the driver files Sakura knows, all the same shape (35B MoE, 3B active,
+Q3_K_M, abliterated), so the VRAM budget holds for each: `qwen36` is the one evaluated here; `ornith15` (Ornith 1.5 35B-A3B)
+is a candidate that rates higher on whatmodel.sh. `sakura-model driver ornith15` then `sakura-model pull` switches;
+`sakura-model advise` asks whatmodel.sh what fits this RAM and VRAM, sending only those two numbers and only when you run
+it. A higher score isn't a better Sakura until the model calls tools in the qwen-code shape and passes `evals/run.py`.
 
 ## Roadmap
 
