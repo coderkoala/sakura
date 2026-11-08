@@ -180,7 +180,47 @@ def logs_local(tmp):
             "the table has a header": out.startswith("count\tfirst\tlast\tsource\tmessage"), "--raw lists the lines": raw.count(marker) == 3}
 
 
-CASES = {"tbl": tbl, "logs": logs_local, "look-ocr": look_ocr, "look-vision": look_vision, "ledger": ledger, "schema": schema, "procwatch": procwatch, "dq": dq,
+def decide(tmp):
+    env = {"SAKURA_HOME": os.path.join(tmp, "home")}
+    repo = os.path.join(tmp, "r")
+    os.makedirs(repo)
+    subprocess.run("git init -q -b main . && git config user.email t@t && git config user.name t && git commit -q --allow-empty -m i", shell=True, cwd=repo)
+    sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+    run([os.path.join(BIN, "sakura-decide"), "Redis for the queue: LISTEN/NOTIFY dropped jobs"], env, cwd=repo)
+    why = run([os.path.join(BIN, "sakura-decide"), "why", "queue"], env, cwd=repo).stdout
+    none = run([os.path.join(BIN, "sakura-decide"), "why", "zebra"], env, cwd=repo)
+    recall = run([os.path.join(BIN, "sakura-recall"), "LISTEN NOTIFY"], dict(env, SAKURA_SESSIONS_DIR=os.path.join(tmp, "none"), XDG_CACHE_HOME=os.path.join(tmp, "cache"))).stdout
+    return {"why finds it with repo, branch and commit": "Redis" in why and f"main@{sha}" in why, "an unknown topic says so": none.returncode == 1,
+            "recall finds decisions too": "[decision]" in recall and "Redis" in recall}
+
+
+def clip(tmp):
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return {"skipped: no display": True}
+    marker = f"sakura-clip-{os.getpid()}"
+    run([os.path.join(BIN, "clip"), "set"], stdin=marker, timeout=15)
+    out = run([os.path.join(BIN, "clip")], timeout=15).stdout
+    return {"set then get round-trips": out.strip() == marker}
+
+
+def status(tmp):
+    env = {"SAKURA_HOME": os.path.join(tmp, "home"), "SAKURA_TONIGHT_DIR": os.path.join(tmp, "tonight"), "SAKURA_TONIGHT_NO_TIMER": "1",
+           "SAKURA_PA_DIR": os.path.join(tmp, "pa"), "SAKURA_PA_NO_TIMER": "1", "SAKURA_PA_NOTIFY": "/bin/true", "SAKURA_GUARDIAN_DIR": os.path.join(tmp, "g")}
+    run([os.path.join(BIN, "sakura-tonight"), "a job for tonight"], env, cwd=tmp)
+    run([os.path.join(BIN, "pa"), "offer", "x", "--", "true"], env, cwd=tmp)
+    short = run([os.path.join(BIN, "sakura-status")], env).stdout.strip()
+    longer = run([os.path.join(BIN, "sakura-status"), "--long"], env).stdout
+    return {"the short line counts the queue and offers": "☾1" in short and "?1" in short, "the long line says it in words": "1 queued tonight" in longer and "1 offers" in longer}
+
+
+def watch(tmp):
+    r = subprocess.run(["timeout", "3.5", os.path.join(BIN, "sakura-watch"), "-n", "1", "date +%s%N | cut -c1-12"], capture_output=True, text=True)
+    lines = r.stdout.splitlines()
+    return {"it reruns and marks what changed": any(l.startswith("- ") for l in lines) and any(l.startswith("+ ") for l in lines),
+            "it counts the changes in the header": any("change" in l and "every 1s" in l for l in lines)}
+
+
+CASES = {"tbl": tbl, "logs": logs_local, "decide": decide, "clip": clip, "status": status, "watch": watch, "look-ocr": look_ocr, "look-vision": look_vision, "ledger": ledger, "schema": schema, "procwatch": procwatch, "dq": dq,
          "offer": offer, "docpack": docpack, "fleet": fleet, "worktree": worktree}
 
 

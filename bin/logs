@@ -6,6 +6,7 @@
   logs starlight --since 24h --unit nginx
   logs starlight --files    also the usual log files: nginx error.log, php-fpm, Laravel storage/logs, mysql, postgres, docker containers
   logs --raw                the lines themselves, newest last, not grouped
+  logs starlight --follow   stream new errors as they happen, grouped every few seconds (Ctrl-C stops)
   logs --json
 Output: count, first seen, last seen, unit or file, message (digits, hex ids and paths collapsed so repeats group). Pipe
 to `tbl --md` for a report. Sakura uses this for "ssh in and show me the errors": it's the command, not a dig.
@@ -90,8 +91,58 @@ def fmt_ts(ts):
     return ts[5:16] if ts else ""
 
 
+def follow(host, unit):
+    """New journald errors as they come, grouped and re-printed every few seconds."""
+    import time
+    script = "journalctl --no-pager -q -p err -o json -f -n 0" + (f" -u {shlex.quote(unit)}" if unit else "")
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, script] if host else ["bash", "-c", script]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    groups, last_print = {}, time.time()
+    print(f"following errors on {host or 'this machine'}" + (f" for {unit}" if unit else "") + " (Ctrl-C stops)", flush=True)
+    try:
+        import select
+        while True:
+            ready, _, _ = select.select([p.stdout], [], [], 1.0)
+            if ready:
+                line = p.stdout.readline()
+                if not line:
+                    break
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                msg = d.get("MESSAGE")
+                if isinstance(msg, list):
+                    msg = bytes(msg).decode("utf-8", "replace")
+                unit_ = d.get("_SYSTEMD_UNIT") or ""
+                if not unit_ or re.fullmatch(r"(?:user@\d+|session-\w+|init)\.(?:service|scope)", unit_):
+                    unit_ = d.get("SYSLOG_IDENTIFIER") or d.get("_COMM") or unit_ or "?"
+                key = (unit_, collapse(str(msg or "")))
+                g = groups.setdefault(key, {"count": 0, "example": str(msg or ""), "last": 0})
+                g["count"] += 1
+                g["last"] = time.time()
+            if groups and time.time() - last_print >= 3:
+                last_print = time.time()
+                print("\033[H\033[2J" if sys.stdout.isatty() else "", end="")
+                print("count\tlast\tsource\tmessage")
+                for (src, _), g in sorted(groups.items(), key=lambda kv: -kv[1]["last"])[:40]:
+                    print(f"{g['count']}\t{time.strftime('%H:%M:%S', time.localtime(g['last']))}\t{src}\t{' '.join(g['example'].split())[:160]}", flush=True)
+            if p.poll() is not None and not ready:
+                break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        p.terminate()
+    return 0
+
+
 def main(argv):
     host, since, unit, want_files, raw, as_json = None, "1h", None, False, False, False
+    if "--follow" in argv:
+        argv = [a for a in argv if a != "--follow"]
+        host = next((a for a in argv if not a.startswith("-") and a not in ("1h",)), None) if argv and not argv[0].startswith("-") else None
+        unit = argv[argv.index("--unit") + 1] if "--unit" in argv else None
+        return follow(host, unit)
     it = iter(argv)
     for a in it:
         if a == "--since":

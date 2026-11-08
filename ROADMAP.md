@@ -59,15 +59,15 @@ Shipped: **The guardian.** See the README.
 
 Shipped: **`?learn`: a mentor, not an answer machine.** See the README.
 
-**Offline packs.** Before a flight or an outage, it fetches the docs for your exact stack and versions. Then it works with no internet at all, including in places where connectivity can't be assumed.
+Shipped as `docpack`: **Offline packs.** Before a flight or an outage, it fetches the docs for your exact stack and versions. Then it works with no internet at all, including in places where connectivity can't be assumed.
 
 Shipped: **Decisions that explain themselves.** `?decide` and `?why`; the model is told to record a decision when it hears one. See the README.
 
-**Your inbox, privately.** It triages, summarises and drafts in your voice, with mail nobody would paste into a cloud service. It never sends without you.
+Partly shipped (`pa mail urgent|mute`, `pa autoreply`, drafts through himalaya; learning your voice not yet): **Your inbox, privately.** It triages, summarises and drafts in your voice, with mail nobody would paste into a cloud service. It never sends without you.
 
-**Meetings and voice.** Local transcription into notes, decisions and reminders. Speak to it when your hands are full.
+Shipped as `hear`, `hear --notes`, `say` and `?hear`: **Meetings and voice.** Local transcription into notes, decisions and reminders. Speak to it when your hands are full.
 
-**For everyone who isn't a developer.** Forms, letters, tax paperwork and small-business records, in the language you think in, starting with English and नेपाली, with the documents staying at home.
+Partly shipped (`ledger` for receipts and records; forms and letters not yet): **For everyone who isn't a developer.** Forms, letters, tax paperwork and small-business records, in the language you think in, starting with English and नेपाली, with the documents staying at home.
 
 ## Abilities (2026-11-08 brainstorm). Built the same day unless marked.
 

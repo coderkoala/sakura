@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# sakura-tmux-setup — Sakura in tmux: prefix-? opens Sakura in a popup over the pane you're in (it sees the pane's
+# directory), prefix-/ runs ?explain on what that pane shows, and the status line shows sakura-status. Appends to
+# ~/.tmux.conf once (marked), reloads tmux if it's running. --remove takes it out again.
+set -u
+conf="${TMUX_CONF:-$HOME/.tmux.conf}"
+mark="# sakura (sakura-tmux-setup)"
+if [ "${1:-}" = --remove ]; then
+    [ -f "$conf" ] && sed -i "/^$mark/,/^# end sakura/d" "$conf" && echo "removed from $conf"
+    exit 0
+fi
+if [ -f "$conf" ] && grep -qF "$mark" "$conf"; then echo "already set up in $conf"; else
+cat >> "$conf" <<'TMUX'
+# sakura (sakura-tmux-setup)
+bind-key ? display-popup -E -w 85% -h 80% -d "#{pane_current_path}" "sakura-launch"
+bind-key / run-shell "tmux capture-pane -p -S -120 -t #{pane_id} > /tmp/sakura-explain-$$.txt" \; display-popup -E -w 85% -h 80% -d "#{pane_current_path}" "sakura-explain /tmp/sakura-explain-$$.txt; rm -f /tmp/sakura-explain-$$.txt"
+set -g status-interval 15
+set -g status-right "#(sakura-status) | %H:%M"
+# end sakura
+TMUX
+echo "added to $conf: prefix-? opens Sakura in a popup, prefix-/ explains the pane, status shows sakura-status"
+fi
+[ -n "${TMUX:-}" ] && tmux source-file "$conf" 2>/dev/null && echo "reloaded"
+exit 0

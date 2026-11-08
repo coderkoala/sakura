@@ -24,10 +24,12 @@
 #   ?explain [question]  explain what's on the screen (tmux) or in the pipe:  make 2>&1 | ?explain
 #   ?how what you want   the one command, printed, not run (-r runs it after a y/n)
 #   cmd | ? "question"   anything piped into ? arrives under the request
+#   ?watch [-n S] [--explain] 'cmd'   rerun a command, show what changed; --explain has Sakura explain each change
+#   sakura-tmux-setup   prefix-? popup, prefix-/ explain the pane, status line
 #   sakura-status   one line for tmux's status bar: driver, night queue, offers, guardian
 #   ?go [request]  a session that doesn't stop to ask (sakura-trust on makes every ? like this)
 if command -v sakura-launch >/dev/null 2>&1; then
-    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' '?pr' '?review' '?try' '?hear' '?morning' '?red' '?decide' '?why' '?setup' '?on' '?explain' '?how' 2>/dev/null
+    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' '?pr' '?review' '?try' '?hear' '?morning' '?red' '?decide' '?why' '?setup' '?on' '?explain' '?how' '?watch' 2>/dev/null
     alias '?'='sakura-launch'
     alias '?fix'='sakura-fix --shell $$'
     alias '?undo'='sakura-undo'
@@ -47,6 +49,7 @@ if command -v sakura-launch >/dev/null 2>&1; then
     alias '?on'='sakura-on'
     alias '?explain'='sakura-explain'
     alias '?how'='sakura-how'
+    alias '?watch'='sakura-watch'
     alias '?why'='sakura-decide why'
     alias '?morning'='sakura-morning'
     __sakura_hear() { local t; t="$(hear "$@")" || return 1; printf 'heard: %s\n' "$t"; sakura-launch "$t"; }
