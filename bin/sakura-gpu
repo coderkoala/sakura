@@ -1,0 +1,566 @@
+#!/usr/bin/env python3
+"""sakura-gpu — what the GPU is doing, whether it's healthy, and what Sakura's driver can afford on it right now.
+
+The driver (sakura-model) shares an 8 GB laptop card with the desktop, Ollama and whatever else is running, and the
+card has its own ways to fail: Xid 120 then 154 under eval load (only a reboot clears it), nvidia-smi -r refusing on
+laptops, nvidia-powerd exiting, the tmpfs /tmp filling RAM until the OOM killer takes Ollama. This tool reads all of
+that from the machine and says what to do. Only `reset --yes` changes anything.
+
+  sakura-gpu doctor         diagnosis, verdict line first; one line per finding with what to do.
+                            exit 0 healthy, 1 something needs you, 2 reboot needed
+  sakura-gpu free           VRAM free now, and who holds the rest
+  sakura-gpu fit [SIZE_GIB] which of Sakura's models fit on the GPU now, and the driver's expert cache
+  sakura-gpu scale          advice for the driver: cache size that fits, run or fall back, the exact sakura-model command
+  sakura-gpu watch [SECS]   temperature, power, VRAM, clocks every N seconds (default 5); flags throttling. Ctrl-C stops
+  sakura-gpu reset --yes    sakura-model down, ollama stop everything, sudo -A nvidia-smi -r; says whether it worked
+  --json                    on doctor, free and fit
+"""
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from importlib.machinery import SourceFileLoader
+
+BIN = os.path.dirname(os.path.realpath(__file__))
+HOT_C = 83
+WARM_C = 75
+TMP_WARN_GIB = 4  # tmpfs /tmp above this is RAM the models can't have
+
+# Xid codes seen or worth knowing on this card. reboot=True: nothing runs right until a reboot.
+XIDS = {
+    "13": ("graphics engine exception (a kernel faulted; usually one process's bug)", False),
+    "31": ("GPU memory page fault (a process touched memory it didn't own; the process dies, the card lives)", False),
+    "32": ("invalid or corrupted push buffer stream (often PCIe or power trouble)", False),
+    "43": ("GPU stopped processing (a channel hung and was killed; the process is gone)", False),
+    "45": ("preemptive cleanup after a process was killed (follows another Xid or a kill; harmless alone)", False),
+    "48": ("double-bit ECC error (bad VRAM)", True),
+    "61": ("internal micro-controller breakpoint (firmware fault)", True),
+    "62": ("internal micro-controller halt (firmware fault)", True),
+    "63": ("ECC page retirement or row remapping recorded", False),
+    "64": ("ECC page retirement or row remapping failed", True),
+    "68": ("NVDEC0 exception (video decode)", False),
+    "69": ("graphics engine class error (an invalid command; usually a driver/app mismatch)", False),
+    "74": ("NVLink error", False),
+    "79": ("GPU has fallen off the bus (PCIe link lost: power or thermal event)", True),
+    "94": ("contained ECC error", False),
+    "95": ("uncontained ECC error", True),
+    "109": ("context switch timeout (a kernel ran too long or the GPU hung)", False),
+    "119": ("GSP RPC timeout (the GPU's firmware processor stopped answering)", True),
+    "120": ("GSP error / task exception (firmware fault: the card is on its way out until rebooted)", True),
+    "140": ("ECC unrecovered error", True),
+    "154": ("GPU recovery action changed: reset required (the driver has given up on the card)", True),
+}
+NOT_IDLE_REASONS = ("SW Power Cap", "HW Slowdown", "HW Thermal Slowdown", "HW Power Brake Slowdown", "SW Thermal Slowdown", "Sync Boost")
+
+
+def sakura_model():
+    """bin/sakura-model as a module: its budget arithmetic and its model list, not copies of them."""
+    return SourceFileLoader("sakura_model", os.path.join(BIN, "sakura-model")).load_module()
+
+
+def run(cmd, timeout=15, shell=False):
+    try:
+        return subprocess.run(cmd, shell=shell, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+def smi(fields):
+    """nvidia-smi --query-gpu for the first GPU as a list of strings, or None when it doesn't answer."""
+    out = run(["nvidia-smi", f"--query-gpu={','.join(fields)}", "--format=csv,noheader,nounits"]).strip()
+    if not out:
+        return None
+    return [x.strip() for x in out.splitlines()[0].split(",")]
+
+
+def num(s):
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def holders():
+    """[(pid, process, MiB)] of compute processes on the GPU, biggest first."""
+    out = run(["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader,nounits"])
+    rows = []
+    for line in out.splitlines():
+        parts = [p.strip() for p in line.rsplit(",", 2)]
+        if len(parts) == 3 and parts[2].isdigit():
+            rows.append((parts[0], parts[1].rsplit("/", 1)[-1], int(parts[2])))
+    return sorted(rows, key=lambda r: -r[2])
+
+
+def throttle():
+    """Active throttle reasons from nvidia-smi -q (apart from Idle), and the temperature/perf state lines."""
+    out = run(["nvidia-smi", "-q", "-d", "PERFORMANCE,TEMPERATURE,CLOCK"])
+    active, info = [], {}
+    section = None
+    for line in out.splitlines():
+        s = line.strip()
+        if s.startswith("Clocks Event Reasons") or s.startswith("Clocks Throttle Reasons"):
+            section = "counters" if "Counters" in s else "reasons"
+            continue
+        if not line.startswith(" " * 8) and section:
+            section = None
+        if section == "reasons" and ":" in s:
+            name, _, val = s.partition(":")
+            if val.strip() == "Active" and name.strip() != "Idle":
+                active.append(name.strip())
+        for key in ("Performance State", "GPU Current Temp", "GPU Shutdown Temp", "GPU Slowdown Temp", "GPU Max Operating Temp"):
+            if s.startswith(key):
+                info[key] = s.partition(":")[2].strip()
+    return active, info
+
+
+def xids_this_boot():
+    log = run("journalctl -k -b --no-pager -q 2>/dev/null | grep -F Xid", shell=True, timeout=30)
+    return re.findall(r"Xid \(PCI:[^)]*\): (\d+)", log)
+
+
+def oom_kills():
+    log = run("journalctl -k -b --no-pager -q 2>/dev/null | grep -iE 'out of memory|oom-kill'", shell=True, timeout=30)
+    return [l.strip() for l in log.splitlines() if l.strip()]
+
+
+def display_on_nvidia():
+    """(answer, how) — is a connected display output on the NVIDIA card? None when unknowable."""
+    for card in glob.glob("/sys/class/drm/card[0-9]*"):
+        if os.path.basename(card).count("-"):
+            continue
+        try:
+            vendor = open(os.path.join(card, "device/vendor")).read().strip()
+        except OSError:
+            continue
+        if vendor != "0x10de":
+            continue
+        connected = [os.path.basename(c)[len(os.path.basename(card)) + 1:] for c in glob.glob(card + "-*")
+                     if run(["cat", os.path.join(c, "status")]).strip() == "connected"]
+        return bool(connected), (f"outputs {', '.join(connected)} connected" if connected else "no connected output")
+    prov = run(["xrandr", "--listproviders"])
+    if "NVIDIA" in prov:
+        return True, "xrandr lists an NVIDIA provider"
+    return None, "no NVIDIA DRM card found"
+
+
+def meminfo():
+    d = {}
+    with open("/proc/meminfo") as f:
+        for line in f:
+            k, _, v = line.partition(":")
+            d[k] = int(v.split()[0]) // 1024  # MiB
+    return d
+
+
+def tmp_usage():
+    """(fstype, used MiB, size MiB) of /tmp."""
+    fstype = run(["findmnt", "-no", "FSTYPE", "/tmp"]).strip()
+    try:
+        st = os.statvfs("/tmp")
+        size = st.f_blocks * st.f_frsize // 2**20
+        used = (st.f_blocks - st.f_bfree) * st.f_frsize // 2**20
+    except OSError:
+        size = used = 0
+    return fstype, used, size
+
+
+# ---------------------------------------------------------------------------------------------------------------- doctor
+
+def doctor(as_json=False):
+    findings = []  # (level, text) level: ok | warn | fail | reboot
+
+    def add(level, text):
+        findings.append({"level": level, "text": text})
+
+    smi_version = None
+    header = run(["nvidia-smi"])
+    m = re.search(r"NVIDIA-SMI\s+(\S+)\s+Driver Version:\s+(\S+)\s+CUDA Version:\s+(\S+)", header)
+    if m:
+        smi_version = m.group(2)
+        add("ok", f"nvidia-smi answers: driver {m.group(2)}, CUDA {m.group(3)}")
+    else:
+        add("fail", "nvidia-smi doesn't answer: no device or the driver is wedged. If `journalctl -k -b | grep Xid` shows 79/120/154, reboot; "
+                    "otherwise check `lsmod | grep nvidia` and `dmesg | tail`")
+    try:
+        kmod = open("/sys/module/nvidia/version").read().strip()
+    except OSError:
+        kmod = None
+    if kmod and smi_version and kmod != smi_version:
+        add("reboot", f"driver mismatch: userspace {smi_version} vs kernel module {kmod}. The driver was upgraded under a running kernel: reboot")
+    elif kmod and smi_version:
+        add("ok", f"kernel module {kmod} matches userspace")
+    elif not kmod:
+        add("fail", "kernel module nvidia isn't loaded: `sudo modprobe nvidia`, or reinstall the driver (dotfiles-nvidia)")
+
+    xids = xids_this_boot()
+    reboot_xids = sorted({x for x in xids if XIDS.get(x, ("", False))[1]}, key=int)
+    if reboot_xids:
+        add("reboot", f"Xid {', '.join(reboot_xids)} this boot ({len(xids)} Xid lines): " +
+            "; ".join(f"{x} = {XIDS[x][0]}" for x in reboot_xids) + ". A reboot is the fix; nvidia-smi -r usually fails on laptops")
+    elif xids:
+        codes = sorted(set(xids), key=lambda s: int(s) if s.isdigit() else 0)
+        add("warn", f"Xid {', '.join(codes)} this boot ({len(xids)} lines), none fatal: " +
+            "; ".join(f"{x} = {XIDS.get(x, ('unknown code, look it up at docs.nvidia.com/deploy/xid-errors', False))[0]}" for x in codes) +
+            ". Watch for 120/154 following them")
+    else:
+        add("ok", "no Xid errors this boot")
+
+    q = smi(["temperature.gpu", "power.draw", "enforced.power.limit", "power.limit", "memory.total", "memory.used",
+             "persistence_mode", "clocks.sm", "clocks.mem", "pstate"])
+    active, info = throttle()
+    temp = power = limit = total = used = None
+    if q:
+        temp, power, limit, total, used = num(q[0]), num(q[1]), num(q[2]) or num(q[3]), num(q[4]), num(q[5])
+        if temp is not None:
+            slow = info.get("GPU Slowdown Temp", "").split()[0] if info.get("GPU Slowdown Temp") else None
+            if temp >= HOT_C:
+                add("fail", f"temperature {temp:.0f} C (hot: over {HOT_C}; slowdown at {slow or '?'}): let it cool before long jobs; clean the vents, check the fan curve")
+            elif temp >= WARM_C:
+                add("warn", f"temperature {temp:.0f} C (warm; over {HOT_C} blocks long jobs): fine for now, watch it with `sakura-gpu watch`")
+            else:
+                add("ok", f"temperature {temp:.0f} C, P-state {q[9]}")
+        if active:
+            add("warn", f"throttling: {', '.join(active)}. " +
+                ("Power cap: the card is at its limit, expected under load on a 115 W laptop part. " if any("Power" in a for a in active) else "") +
+                ("Thermal: cool the laptop, clocks drop until it does. " if any("Thermal" in a for a in active) else "") +
+                "Not a fault")
+        else:
+            add("ok", "no throttle reason active" + (f" (clocks SM {q[7]} MHz, mem {q[8]} MHz)" if q[7] and q[8] else ""))
+        if power is not None and limit:
+            pct = 100 * power / limit
+            add("ok" if pct < 95 else "warn", f"power {power:.0f} W of a {limit:.0f} W limit ({pct:.0f}%)" +
+                (": at the cap, so tokens/s is what the cooling allows" if pct >= 95 else ""))
+        if q[6].lower() == "enabled":
+            add("ok", "persistence mode on")
+        else:
+            add("warn", "persistence mode off: each cold start reloads the driver state (1-2 s). `sudo nvidia-smi -pm 1` if the first token is slow; harmless otherwise")
+
+    held = holders()
+    if total is not None and used is not None:
+        free_mib = total - used
+        who = ", ".join(f"{p} {m} MiB" for _, p, m in held[:4]) or "no compute process (the rest is the display and driver)"
+        if held:
+            top = held[0]
+            add("ok", f"VRAM {free_mib:.0f} MiB free of {total:.0f}; held by {who}; the most is {top[1]} (pid {top[0]})" +
+                (": that's Sakura's driver" if top[1] == "llama-server" else
+                 ": `ollama stop` it or kill it to give the driver its budget" if top[2] > 1000 else ""))
+        else:
+            add("ok", f"VRAM {free_mib:.0f} MiB free of {total:.0f}; {who}")
+        other = used - sum(m for _, p, m in held if p in ("llama-server", "ollama"))
+        if other > 1500:
+            add("warn", f"{other:.0f} MiB of VRAM is held outside Ollama and the driver (display, browsers, other CUDA): the budget shrinks by that much. "
+                        "`sakura-gpu free` names them; close what you can")
+
+    pw = run(["systemctl", "is-active", "nvidia-powerd"]).strip()
+    unit = run(["systemctl", "show", "nvidia-powerd", "-p", "LoadState,UnitFileState,Result"])
+    if pw == "active":
+        add("ok", "nvidia-powerd running (Dynamic Boost shares power between CPU and GPU)")
+    elif "LoadState=not-found" in unit:
+        add("ok", "nvidia-powerd not installed (Dynamic Boost unavailable; fine on most laptops)")
+    else:
+        add("warn", f"nvidia-powerd is {pw or 'unknown'}: it exits when it can't see the GPU, often after an Xid. "
+                    "`sudo systemctl restart nvidia-powerd`; if it exits again the GPU itself is the problem")
+
+    disp, how = display_on_nvidia()
+    if disp is True:
+        add("warn", f"the display runs on the NVIDIA card ({how}): the desktop takes VRAM from the driver's budget. The iGPU would give all 8 GB to models")
+    elif disp is False:
+        add("ok", f"display on the iGPU, not the NVIDIA card ({how}): the whole card is for compute")
+    else:
+        add("warn", f"couldn't tell which GPU drives the display ({how})")
+
+    engine_dir = os.environ.get("SAKURA_ENGINE_DIR", "/usr/local/lib/ollama")
+    cudas = sorted(os.path.basename(p) for p in glob.glob(os.path.join(engine_dir, "cuda_*")))
+    if cudas and os.access(os.path.join(engine_dir, "llama-server"), os.X_OK):
+        add("ok", f"Ollama's CUDA runtimes present: {', '.join(cudas)} with llama-server in {engine_dir}")
+    elif cudas:
+        add("fail", f"CUDA runtimes {', '.join(cudas)} in {engine_dir} but no executable llama-server: reinstall Ollama")
+    else:
+        add("fail", f"no {engine_dir}/cuda_*: Ollama's CUDA runtime is missing, so neither Ollama nor the driver uses the GPU. Reinstall Ollama (curl -fsSL https://ollama.com/install.sh | sh)")
+
+    mem = meminfo()
+    fstype, tmp_used, tmp_size = tmp_usage()
+    swap_used = mem.get("SwapTotal", 0) - mem.get("SwapFree", 0)
+    avail = mem.get("MemAvailable", 0)
+    if fstype == "tmpfs" and tmp_used > TMP_WARN_GIB * 1024:
+        add("warn", f"/tmp is tmpfs holding {tmp_used / 1024:.1f} GiB of RAM (of {tmp_size / 1024:.0f}): that's model memory. "
+                    "`du -sh /tmp/* | sort -h | tail` and delete build leftovers before an eval")
+    else:
+        add("ok", f"/tmp ({fstype or '?'}) uses {tmp_used / 1024:.1f} GiB" + (" of RAM" if fstype == "tmpfs" else ""))
+    if mem.get("SwapTotal", 0) == 0:
+        add("warn", "no swap: a RAM spike with the driver mapped (15.6 GB) goes straight to the OOM killer. 16 GB of swap is what saved ElDayn")
+    elif swap_used > mem["SwapTotal"] // 2 or avail < 4096:
+        add("warn", f"RAM pressure: {avail} MiB available, swap {swap_used}/{mem['SwapTotal']} MiB used. Close builds and browsers before starting the driver")
+    else:
+        add("ok", f"RAM: {avail} MiB available, swap {swap_used}/{mem['SwapTotal']} MiB used")
+
+    ooms = oom_kills()
+    if ooms:
+        victims = re.findall(r"Killed process \d+ \((\S+)\)", " ".join(ooms))
+        add("warn", f"{len(ooms)} OOM lines this boot" + (f", killed {', '.join(sorted(set(victims)))}" if victims else "") +
+            ": if ollama or llama-server is among them, `sakura-model up` restarts the driver; free /tmp and RAM first")
+    else:
+        add("ok", "no OOM kills this boot")
+
+    levels = {f["level"] for f in findings}
+    if "reboot" in levels:
+        verdict, code = "REBOOT NEEDED: the GPU won't recover without it", 2
+    elif "fail" in levels:
+        verdict, code = "NEEDS YOU: " + "; ".join(f["text"].split(":")[0] for f in findings if f["level"] == "fail"), 1
+    elif "warn" in levels:
+        verdict, code = f"OK with {sum(1 for f in findings if f['level'] == 'warn')} thing(s) to know", 0
+    else:
+        verdict, code = "HEALTHY", 0
+    report = {"verdict": verdict, "exit": code, "temperature_c": temp, "power_w": power, "power_limit_w": limit,
+              "vram_total_mib": total, "vram_used_mib": used, "xids": xids, "reboot_xids": reboot_xids,
+              "throttle": active, "holders": [{"pid": p, "process": n, "mib": m} for p, n, m in held], "findings": findings}
+    if as_json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(verdict)
+        mark = {"ok": " ok ", "warn": "warn", "fail": "FAIL", "reboot": "BOOT"}
+        for f in findings:
+            print(f"  [{mark[f['level']]}] {f['text']}")
+    return code
+
+
+# ------------------------------------------------------------------------------------------------------------------ free
+
+def free(as_json=False):
+    q = smi(["memory.total", "memory.used", "memory.free"])
+    if not q:
+        if as_json:
+            print(json.dumps({"error": "no NVIDIA GPU answering"}))
+        else:
+            print("no NVIDIA GPU answering (sakura-gpu doctor)")
+        return 1
+    total, used, fr = (int(num(x) or 0) for x in q)
+    held = holders()
+    accounted = sum(m for _, _, m in held)
+    other = max(0, used - accounted)
+    if as_json:
+        print(json.dumps({"total_mib": total, "used_mib": used, "free_mib": fr, "holders": [{"pid": p, "process": n, "mib": m} for p, n, m in held],
+                          "unattributed_mib": other}, indent=2))
+        return 0
+    print(f"VRAM free: {fr} MiB of {total} ({100 * fr // total}%)")
+    print(f"  {'MiB':>6}  {'pid':>8}  holder")
+    for pid, name, mib in held:
+        print(f"  {mib:>6}  {pid:>8}  {name}")
+    if other:
+        print(f"  {other:>6}  {'':>8}  display, driver and contexts nvidia-smi doesn't attribute")
+    if not held and not other:
+        print("  nothing: the card is empty")
+    return 0
+
+
+# ------------------------------------------------------------------------------------------------------------------- fit
+
+def fit(size_gib=None, as_json=False):
+    sm = sakura_model()
+    v = sm.vram()
+    ram = sm.ram_gib()
+    mem = meminfo()
+    avail_gib = mem.get("MemAvailable", 0) / 1024
+    if not v:
+        total = used = None
+        free_mib = 0
+    else:
+        total, used = v
+        free_mib = total - used
+    ollama_held = sm.ollama_vram_mib()
+    # what the driver sees: Ollama's models leave when it starts, so their VRAM counts as free
+    budget = (total - max(0, used - ollama_held) - sm.HEADROOM_MIB) if v else 0
+    cache = min(budget - sm.DENSE_MIB, sm.MAX_CACHE_MIB) if budget >= sm.MIN_BUDGET_MIB else 0
+    ok, reason, _ = sm.plan()
+    rows = []
+    for name, why, min_ram, dl_gib in sm.ollama_models():
+        # a Q4 GGUF loads at about its download size plus ~15% for KV cache and compute buffers
+        need = int(dl_gib * 1.15 * 1024)
+        on_gpu_now = need <= free_mib + ollama_held
+        on_gpu_alone = v is not None and need <= total - sm.HEADROOM_MIB
+        in_ram = dl_gib * 1.15 <= avail_gib and ram >= min_ram
+        rows.append({"model": name, "for": why, "need_mib": need, "gpu_now": on_gpu_now, "gpu_alone": bool(on_gpu_alone),
+                     "ram": in_ram, "state": "GPU now" if on_gpu_now else "GPU if freed" if on_gpu_alone else "CPU (RAM)" if in_ram else "too big"})
+    driver = {"model": sm.FILENAME, "for": "the driver (35B MoE, experts cached in VRAM)", "budget_mib": budget, "cache_mib": cache,
+              "ok": ok, "reason": reason, "downloaded": os.path.isfile(sm.MODEL) and os.path.getsize(sm.MODEL) == sm.SIZE}
+    custom = None
+    if size_gib is not None:
+        need = int(size_gib * 1.15 * 1024)
+        custom = {"size_gib": size_gib, "need_mib": need, "gpu_now": need <= free_mib + ollama_held,
+                  "gpu_alone": v is not None and need <= total - sm.HEADROOM_MIB, "ram": size_gib * 1.15 <= avail_gib}
+    out = {"vram_total_mib": total, "vram_free_mib": free_mib, "ollama_held_mib": ollama_held, "ram_gib": round(ram, 1),
+           "ram_available_gib": round(avail_gib, 1), "models": rows, "driver": driver, "custom": custom}
+    if as_json:
+        print(json.dumps(out, indent=2))
+        return 0
+    print(f"VRAM {free_mib} MiB free of {total or 0} (+{ollama_held} MiB Ollama and the driver would release on restart); RAM {avail_gib:.1f} GiB available of {ram:.0f}")
+    print(f"  {'fits':<13} {'need':>9}  model  (what for)")
+    for r in rows:
+        print(f"  {r['state']:<13} {r['need_mib']:>5} MiB  {r['model']}  ({r['for']})")
+    d = driver
+    if d["ok"]:
+        print(f"  {'GPU now':<13} {d['cache_mib']:>5} MiB  {d['model']}  (expert cache; {d['reason']})")
+    elif d["cache_mib"]:
+        print(f"  {'GPU, not here':<13} {d['cache_mib']:>5} MiB  {d['model']}  (expert cache would fit; {d['reason']})")
+    else:
+        print(f"  {'no':<13} {'':>9}  {d['model']}  ({d['reason']})")
+    if custom:
+        c = custom
+        print(f"  a {size_gib:g} GiB model needs about {c['need_mib']} MiB loaded: " +
+              ("fits on the GPU now" if c["gpu_now"] else "fits on the GPU once it's freed" if c["gpu_alone"] else "runs from RAM" if c["ram"] else "doesn't fit anywhere"))
+    print("  'need' is the download size plus 15% for KV cache and buffers; Ollama splits a model that doesn't fit between GPU and CPU")
+    return 0
+
+
+# ----------------------------------------------------------------------------------------------------------------- scale
+
+def scale():
+    sm = sakura_model()
+    temp, xids, held = sm.gpu_state()
+    bad = sorted(set(xids) & sm.BAD_XIDS)
+    ok, reason, cache = sm.plan()
+    v = sm.vram()
+    print("driver advice (nothing changed):")
+    if bad:
+        print(f"  DOWN: Xid {', '.join(bad)} this boot, the card won't run right until a reboot. Use the 9b on Ollama until then")
+        print("  run: sakura-model down   # then reboot; sakura-gpu doctor afterwards")
+        return 0
+    if temp is not None and temp >= HOT_C:
+        print(f"  DOWN: {temp} C (over {HOT_C}); let it cool, then `sakura-gpu scale` again")
+        print("  run: sakura-model down")
+        return 0
+    if not v:
+        print("  FALL BACK: no NVIDIA GPU answering (sakura-gpu doctor)")
+        print("  run: sakura-model down")
+        return 0
+    total, used = v
+    others = used - sm.ollama_vram_mib()
+    if ok:
+        up = sm.healthy()
+        full = cache >= 5200
+        print(f"  RUN the driver with a {cache} MiB expert cache ({'the measured full budget' if full else 'reduced: others hold ' + str(others) + ' MiB'}); {reason}")
+        if temp is not None and temp >= WARM_C:
+            print(f"  note: {temp} C already, long jobs will throttle on power/thermal; fine for interactive use")
+        print("  run: sakura-model up" + ("   # already up and healthy" if up else ""))
+        if not full and others > 1000:
+            print("  to get more cache: close what holds VRAM (sakura-gpu free), then sakura-model down && sakura-model up")
+    else:
+        print(f"  FALL BACK to the 9b on Ollama: {reason}")
+        if cache:
+            print(f"  (the card would give a {cache} MiB cache once the model is downloaded)")
+            print("  run: sakura-model pull && sakura-model up")
+        elif others > 1000 and v:
+            print(f"  others hold {others} MiB; freeing them may bring the budget over {sm.MIN_BUDGET_MIB} MiB: sakura-gpu free, then sakura-model plan")
+            print("  run: sakura-model down")
+        else:
+            print("  run: sakura-model down")
+    return 0
+
+
+# ----------------------------------------------------------------------------------------------------------------- watch
+
+def watch(seconds=5):
+    fields = ["temperature.gpu", "power.draw", "memory.used", "memory.total", "clocks.sm", "clocks.mem", "utilization.gpu", "clocks_throttle_reasons.active"]
+    print(f"{'time':<8} {'temp':>5} {'power':>8} {'vram MiB':>14} {'sm':>9} {'mem':>9} {'util':>5}  throttle")
+    last_active = None
+    try:
+        while True:
+            q = smi(fields)
+            if not q:
+                print(f"{time.strftime('%H:%M:%S')}  no NVIDIA GPU answering")
+            else:
+                mask = int(q[7], 16) if q[7].startswith("0x") else 0
+                reasons = []
+                if mask & 0x4:
+                    reasons.append("SW power cap")
+                if mask & 0x8:
+                    reasons.append("HW slowdown")
+                if mask & 0x20:
+                    reasons.append("SW thermal")
+                if mask & 0x40:
+                    reasons.append("HW thermal")
+                if mask & 0x80:
+                    reasons.append("HW power brake")
+                if mask & 0x100:
+                    reasons.append("display clocks")
+                flag = ", ".join(reasons)
+                if reasons and reasons != last_active:
+                    flag += "   <- throttling"
+                last_active = reasons
+                hot = " HOT" if (num(q[0]) or 0) >= HOT_C else ""
+                print(f"{time.strftime('%H:%M:%S'):<8} {q[0]:>4}C{hot} {q[1]:>6}W {q[2]:>6}/{q[3]:<7} {q[4]:>5}MHz {q[5]:>5}MHz {q[6]:>4}%  {flag}", flush=True)
+            time.sleep(seconds)
+    except KeyboardInterrupt:
+        print()
+    except BrokenPipeError:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())  # so the exit flush stays quiet
+    return 0
+
+
+# ----------------------------------------------------------------------------------------------------------------- reset
+
+def reset(yes):
+    if not yes:
+        print("sakura-gpu reset stops the driver, unloads every Ollama model and runs `sudo -A nvidia-smi -r`. Add --yes to do it", file=sys.stderr)
+        return 2
+    print("stopping the driver: sakura-model down")
+    subprocess.run([os.path.join(BIN, "sakura-model"), "down"])
+    ps = run(["ollama", "ps"]).splitlines()[1:]
+    for line in ps:
+        if line.strip():
+            name = line.split()[0]
+            print(f"ollama stop {name}")
+            subprocess.run(["ollama", "stop", name], capture_output=True)
+    time.sleep(2)
+    left = holders()
+    if left:
+        print("still holding VRAM: " + ", ".join(f"{n} (pid {p}, {m} MiB)" for p, n, m in left) + "; nvidia-smi -r needs the card idle")
+    env = dict(os.environ)
+    env.setdefault("SUDO_ASKPASS", "/usr/bin/ssh-askpass")
+    r = subprocess.run(["sudo", "-A", "nvidia-smi", "-r"], capture_output=True, text=True, env=env)
+    out = (r.stdout + r.stderr).strip()
+    print(out or f"nvidia-smi -r exited {r.returncode}")
+    if r.returncode == 0 and "successfully" in out.lower():
+        print("reset worked; sakura-gpu doctor to confirm, then sakura-model up")
+        return 0
+    print("the reset failed, as it usually does on laptops (the display driver or the iGPU bridge keeps the device busy). A reboot is the fix")
+    return 1
+
+
+def main():
+    args = [a for a in sys.argv[1:] if a != "--json"]
+    as_json = "--json" in sys.argv[1:]
+    cmd = args[0] if args else "doctor"
+    if cmd == "doctor":
+        return doctor(as_json)
+    if cmd == "free":
+        return free(as_json)
+    if cmd == "fit":
+        size = None
+        if len(args) > 1:
+            try:
+                size = float(args[1])
+            except ValueError:
+                print(f"sakura-gpu: SIZE_GIB must be a number, not {args[1]}", file=sys.stderr)
+                return 2
+        return fit(size, as_json)
+    if cmd == "scale":
+        return scale()
+    if cmd == "watch":
+        try:
+            secs = float(args[1]) if len(args) > 1 else 5
+        except ValueError:
+            print(f"sakura-gpu: SECONDS must be a number, not {args[1]}", file=sys.stderr)
+            return 2
+        return watch(secs)
+    if cmd == "reset":
+        return reset("--yes" in args)
+    print(__doc__)
+    return 0 if cmd in ("-h", "--help", "help") else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

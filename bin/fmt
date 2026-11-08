@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""fmt — format and lint the files you changed, with the right tool per language. No model. The `?fmt` key runs it.
+
+  fmt                     the files changed in git (staged, unstaged and untracked), each by its language
+  fmt FILE...             just these
+  fmt --check             don't write: report what would change, exit 1 if anything would (for a pre-commit hook or CI)
+  fmt --lint              also run the linter, not only the formatter, and print its findings
+  fmt --staged            only the staged files (what a commit would include)
+Formatters, by extension, each run only if it's installed or can run through `uv run` with nothing installed system-wide:
+  .py  ruff format + ruff check --fix (uv)   .sh/.bash  shfmt + shellcheck   .js/.ts/.jsx/.tsx/.vue/.css/.json/.md  prettier
+  .go  gofmt       .rs  rustfmt      .php  php-cs-fixer or pint    .lua  stylua    .yml/.yaml  yamllint (lint only)
+A tool that isn't there and can't be fetched is skipped with a note, never an error.
+"""
+import os
+import shutil
+import subprocess
+import sys
+
+# (extension...) -> (formatter argv builder, linter argv builder). A builder returns None when its tool isn't available.
+EXT = {}
+
+
+def have(cmd):
+    return shutil.which(cmd) is not None
+
+
+def uv_ok():
+    return have("uv")
+
+
+def py_fmt(files, check):
+    if have("ruff"):
+        base = ["ruff", "format"] + (["--check"] if check else [])
+        return [base + files, ["ruff", "check"] + ([] if check else ["--fix"]) + files]
+    if uv_ok():
+        pre = ["uv", "run", "-q", "--with", "ruff", "ruff"]
+        return [pre + ["format"] + (["--check"] if check else []) + files, pre + ["check"] + ([] if check else ["--fix"]) + files]
+    return None
+
+
+def sh_fmt(files, check):
+    out = []
+    if have("shfmt"):
+        out.append(["shfmt", "-d" if check else "-w", "-i", "4", "-ci"] + files)
+    if have("shellcheck"):
+        out.append(["shellcheck", "-x"] + files)
+    return out or None
+
+
+def prettier_fmt(files, check):
+    if have("prettier"):
+        return [["prettier", "--check" if check else "--write"] + files]
+    if have("npx"):
+        return [["npx", "--yes", "prettier", "--check" if check else "--write"] + files]
+    return None
+
+
+def simple(cmd_write, cmd_check):
+    def build(files, check):
+        tool = (cmd_check if check else cmd_write)[0]
+        if not have(tool):
+            return None
+        return [(cmd_check if check else cmd_write) + files]
+    return build
+
+
+def go_fmt(files, check):
+    if not have("gofmt"):
+        return None
+    return [["gofmt", "-l" if check else "-w"] + files]
+
+
+def rust_fmt(files, check):
+    if not have("rustfmt"):
+        return None
+    return [["rustfmt", "--edition", "2021"] + (["--check"] if check else []) + files]
+
+
+def php_fmt(files, check):
+    if have("pint"):
+        return [["pint"] + (["--test"] if check else []) + files]
+    if os.path.exists("vendor/bin/pint"):
+        return [["vendor/bin/pint"] + (["--test"] if check else []) + files]
+    if have("php-cs-fixer"):
+        return [["php-cs-fixer", "fix"] + (["--dry-run"] if check else []) + files]
+    return None
+
+
+def lua_fmt(files, check):
+    if not have("stylua"):
+        return None
+    return [["stylua"] + (["--check"] if check else []) + files]
+
+
+def yaml_lint(files, check):
+    if have("yamllint"):
+        return [["yamllint"] + files]
+    if uv_ok():
+        return [["uv", "run", "-q", "--with", "yamllint", "yamllint"] + files]
+    return None
+
+
+HANDLERS = [
+    ((".py",), py_fmt),
+    ((".sh", ".bash"), sh_fmt),
+    ((".js", ".ts", ".jsx", ".tsx", ".vue", ".css", ".scss", ".html", ".json", ".md", ".mjs", ".cjs"), prettier_fmt),
+    ((".go",), go_fmt),
+    ((".rs",), rust_fmt),
+    ((".php",), php_fmt),
+    ((".lua",), lua_fmt),
+    ((".yml", ".yaml"), yaml_lint),
+]
+
+
+def handler_for(path):
+    ext = os.path.splitext(path)[1].lower()
+    for exts, fn in HANDLERS:
+        if ext in exts:
+            return fn
+    return None
+
+
+def changed_files(staged):
+    def git(*a):
+        try:
+            return subprocess.run(["git", *a], capture_output=True, text=True, timeout=30).stdout.split("\0")
+        except (OSError, subprocess.SubprocessError):
+            return []
+    if staged:
+        names = git("diff", "--name-only", "--cached", "-z", "--diff-filter=ACMR")
+    else:
+        names = (git("diff", "--name-only", "-z", "--diff-filter=ACMR")
+                 + git("diff", "--name-only", "--cached", "-z", "--diff-filter=ACMR")
+                 + git("ls-files", "--others", "--exclude-standard", "-z"))
+    seen, out = set(), []
+    for n in names:
+        if n and n not in seen and os.path.isfile(n):
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def main(argv):
+    check = "--check" in argv
+    lint = "--lint" in argv
+    staged = "--staged" in argv
+    files = [a for a in argv if not a.startswith("-")]
+    if not files:
+        files = changed_files(staged)
+    if not files:
+        print("fmt: nothing to format (no changed files; name files to force)")
+        return 0
+    groups = {}
+    for f in files:
+        fn = handler_for(f)
+        if fn:
+            groups.setdefault(fn, []).append(f)
+    if not groups:
+        print("fmt: none of those files has a formatter I know")
+        return 0
+    changed_any = False
+    failed = False
+    for fn, fs in groups.items():
+        cmds = fn(fs, check)
+        if cmds is None:
+            print(f"· skipped {len(fs)} file(s) for {fn.__name__.split('_')[0]}: no formatter installed (and no uv/npx to fetch one)")
+            continue
+        formatter = cmds[0]
+        linters = cmds[1:]
+        r = subprocess.run(formatter, capture_output=True, text=True)
+        label = next((w for w in formatter if w not in ("uv", "run", "-q", "--with", "npx", "--yes") and not w.startswith("-")), formatter[0])
+        label = os.path.basename(label)
+        if check:
+            if r.returncode != 0 or r.stdout.strip() or r.stderr.strip():
+                changed_any = True
+                print(f"✗ {label}: {len(fs)} file(s) would change")
+                if r.stdout.strip():
+                    print("\n".join("    " + l for l in r.stdout.strip().splitlines()[:12]))
+            else:
+                print(f"✓ {label}: {len(fs)} file(s) already clean")
+        else:
+            if r.returncode == 0:
+                print(f"✓ {label}: formatted {len(fs)} file(s)")
+            else:
+                print(f"! {label} exited {r.returncode}: {(r.stderr or r.stdout).strip()[-300:]}")
+        if lint:
+            for lc in linters:
+                lr = subprocess.run(lc, capture_output=True, text=True)
+                if lr.returncode != 0 and (lr.stdout.strip() or lr.stderr.strip()):
+                    failed = True
+                    print(f"  lint {os.path.basename(lc[0])}:")
+                    print("\n".join("    " + l for l in (lr.stdout + lr.stderr).strip().splitlines()[:20]))
+    if check and changed_any:
+        return 1
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

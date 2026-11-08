@@ -28,6 +28,9 @@ For pages that need clicking, typing or a login, or when the user wants to watch
 `coder` (hard code, algorithms), `coder-fast` (quick snippets), `reason` (deeper analysis), `security`, `prose`.
 Only the driver model (Qwen3.6 or qwen3.5, picked by `sakura-launch`) runs a session here; reach every other model through `consult`.
 
+## This machine's GPU
+`sakura-gpu doctor` diagnoses the GPU (Xid faults, heat, throttling, who holds the VRAM, whether a reboot is needed), `sakura-gpu fit` says what fits now, `sakura-gpu scale` recommends the driver setting. Asked why the GPU is slow, hot, or out of memory, run it.
+
 ## Root, installs, GUI
 - `sudo -A <command>` — askpass is configured, so it never blocks on a password prompt.
 - Missing tool: `command -v` first, then `sudo -A apt-get install -y PKG`, `uv tool install PKG` (Python CLIs),

@@ -223,9 +223,9 @@ def cmd_run(_):
         return
     # A hot card, or one that has thrown a fatal Xid, shouldn't start hours of work: say so and keep the queue.
     try:
-        g = subprocess.run([os.path.join(ROOT, "bin", "sakura-model"), "gpu", "--check"], capture_output=True, text=True, timeout=60)
-        if g.returncode and "no NVIDIA GPU" not in g.stdout:
-            why = g.stdout.strip().splitlines()[-1]
+        g = subprocess.run([os.path.join(ROOT, "bin", "sakura-gpu"), "doctor"], capture_output=True, text=True, timeout=60)
+        if g.returncode == 2:  # a reboot-needed fault; 1 (something to tell the user) still lets the night run
+            why = next((l.strip() for l in g.stdout.splitlines() if "REBOOT" in l or "BOOT]" in l), g.stdout.strip().splitlines()[0])
             print(f"night shift not started: {why}")
             notify("Night shift", f"not started: {why}")
             return
