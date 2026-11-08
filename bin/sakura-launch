@@ -102,6 +102,10 @@ elif [ "${SAKURA_FAST:-0}" = 1 ]; then
 elif command -v sakura-model >/dev/null 2>&1 && sakura-model up 2>/dev/null; then
     flags+=(--model qwen36-q3 -c 'model_providers.local-ollama.base_url="http://127.0.0.1:8091/v1"')
     export SAKURA_ROUTER_URL=http://127.0.0.1:8091/v1
+elif curl -fsS --max-time 3 http://127.0.0.1:8091/health >/dev/null 2>&1; then
+    # A driver someone else started (the host, from inside evals/in-box.sh): use it as is.
+    flags+=(--model qwen36-q3 -c 'model_providers.local-ollama.base_url="http://127.0.0.1:8091/v1"')
+    export SAKURA_ROUTER_URL=http://127.0.0.1:8091/v1
 else
     flags+=(--model "$big")
     if ! curl -fsS --max-time 3 "${OLLAMA_API_BASE:-http://127.0.0.1:11434}/api/version" >/dev/null 2>&1; then
