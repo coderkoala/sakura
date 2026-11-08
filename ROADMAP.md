@@ -25,7 +25,7 @@ Measured on one machine with an 8 GB GPU, driver Ornith 1.5 35B-A3B since 0.9.5 
 | `?fix`, `?undo`, `?recap` | `?tonight` on a real night's queue (the eval runs one) |
 | `?tour` (9/9), `?tonight` (11/11) | `?teach` (2/3 at best, 1/3 often: with the guard now sending the turn back until something is kept, the 3B-active model still loses its way in `sakura-tool keep`'s check about half the time) and `?learn` (no eval: nothing but a reader can grade a lesson) |
 | The guardian's checks (deterministic) | The guardian's disk projection, until it has a fortnight of samples |
-| `sakura-gpu` (40 checks), `torrent` (19 checks and a live daemon lifecycle) | `fmt`, `?watch`, `drive` against a real Google/Microsoft account (local remote only so far) |
+| `sakura-gpu` (40 checks), `torrent` (19 checks and a live daemon lifecycle), `dl` (12 checks, byte-range resume proven), `sakura-backup` (27 checks, a real restore each run) | `fmt`, `?watch`, `drive` against a real Google/Microsoft account (local remote only so far) |
 | `look` (OCR and the vision model), `ledger`, `schema`, `procwatch`, `dq`, `pa offer`, `pa cron`, `docpack`, `fleet`, `drive`, `tbl`, `logs`, workers in worktrees (`evals/abilities.py`, 60 checks) | `hear`, `say`, `clip`, `?pr`, `?review`, `?red`, `?try`, `?morning`, `pa mail` rules, `?decide`/`?why` (smoke-tested by hand) |
 
 ## Next: make what exists trustworthy
@@ -56,7 +56,7 @@ Shipped: **`?teach`: do it once, never again.** See the README.
 
 Shipped: **`?receipts`: what exactly did it do, and how do we know?** See the README.
 
-Shipped: **The guardian.** See the README.
+Shipped: **The guardian.** See the README. Its backup promise is real now: `sakura-backup prove` restores a real file from the latest snapshot, byte-compares it, checks the repo, and resets the nag (eval 27/27).
 
 Shipped: **`?learn`: a mentor, not an answer machine.** See the README.
 

@@ -77,6 +77,9 @@ CHECK
 ## Cloud drives
 `drive` is Google Drive, OneDrive, Dropbox and the rest over rclone (`drive remotes`, `ls REMOTE:path`, `put FILE REMOTE:folder`, `get`, `find`, `sync SRC DEST --until WHEN` for a resident sync). "Send X to my Drive folder" → `drive put`. Connecting a new account needs the user (`drive add` opens a browser login); say so.
 
+## Backups
+`sakura-backup` makes and PROVES backups (restic): `init NAME DEST --source PATH`, `run NAME`, `prove NAME` (restores a real file, byte-compares, checks the repo, resets the guardian's nag), `restore NAME --to DIR`, `schedule NAME "every day 03:00"`. Asked about backups, use it; never write a tar script. The repo password lives in ~/.sakura/backup/NAME.pass: never print it.
+
 ## Downloads
 `dl URL` is a resumable background download (queue, `dl watch`, `dl stop|resume ID`, `--sha256` verifies). Asked to download a file, use it, not a bare curl: it survives stops and reboots and notifies when done. `fetch_url` stays for reading pages.
 
