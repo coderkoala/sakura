@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """sakura-model — run Sakura's big local driver when this machine can, with a budget read from the hardware.
 
-Qwen3.6-35B-A3B (abliterated, Q3_K_M) is a 15.6 GB Mixture-of-Experts model: about 3B parameters are active
+The driver is a 35B-A3B Mixture-of-Experts model (abliterated, Q3_K_M; Ornith 1.5 by default, Qwen3.6 as the alternative,
+see DRIVERS). Qwen3.6-35B-A3B (abliterated, Q3_K_M) is a 15.6 GB Mixture-of-Experts model: about 3B parameters are active
 per token, so the dense part and a cache of experts sit in VRAM and the rest stays in RAM. It was measured on
 an RTX 4060 Laptop, 32 GB RAM, against the 9b it replaces: 72 tok/s writing at a 7.3 GB budget and 50 tok/s at
 5.3 GB (9b: 43), reading prompts about 3-4x slower, real tool calls, same eval score.
@@ -15,7 +16,7 @@ doesn't qualify keeps the 9b on Ollama; `up` failing is not an error for the cal
   sakura-model down     stop it and free the VRAM
   sakura-model status   is it up, and what does it hold
   sakura-model gpu      temperature, Xid errors this boot, who holds the VRAM. --check exits 1 when a long job shouldn't start
-  sakura-model driver [NAME]   which driver file runs (qwen36, the evaluated one; ornith15, a candidate). Switching restarts the server
+  sakura-model driver [NAME]   which driver file runs (ornith15, the default; qwen36, faster, one eval miss). Switching stops the server
   sakura-model advise   what whatmodel.sh rates for this RAM and VRAM beside Sakura's line. Sends only those two numbers, only when you run it
   sakura-model pull     download the model (15.6 GB), resumable, checksum verified
   sakura-model models   every model that suits this machine, and which are missing
@@ -40,11 +41,11 @@ DRIVERS = {
     "qwen36": {"repo": "mradermacher/Huihui-Qwen3.6-35B-A3B-abliterated-i1-GGUF", "revision": "860d616938187b0a7fb2dfcb24d07911b6364904",
                "file": "Huihui-Qwen3.6-35B-A3B-abliterated.i1-Q3_K_M.gguf", "size": 16764765344,
                "sha256": "a73d0d6e38be6c72745f3a60c311c8bfc4e4aea84a617651fb2b4d27e7ffc3a8",
-               "about": "Qwen3.6 35B-A3B, evaluated here: run 30/31, wall 27/28 (whatmodel.sh score 67)"},
+               "about": "Qwen3.6 35B-A3B: run 30/31, wall 27/28; 72 tok/s warm, 37 after a 26K prompt (whatmodel.sh 67)"},
     "ornith15": {"repo": "mradermacher/Huihui-Ornith-1.5-35B-A3B-abliterated-i1-GGUF", "revision": "bb7ed149cb070175c6b130fa8827672550abda86",
                  "file": "Huihui-Ornith-1.5-35B-A3B-abliterated.i1-Q3_K_M.gguf", "size": 17166660096,
                  "sha256": "cae4302e05b2395a57869a88fb4885b54767392f69919b891b2be2ef753e5d45",
-                 "about": "Ornith 1.5 35B-A3B, candidate: whatmodel.sh score 69, 80 tok/s elsewhere; not evaluated here yet"},
+                 "about": "Ornith 1.5 35B-A3B, the default: run 30/30, wall 27/28; 63 tok/s warm, 26 after a 26K prompt (whatmodel.sh 69)"},
 }
 MODEL_DIR = os.environ.get("SAKURA_MODEL_DIR", os.path.expanduser("~/.local/share/sakura/models"))
 DRIVER_FILE = os.path.join(os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura")), "driver")
@@ -57,7 +58,7 @@ def driver_name():
             name = open(DRIVER_FILE).read().strip()
         except OSError:
             name = ""
-    return name if name in DRIVERS else "qwen36"
+    return name if name in DRIVERS else "ornith15"
 
 
 DRIVER = DRIVERS[driver_name()]

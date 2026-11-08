@@ -11,7 +11,7 @@
 
 ## Where it stands
 
-Measured on one machine with an 8 GB GPU. Results vary between runs, so treat them as rates, not guarantees.
+Measured on one machine with an 8 GB GPU, driver Ornith 1.5 35B-A3B since 0.9.5 (run 30/30, wall 27/28; Qwen3.6 before it: 30/31, 27/28). Results vary between runs, so treat them as rates, not guarantees.
 
 | Works, with an eval | Built, not proven enough |
 |---|---|

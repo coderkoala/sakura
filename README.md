@@ -116,8 +116,8 @@ flowchart TD
 
 ## Which model runs
 
-`sakura-model plan` says what this machine runs and why. Where the hardware allows, `?` drives with Qwen3.6-35B-A3B
-(abliterated, Q3_K_M): a Mixture-of-Experts model whose dense part and an expert cache sit in VRAM and whose other
+`sakura-model plan` says what this machine runs and why. Where the hardware allows, `?` drives with a 35B-A3B
+Mixture-of-Experts model (abliterated, Q3_K_M): Ornith 1.5 by default since 0.9.5, Qwen3.6 before it. A model whose dense part and an expert cache sit in VRAM and whose other
 experts stay in RAM, served by the `llama-server` that ships with Ollama. The VRAM budget is read from the machine, so
 a desktop whose display holds VRAM gets a smaller cache. Anything else stays on the 9b on Ollama.
 
@@ -139,8 +139,17 @@ prompt's KV cache between turns).
 **The fast tier.** `SAKURA_FAST=1 ?` runs Spark-X2.6 4B (abliterated, Q8, 4.4 GB): 28/30 on `evals/run.py` at a median of 8 seconds a case, measured 2026-11-08, against the 9b's 30/31. It makes real tool calls through the engine. As a worker it scored wall 24/28 and pa 65/66 (the 9b: 27/28 and 66/66), with the misses being attacks it declined to run rather than holes, so the 9b stays the fallback for now.
 
 **Choosing a driver.** `sakura-model driver` lists the driver files Sakura knows, all the same shape (35B MoE, 3B active,
-Q3_K_M, abliterated), so the VRAM budget holds for each: `qwen36` is the one evaluated here; `ornith15` (Ornith 1.5 35B-A3B)
-is a candidate that rates higher on whatmodel.sh. `sakura-model driver ornith15` then `sakura-model pull` switches;
+Q3_K_M, abliterated), so the VRAM budget holds for each. Measured 2026-11-08 on the same card and budget:
+
+| | Qwen3.6 35B-A3B (`qwen36`) | Ornith 1.5 35B-A3B (`ornith15`, default) |
+| --- | ---: | ---: |
+| `evals/run.py` | 30/31 | 30/30 |
+| `evals/wall.py` | 27/28 | 27/28 |
+| Writing, warm | 72 tok/s | 63 tok/s |
+| Writing after a 26K prompt | 37 tok/s | 26 tok/s |
+| Reading a long prompt | 584 tok/s | 509 tok/s |
+
+Ornith gets everything right and is about a sixth slower; `sakura-model driver qwen36` is one command if speed matters more. `sakura-model pull` fetches whichever is chosen;
 `sakura-model advise` asks whatmodel.sh what fits this RAM and VRAM, sending only those two numbers and only when you run
 it. A higher score isn't a better Sakura until the model calls tools in the qwen-code shape and passes `evals/run.py`.
 
