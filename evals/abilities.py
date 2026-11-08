@@ -155,7 +155,31 @@ def worktree(tmp):
     return {"the worker passed in a worktree": bool(ok), "the main checkout is untouched": clean}
 
 
-CASES = {"look-ocr": look_ocr, "look-vision": look_vision, "ledger": ledger, "schema": schema, "procwatch": procwatch, "dq": dq,
+def tbl(tmp):
+    t = os.path.join(BIN, "tbl")
+    ps = run([t, "-c", "3"], stdin="USER PID COMMAND\nroot 1 /sbin/init splash\nme 22 bash -lc x\n").stdout
+    csvs = run([t, "--sort", "2", "--desc", "--md"], stdin="city,amount\nKtm,10\nPkr,5\nBkt,70\n").stdout.splitlines()
+    js = run([t, "-k", "unit,msg"], stdin='{"unit":"nginx","msg":"boom","x":1}\n{"unit":"php","msg":"bang","x":2}\n').stdout
+    cnt = run([t, "--count"], stdin="k\na\nb\na\na\n").stdout.splitlines()
+    return {"whitespace columns, last one swallows the rest": "/sbin/init splash" in ps and "bash -lc x" in ps,
+            "csv sorted numerically, as markdown": csvs[2].startswith("| Bkt") and csvs[4].startswith("| Pkr"),
+            "json lines with chosen keys": "nginx" in js and "boom" in js and "x" not in js.splitlines()[0],
+            "count groups and ranks": cnt[2].startswith("3") and "a" in cnt[2]}
+
+
+def logs_local(tmp):
+    marker = f"sakura-abilities-{os.getpid()}"
+    for _ in range(3):
+        subprocess.run(["logger", "-p", "user.err", "-t", "sakura-eval", f"{marker} failed: code {os.getpid()}"], check=False)
+    time.sleep(1.5)
+    out = run([os.path.join(BIN, "logs"), "--since", "5m"]).stdout
+    line = next((l for l in out.splitlines() if marker in l), "")
+    raw = run([os.path.join(BIN, "logs"), "--since", "5m", "--raw"]).stdout
+    return {"a planted error shows up grouped with its count": line.startswith("3\t"), "the source is the tag": "sakura-eval" in line,
+            "the table has a header": out.startswith("count\tfirst\tlast\tsource\tmessage"), "--raw lists the lines": raw.count(marker) == 3}
+
+
+CASES = {"tbl": tbl, "logs": logs_local, "look-ocr": look_ocr, "look-vision": look_vision, "ledger": ledger, "schema": schema, "procwatch": procwatch, "dq": dq,
          "offer": offer, "docpack": docpack, "fleet": fleet, "worktree": worktree}
 
 

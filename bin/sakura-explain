@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""sakura-explain [question...] — explain what's on the screen, or what came through the pipe. The `?explain` key.
+
+  ?explain                      inside tmux: the last 120 lines of this pane, explained (what happened, what matters, what next)
+  ?explain what's the warning about
+  make 2>&1 | ?explain          anything piped in
+  ?explain FILE [question]      a file (a log, a stack trace, a config)
+No copying and pasting an error into a chat box: the error is already where you are.
+"""
+import os
+import subprocess
+import sys
+
+CAP = 24000
+
+
+def screen():
+    if not os.environ.get("TMUX"):
+        return ""
+    try:
+        return subprocess.run(["tmux", "capture-pane", "-p", "-S", "-120"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def main(argv):
+    words, mode = [], "tui"
+    for a in argv:
+        if a == "--print":
+            mode = "print"
+        elif a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        else:
+            words.append(a)
+    text, where = "", ""
+    if words and os.path.isfile(words[0]):
+        text, where = open(words.pop(0), errors="replace").read(), "a file"
+    elif not sys.stdin.isatty():
+        text, where = sys.stdin.read(), "the pipe"
+        try:
+            os.dup2(os.open("/dev/tty", os.O_RDONLY), 0)
+        except OSError:
+            pass
+    else:
+        text, where = screen(), "the terminal (last 120 lines; the newest is at the bottom, the prompt that ran ?explain is the last line)"
+    if not text.strip():
+        print("sakura-explain: nothing to explain: pipe something in, name a file, or run it inside tmux", file=sys.stderr)
+        return 1
+    text = text[-CAP:]
+    question = " ".join(words).strip()
+    brief = "\n".join([
+        "Explain this to me." + (f" In particular: {question}" if question else ""),
+        f"It came from {where}:", "```", text.rstrip(), "```", "",
+        "In this order, briefly: what happened (one line); the line that matters most, quoted; why it happened, in plain words; what to do next, "
+        "as the exact command if there is one. If it's an error I could fix right now and the fix is on this machine, offer to do it in one "
+        "line and stop; don't run anything unless I say so. Don't restate the output.",
+    ])
+    if mode == "print":
+        print(brief)
+        return 0
+    os.execvp("sakura-launch", ["sakura-launch", brief])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

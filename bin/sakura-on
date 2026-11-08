@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""sakura-on HOST [request...] — a session that lives on another machine. The `?on` key.
+
+  ?on starlight                              open Sakura with starlight as its workplace
+  ?on starlight check the logs and show me the errors as a table
+  ?on starlight --sudo ...                   it may use sudo there (off by default: it asks you first otherwise)
+Facts are gathered first, over the ssh connection you already have (uptime, load, disk, failed units, what's listening,
+the services and log files that exist), so Sakura starts knowing the box. Every command it then runs goes through
+`ssh HOST '...'`; nothing happens on this machine unless you say so. Tables come from `logs HOST` and `tbl`, which run here.
+"""
+import os
+import shlex
+import subprocess
+import sys
+
+PROBE = r'''
+echo "== host"; hostname; uptime; echo; echo "== os"; . /etc/os-release 2>/dev/null && echo "$PRETTY_NAME"; uname -r
+echo; echo "== disk"; df -h -x tmpfs -x devtmpfs -x squashfs 2>/dev/null | head -8
+echo; echo "== memory"; free -h | head -2
+echo; echo "== failed units"; systemctl --no-legend --plain --failed 2>/dev/null | head -10
+echo; echo "== listening"; (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | awk 'NR>1{print $4, $NF}' | sort -u | head -20
+echo; echo "== services of interest"; for s in nginx apache2 caddy php8.5-fpm php8.4-fpm php8.3-fpm mysql mariadb postgresql redis docker supervisor cron ssh fail2ban; do systemctl is-active "$s" >/dev/null 2>&1 && echo "$s active"; done
+echo; echo "== log files that exist"; ls -1 /var/log/nginx/*.log /var/log/apache2/*.log /var/log/php*-fpm.log /var/log/mysql/error.log /var/log/postgresql/*.log /var/www/*/storage/logs/laravel*.log /srv/*/storage/logs/laravel*.log 2>/dev/null | head -20
+echo; echo "== containers"; docker ps --format '{{.Names}} {{.Status}}' 2>/dev/null | head -10
+echo; echo "== recent errors (journald, 1h)"; journalctl --no-pager -q -p err --since -1h 2>/dev/null | tail -5
+echo; echo "== whoami"; whoami; sudo -n true 2>/dev/null && echo "sudo: passwordless" || echo "sudo: needs a password"
+'''
+
+
+def main(argv):
+    allow_sudo, words, mode = False, [], "tui"
+    for a in argv:
+        if a == "--sudo":
+            allow_sudo = True
+        elif a == "--print":
+            mode = "print"
+        elif a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        else:
+            words.append(a)
+    if not words:
+        print("usage: sakura-on HOST [request...]", file=sys.stderr)
+        return 2
+    host, request = words[0], " ".join(words[1:]).strip()
+    try:
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, PROBE], capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        sys.exit(f"sakura-on: {host} didn't answer in 60 s")
+    if r.returncode and not r.stdout.strip():
+        sys.exit(f"sakura-on: can't reach {host}: {r.stderr.strip()[-200:]}")
+    facts = r.stdout.strip()
+    brief = "\n".join([
+        f"You're working on the remote machine `{host}` for this whole session." + (f" My request: {request}" if request else " Wait for my request after reading this."),
+        "",
+        f"Every command runs there: `ssh {host} 'cd DIR && command'`, never on this machine, unless I say \"here\" or \"locally\". ssh is "
+        f"multiplexed, so many calls are cheap. {'You may use sudo there.' if allow_sudo else 'Ask me before any sudo there; show the command.'} "
+        "A refused login or an unreachable host stays that way: report it, try nothing else.",
+        f"Facts gathered over ssh just now (a script, not a model):", "```", facts[:7000], "```", "",
+        "Working on a server:",
+        f"- Errors and logs: run `logs {host}` (grouped, as a table; `--since 24h`, `--unit nginx`, `--files` for nginx/php/Laravel files, `--raw` for lines). "
+        "It runs here and reads over ssh. Don't tail logs by hand first.",
+        "- Anything list-shaped goes through `tbl` before you show it (`... | tbl`, `tbl -c 3` when the last column is a message). Show tables, not prose lists.",
+        "- Read before you change: `systemctl status`, the config, the log. A change on a server gets a backup copy first (`cp X X.bak-$(date +%s)`) "
+        "and a check afterwards (`nginx -t`, `systemctl is-active`, a curl). Say what changed and what proved it.",
+        "- Never restart a database or delete data without asking. Never change ssh config or firewall rules without asking.",
+    ])
+    if mode == "print":
+        print(brief)
+        return 0
+    os.execvp("sakura-launch", ["sakura-launch", brief])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

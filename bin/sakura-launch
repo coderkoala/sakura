@@ -139,6 +139,20 @@ fi
 trust="${SAKURA_TRUST:-}"
 [ -z "$trust" ] && { [ -e "${SAKURA_HOME:-$HOME/.sakura}/ask" ] && trust=0 || trust=1; }
 [ "$trust" = 1 ] && flags+=(-c 'approval_policy="never"')
+# Piped in: `make 2>&1 | ? "why did this fail"` puts the pipe's content under the request, then the TUI gets the terminal back.
+piped=""
+if [ ! -t 0 ] && [ -r /dev/tty ]; then
+    piped="$(head -c 24000)"
+    exec 0</dev/tty
+fi
+if [ -n "$piped" ]; then
+    exec sakura "${flags[@]}" "${*:-Look at this and tell me what matters.}
+
+What came through the pipe:
+\`\`\`
+$piped
+\`\`\`"
+fi
 if [ "$#" -gt 0 ]; then
     exec sakura "${flags[@]}" "$*"
 fi

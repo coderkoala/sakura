@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""tbl — any output as a table. Reads stdin, works out the columns, prints them aligned. No model.
+
+  ps aux | tbl                      whitespace columns (the header row names them)
+  cat data.csv | tbl                CSV or TSV, detected
+  journalctl -p err -o json | tbl   JSON lines: keys become columns (-k to pick: -k _SYSTEMD_UNIT,MESSAGE)
+  ... | tbl -c 3                    the last column swallows the rest of the line (for messages with spaces)
+  ... | tbl --md                    Markdown table (for a PR, a report)   --csv   CSV out
+  ... | tbl --sort N [--desc]       sort by column N (1-based; numbers sort as numbers)   --count  group identical rows, add a count
+  ... | tbl -w 60                   cap any column at 60 characters
+"""
+import csv
+import io
+import json
+import re
+import sys
+
+
+def parse(text, ncols=None, keys=None):
+    lines = [l for l in text.splitlines() if l.strip()]
+    if not lines:
+        return [], []
+    first = lines[0].lstrip()
+    if first.startswith("{"):
+        rows = []
+        for l in lines:
+            try:
+                rows.append(json.loads(l))
+            except ValueError:
+                continue
+        if rows:
+            cols = keys or [k for k in rows[0] if not k.startswith("__")][:12]
+            return cols, [[str(r.get(c, "")) for c in cols] for r in rows]
+    if first.startswith("["):
+        try:
+            rows = json.loads("\n".join(lines))
+            if rows and isinstance(rows[0], dict):
+                cols = keys or list(rows[0])[:12]
+                return cols, [[str(r.get(c, "")) for c in cols] for r in rows]
+        except ValueError:
+            pass
+    if "\t" in lines[0]:
+        parts = [l.split("\t") for l in lines]
+        return parts[0], parts[1:]
+    if lines[0].count(",") >= 1 and all(l.count(",") >= 1 for l in lines[:5]):
+        try:
+            parts = list(csv.reader(io.StringIO("\n".join(lines))))
+            widths = {len(p) for p in parts[:10]}
+            if len(widths) == 1:
+                return parts[0], parts[1:]
+        except csv.Error:
+            pass
+    if " | " in lines[0] or lines[0].startswith("|"):
+        parts = [[c.strip() for c in l.strip().strip("|").split("|")] for l in lines if not re.fullmatch(r"[\s|:-]+", l)]
+        return parts[0], parts[1:]
+    n = ncols or len(lines[0].split())
+    parts = [l.split(None, n - 1) for l in lines]
+    return parts[0], parts[1:]
+
+
+def render(cols, rows, md=False, as_csv=False, width=None):
+    rows = [[(c if width is None or len(c) <= width else c[:width - 1] + "…") for c in r] + [""] * (len(cols) - len(r)) for r in rows]
+    if as_csv:
+        w = csv.writer(sys.stdout)
+        w.writerow(cols)
+        w.writerows(rows)
+        return
+    widths = [max([len(c)] + [len(r[i]) for r in rows]) for i, c in enumerate(cols)]
+    if md:
+        print("| " + " | ".join(c.ljust(widths[i]) for i, c in enumerate(cols)) + " |")
+        print("|" + "|".join("-" * (w + 2) for w in widths) + "|")
+        for r in rows:
+            print("| " + " | ".join(v.ljust(widths[i]) for i, v in enumerate(r)) + " |")
+        return
+    print("  ".join(c.ljust(widths[i]) for i, c in enumerate(cols)).rstrip())
+    print("  ".join("─" * w for w in widths))
+    for r in rows:
+        print("  ".join(v.ljust(widths[i]) for i, v in enumerate(r)).rstrip())
+
+
+def num(s):
+    try:
+        return (0, float(s.replace(",", "").rstrip("%")))
+    except ValueError:
+        return (1, s)
+
+
+def main(argv):
+    ncols, keys, md, as_csv, sort, desc, count, width = None, None, False, False, None, False, False, None
+    it = iter(argv)
+    for a in it:
+        if a == "-c":
+            ncols = int(next(it))
+        elif a == "-k":
+            keys = next(it).split(",")
+        elif a == "--md":
+            md = True
+        elif a == "--csv":
+            as_csv = True
+        elif a == "--sort":
+            sort = int(next(it)) - 1
+        elif a == "--desc":
+            desc = True
+        elif a == "--count":
+            count = True
+        elif a == "-w":
+            width = int(next(it))
+        elif a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+    text = sys.stdin.read()
+    cols, rows = parse(text, ncols, keys)
+    if not cols:
+        return 1
+    if count:
+        seen = {}
+        for r in rows:
+            seen[tuple(r)] = seen.get(tuple(r), 0) + 1
+        rows = [[str(n)] + list(k) for k, n in sorted(seen.items(), key=lambda kv: -kv[1])]
+        cols = ["count"] + cols
+    if sort is not None and 0 <= sort < len(cols):
+        rows.sort(key=lambda r: num(r[sort]) if sort < len(r) else (2, ""), reverse=desc)
+    render(cols, rows, md, as_csv, width)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

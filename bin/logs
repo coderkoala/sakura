@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""logs [HOST] [--since 1h] [--unit NAME] [--all] — the errors on a machine, as a table, grouped, with no model.
+
+  logs                      this machine: journald errors (priority err and worse) in the last hour, grouped by message
+  logs starlight            the same over ssh
+  logs starlight --since 24h --unit nginx
+  logs starlight --files    also the usual log files: nginx error.log, php-fpm, Laravel storage/logs, mysql, postgres, docker containers
+  logs --raw                the lines themselves, newest last, not grouped
+  logs --json
+Output: count, first seen, last seen, unit or file, message (digits, hex ids and paths collapsed so repeats group). Pipe
+to `tbl --md` for a report. Sakura uses this for "ssh in and show me the errors": it's the command, not a dig.
+"""
+import json
+import re
+import shlex
+import subprocess
+import sys
+
+FILES = [
+    "/var/log/nginx/error.log", "/var/log/apache2/error.log", "/var/log/php*-fpm.log", "/var/log/php/*.log", "/var/log/mysql/error.log",
+    "/var/log/postgresql/*.log", "/var/log/syslog", "/var/log/messages", "/var/www/*/storage/logs/laravel*.log", "/srv/*/storage/logs/laravel*.log",
+    "/home/*/*/storage/logs/laravel*.log", "/var/log/supervisor/*.log", "/var/log/caddy/*.log",
+]
+LEVEL = re.compile(r"\b(?:ERROR|CRITICAL|ALERT|EMERGENCY|FATAL|error|crit|emerg|\[error\]|\[crit\]|\.ERROR:|\.CRITICAL:|Exception|Traceback)\b")
+NOISE = [(re.compile(r"0x[0-9a-f]{4,}"), "0x…"), (re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"), "<uuid>"),
+         (re.compile(r"\b[0-9a-f]{12,}\b"), "<hex>"), (re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"), "<ip>"), (re.compile(r"\b\d+\b"), "N"),
+         (re.compile(r"(/[\w.-]+){3,}"), "<path>"), (re.compile(r"\s+"), " ")]
+
+
+def collapse(msg):
+    for rx, rep in NOISE:
+        msg = rx.sub(rep, msg)
+    return msg.strip()[:160]
+
+
+def remote(host, script):
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, script] if host else ["bash", "-c", script]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        sys.exit(f"logs: {host or 'local'} didn't answer in time")
+    if r.returncode and not r.stdout.strip():
+        sys.exit(f"logs: {host or 'local'}: {r.stderr.strip()[-300:] or 'no output'}")
+    return r.stdout
+
+
+def journal(host, since, unit):
+    script = f"journalctl --no-pager -q -p err -o json --since '-{since}'" + (f" -u {shlex.quote(unit)}" if unit else "") + " 2>/dev/null || sudo -n journalctl --no-pager -q -p err -o json --since '-{since}' 2>/dev/null"
+    out = remote(host, script)
+    rows = []
+    for line in out.splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        msg = d.get("MESSAGE")
+        if isinstance(msg, list):
+            msg = bytes(msg).decode("utf-8", "replace")
+        ts = int(d.get("__REALTIME_TIMESTAMP", "0")) // 1000000
+        unit = d.get("_SYSTEMD_UNIT") or ""
+        if not unit or re.fullmatch(r"(?:user@\d+|session-\w+|init)\.(?:service|scope)", unit):  # a user session's unit says nothing: use the program
+            unit = d.get("SYSLOG_IDENTIFIER") or d.get("_COMM") or unit or "?"
+        rows.append((ts, unit, str(msg or "")))
+    return rows
+
+
+def files(host, since):
+    mins = {"m": 1, "h": 60, "d": 1440}
+    m = re.fullmatch(r"(\d+)([mhd])", since)
+    minutes = int(m.group(1)) * mins[m.group(2)] if m else 60
+    pats = " ".join(FILES)
+    script = (f"for f in {pats}; do [ -r \"$f\" ] || continue; find \"$f\" -mmin -{minutes} 2>/dev/null | grep -q . || continue; "
+              f"tail -n 400 \"$f\" 2>/dev/null | grep -aE 'ERROR|CRITICAL|ALERT|EMERGENCY|FATAL|\\[error\\]|\\[crit\\]|error|Exception|Traceback' | sed \"s|^|$f\\t|\"; done")
+    out = remote(host, script)
+    rows = []
+    for line in out.splitlines():
+        if "\t" not in line:
+            continue
+        f, msg = line.split("\t", 1)
+        if LEVEL.search(msg):
+            ts = re.search(r"(20\d\d[-/]\d\d[-/]\d\d[ T]\d\d:\d\d:\d\d)", msg)
+            rows.append((ts.group(1) if ts else "", f.split("/")[-1], msg.strip()))
+    return rows
+
+
+def fmt_ts(ts):
+    if isinstance(ts, int):
+        import datetime as dt
+        return dt.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M") if ts else ""
+    return ts[5:16] if ts else ""
+
+
+def main(argv):
+    host, since, unit, want_files, raw, as_json = None, "1h", None, False, False, False
+    it = iter(argv)
+    for a in it:
+        if a == "--since":
+            since = next(it, "1h")
+        elif a == "--unit":
+            unit = next(it, None)
+        elif a in ("--files", "--all"):
+            want_files = True
+        elif a == "--raw":
+            raw = True
+        elif a == "--json":
+            as_json = True
+        elif a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        elif host is None and not a.startswith("-"):
+            host = a
+    rows = journal(host, since, unit)
+    if want_files:
+        rows += files(host, since)
+    if not rows:
+        print(f"no errors on {host or 'this machine'} in the last {since}" + (f" for {unit}" if unit else ""))
+        return 0
+    if raw:
+        for ts, src, msg in rows:
+            print(f"{fmt_ts(ts)}  {src}  {msg}")
+        return 0
+    groups = {}
+    for ts, src, msg in rows:
+        key = (src, collapse(msg))
+        g = groups.setdefault(key, {"count": 0, "first": ts, "last": ts, "example": msg})
+        g["count"] += 1
+        g["first"], g["last"] = min(g["first"], ts, key=lambda x: str(x)), max(g["last"], ts, key=lambda x: str(x))
+    items = sorted(groups.items(), key=lambda kv: -kv[1]["count"])
+    if as_json:
+        print(json.dumps([{"count": g["count"], "first": fmt_ts(g["first"]), "last": fmt_ts(g["last"]), "source": k[0], "message": g["example"]} for k, g in items], indent=1))
+        return 0
+    print("count\tfirst\tlast\tsource\tmessage")
+    for (src, _), g in items:
+        print(f"{g['count']}\t{fmt_ts(g['first'])}\t{fmt_ts(g['last'])}\t{src}\t{' '.join(g['example'].split())[:220]}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
