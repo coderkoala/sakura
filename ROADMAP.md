@@ -25,6 +25,7 @@ Measured on one machine with an 8 GB GPU. Results vary between runs, so treat th
 | `?fix`, `?undo`, `?recap` | `?tonight` on a real night's queue (the eval runs one) |
 | `?tour` (9/9), `?tonight` (11/11) | `?teach` (1/3: it writes the script, then stops before `sakura-tool keep`) and `?learn` (no eval: nothing but a reader can grade a lesson) |
 | The guardian's checks (deterministic) | The guardian's disk projection, until it has a fortnight of samples |
+| `look` (OCR and the vision model), `ledger`, `schema`, `procwatch`, `dq`, `pa offer`, `docpack`, `fleet`, workers in worktrees (`evals/abilities.py`, 28/28) | `hear`, `say`, `clip`, `?pr`, `?review`, `?red`, `?try`, `?morning`, `pa mail` rules, `?decide`/`?why` (smoke-tested by hand) |
 
 ## Next: make what exists trustworthy
 
@@ -42,13 +43,13 @@ Shipped: **`?fix`: the error you were about to spend an hour on.** See the READM
 
 Shipped: **`?undo`: never afraid again.** See the README.
 
-**`?recall`: your whole past, searchable.** "What was that command I used to fix nginx in March?" "Why did we pick Redis?" Across shell history, past sessions, notes, mail and documents, with the source cited, and none of it leaving the machine. The longer you use it, the more it's worth.
+Partly shipped: **`?recall`: your whole past, searchable.** Sessions, shell history, decisions and memory today; mail and documents still go through `himalaya` and `rag`. "What was that command I used to fix nginx in March?" "Why did we pick Redis?" Across shell history, past sessions, notes, mail and documents, with the source cited, and none of it leaving the machine. The longer you use it, the more it's worth.
 
 Shipped: **`?tonight`: a night shift.** See the README.
 
 Shipped: **`?tour`: any codebase in five minutes.** See the README.
 
-**`?setup`: a new machine feels like yours by lunchtime.** Your tools, config, keys workflow and habits, from what it knows about you. Tell it what's different and it adapts.
+Shipped (brief-based, no eval without a second machine): **`?setup`: a new machine feels like yours by lunchtime.** Your tools, config, keys workflow and habits, from what it knows about you. Tell it what's different and it adapts.
 
 Shipped: **`?teach`: do it once, never again.** See the README.
 
@@ -60,7 +61,7 @@ Shipped: **`?learn`: a mentor, not an answer machine.** See the README.
 
 **Offline packs.** Before a flight or an outage, it fetches the docs for your exact stack and versions. Then it works with no internet at all, including in places where connectivity can't be assumed.
 
-**Decisions that explain themselves.** It notices decisions as you make them and records why. A year later, "why is it built this way?" has an answer.
+Shipped: **Decisions that explain themselves.** `?decide` and `?why`; the model is told to record a decision when it hears one. See the README.
 
 **Your inbox, privately.** It triages, summarises and drafts in your voice, with mail nobody would paste into a cloud service. It never sends without you.
 

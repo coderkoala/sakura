@@ -59,7 +59,7 @@ def column_count(d, tools):
     names, ok = kept(tools)
     out = ""
     if names:
-        for args in (("city",), ("orders.csv", "city"), ("city", "orders.csv")):
+        for args in (("city",), ("orders.csv", "city"), ("city", "orders.csv"), ("2",), ("orders.csv", "2"), ("2", "orders.csv"), ("-c", "city"), ("--column", "city")):
             try:
                 out = run_tool(tools, names[0], open(os.path.join(d, "orders.csv")).read(), *args)
             except (OSError, subprocess.SubprocessError):

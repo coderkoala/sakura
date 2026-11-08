@@ -18,9 +18,11 @@
 #   ?try [lang] question   a scratch directory, run a snippet, keep nothing
 #   ?hear   speak a request instead of typing it;  ?morning  the day on one screen (also shown at the first ? of the day)
 #   ?red TEST|"sentence"   red to green: a failing test (or one written from a sentence) made to pass
+#   ?decide "what: why"   record a decision where you are;  ?why [words]  find one later
+#   ?setup [words]   a new machine set up the way you like, from the dotfiles and memory
 #   ?go [request]  a session that doesn't stop to ask (sakura-trust on makes every ? like this)
 if command -v sakura-launch >/dev/null 2>&1; then
-    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' '?pr' '?review' '?try' '?hear' '?morning' '?red' 2>/dev/null
+    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' '?pr' '?review' '?try' '?hear' '?morning' '?red' '?decide' '?why' '?setup' 2>/dev/null
     alias '?'='sakura-launch'
     alias '?fix'='sakura-fix --shell $$'
     alias '?undo'='sakura-undo'
@@ -35,6 +37,9 @@ if command -v sakura-launch >/dev/null 2>&1; then
     alias '?pr'='sakura-pr'
     alias '?try'='sakura-try'
     alias '?red'='sakura-red'
+    alias '?decide'='sakura-decide'
+    alias '?setup'='sakura-setup'
+    alias '?why'='sakura-decide why'
     alias '?morning'='sakura-morning'
     __sakura_hear() { local t; t="$(hear "$@")" || return 1; printf 'heard: %s\n' "$t"; sakura-launch "$t"; }
     alias '?hear'='__sakura_hear'
@@ -51,7 +56,7 @@ if command -v sakura-launch >/dev/null 2>&1; then
     __sakura_quote_line() {
         local head rest
         case "$READLINE_LINE" in
-            '?remind '*|'?pa '*|'?fix '*|'? '*|'?? '*|'?learn '*|'?teach '*|'?tour '*|'?recall '*|'?go '*|'?pr '*|'?try '*|'?red '*) ;;
+            '?remind '*|'?pa '*|'?fix '*|'? '*|'?? '*|'?learn '*|'?teach '*|'?tour '*|'?recall '*|'?go '*|'?pr '*|'?try '*|'?red '*|'?decide '*|'?why '*|'?setup '*) ;;
             *) return 0 ;;
         esac
         head=${READLINE_LINE%% *}

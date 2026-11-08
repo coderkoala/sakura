@@ -103,6 +103,8 @@ flowchart TD
 - **Workers in worktrees.** `worktree: yes` in a job runs the worker in its own `git worktree`, so a second worker on disjoint files can run alongside; the report names the worktree and the coordinator merges.
 - **Mail triage.** `pa mail urgent "boss@"` and `pa mail mute "newsletter"` decide who comes first in the brief and who's hidden.
 - **Hardware economy.** The driver reuses the KV cache of the 7,000-token system prompt between turns (`--cache-reuse`), leaves VRAM after 20 idle minutes and comes back on the next `?`, and `sakura-model gpu --check` refuses to start a night shift when the card is hot or has thrown a fatal Xid this boot.
+- **Decisions that explain themselves.** `?decide "Redis for the queue: LISTEN/NOTIFY dropped jobs"` records the decision with the repo, branch and commit you're at; `?why queue` finds it a year later. Sakura records one itself when you tell it why. `?recall` now also searches your shell history, decisions and memory.
+- **`?setup`.** On a new machine: it gathers what's there, reads the dotfiles, installs what they cover through them and the rest by hand, makes new ssh keys rather than copying any, and ends with the short list of secrets only you can provide. The guardian's daily check is turned on by the installer.
 - **Morning page.** The first `?` of the day shows the guardian's findings, last night's report and `pa brief` on one screen (`?morning` any time).
 - **GPU.** A driver module that actually works: graphics-drivers PPA, the full build/DKMS prereq stack,
   per-kernel module builds, Secure-Boot MOK enrolment, `nvidia-drm.modeset` + initramfs.

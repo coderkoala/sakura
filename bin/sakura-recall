@@ -2,7 +2,8 @@
 """sakura-recall "<words>" [n] — search past Sakura conversations. No model involved, so it costs nothing to run.
 
 Prints up to n sessions (default 3). The best one comes with the surrounding conversation, the others with one line.
-Only interactive sessions are searched: one-shot runs (workers, evals) aren't conversations.
+Only interactive sessions are searched: one-shot runs (workers, evals) aren't conversations. Also searched: the shell's
+history (~/.bash_history, ~/.zsh_history), the decisions log (sakura-decide) and the memory stores, each marked by source.
 """
 import json
 import os
@@ -54,9 +55,53 @@ def connect():
     return db
 
 
+EXTRA = {
+    os.path.expanduser("~/.bash_history"): "shell",
+    os.path.expanduser("~/.zsh_history"): "shell",
+    os.path.join(os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura")), "decisions.jsonl"): "decision",
+    os.path.join(os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura")), "memory", "user.md"): "memory",
+    os.path.join(os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura")), "memory", "notes.md"): "memory",
+}
+
+
+def read_extra(path, kind):
+    """Lines of a history, decisions or memory file as (role, text), deduplicated, newest kept."""
+    try:
+        lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
+    except OSError:
+        return []
+    out, seen = [], set()
+    for line in reversed(lines):
+        line = re.sub(r"^: \d+:\d;", "", line).strip()  # zsh extended history
+        if kind == "decision":
+            try:
+                d = json.loads(line)
+                line = f"{d.get('when', '')[:10]} {d.get('repo', '')}: {d.get('text', '')}"
+            except ValueError:
+                continue
+        if len(line) < 4 or line in seen or line.startswith("?"):
+            continue
+        seen.add(line)
+        out.append((kind, line[:MAX_MESSAGE]))
+    out.reverse()
+    return out
+
+
 def refresh(db):
     known = dict(db.execute("select path, stamp from files"))
     seen = set()
+    for path, kind in EXTRA.items():
+        if not os.path.isfile(path):
+            continue
+        seen.add(path)
+        st = os.stat(path)
+        stamp = f"{st.st_mtime_ns}:{st.st_size}"
+        if known.get(path) == stamp:
+            continue
+        db.execute("delete from msgs where path=?", (path,))
+        db.executemany("insert into msgs(body, role, path, seq, started, cwd) values(?,?,?,?,?,?)",
+                       [(t, r, path, i, "", kind) for i, (r, t) in enumerate(read_extra(path, kind))])
+        db.execute("insert or replace into files values(?,?)", (path, stamp))
     for root, _, names in os.walk(SESSIONS):
         for n in names:
             if not n.endswith(".jsonl"):
@@ -108,6 +153,11 @@ def main():
         return
     print("From past sessions. Things may have changed since, so check anything you act on.")
     for i, (path, seq, started, cwd, snip) in enumerate(hits):
+        if path in EXTRA:
+            rows = db.execute("select body from msgs where path=? and cast(seq as int) between ? and ? order by cast(seq as int)",
+                              (path, int(seq) - 1, int(seq) + 1)).fetchall()
+            print(f"\n[{EXTRA[path]}] " + " | ".join(" ".join(r[0].split())[:160] for r in rows))
+            continue
         print(f"\n[{started}] {cwd}")
         if i:
             print("  " + " ".join(snip.split()))

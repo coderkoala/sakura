@@ -53,7 +53,7 @@ if [ -L "$SAKURA_HOME/AGENTS.md" ]; then rm -f "$SAKURA_HOME/AGENTS.md"; fi
 } > "$SAKURA_HOME/AGENTS.md"
 link "$ROOT/rules" "$SAKURA_HOME/rules"
 link "$ROOT/skills" "$HOME/.agents/skills"
-for tool in web_search wikipedia fetch_url curated_search consult sakura-model sakura-guard-install sakura-launch sakura-worker sakura-memory sakura-recall sakura-tool sakura-browser sakura-web-setup live view_file edit_file rag sakura-mail-setup pa sakura-fix sakura-undo sakura-recap sakura-tour sakura-tonight sakura-teach sakura-learn sakura-guardian sakura-trust look sakura-pr sakura-review clip dq procwatch fleet sakura-try sakura-morning schema hear say docpack ledger sakura-red; do
+for tool in web_search wikipedia fetch_url curated_search consult sakura-model sakura-guard-install sakura-launch sakura-worker sakura-memory sakura-recall sakura-tool sakura-browser sakura-web-setup live view_file edit_file rag sakura-mail-setup pa sakura-fix sakura-undo sakura-recap sakura-tour sakura-tonight sakura-teach sakura-learn sakura-guardian sakura-trust look sakura-pr sakura-review clip dq procwatch fleet sakura-try sakura-morning schema hear say docpack ledger sakura-red sakura-decide sakura-setup; do
     ln -sf "$ROOT/bin/$tool" "$HOME/.local/bin/$tool"
 done
 
@@ -105,6 +105,8 @@ elif [ "${SAKURA_NO_AUTOPULL:-0}" != 1 ] && "$ROOT/bin/sakura-model" models 2>/d
     "$ROOT/bin/sakura-model" pull-all --background | sed 's/^/  /' || need "sakura-model pull-all"
 fi
 echo "  driver: $("$ROOT/bin/sakura-model" plan 2>&1 || true)"
+# The guardian checks the machine once a day and says what's about to hurt; quiet when nothing is.
+command -v systemctl >/dev/null 2>&1 && "$ROOT/bin/sakura-guardian" on >/dev/null 2>&1 || true
 "$ROOT/bin/sakura-guard-install" --check >/dev/null 2>&1 || need "the guard where Sakura can't edit it: sudo $ROOT/bin/sakura-guard-install"
 [ "$missing" = 1 ] || echo "  nothing else needed."
 [ -x "${XDG_DATA_HOME:-$HOME/.local/share}/sakura/webenv/bin/python" ] || echo "  optional: sakura-web-setup, for better search and fetching and the browser"

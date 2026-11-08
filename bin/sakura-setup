@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""sakura-setup [words...] — a new machine feels like yours by lunchtime. The `?setup` key.
+
+Gathers what's true here (distro, hardware, what's installed, what the dotfiles expect, what memory says you use) and what
+differs from your other machines (fleet), then Sakura installs and configures what's missing, through the dotfiles where
+they cover it and by hand where they don't, proving each step. Words steer it ("this one's a server", "no GUI").
+  --print    the brief only
+"""
+import os
+import shutil
+import subprocess
+import sys
+
+
+def sh(cmd):
+    try:
+        return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def main(argv):
+    mode, words = "tui", []
+    for a in argv:
+        if a == "--print":
+            mode = "print"
+        elif a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        else:
+            words.append(a)
+    dotfiles = os.environ.get("DOTFILES", os.path.expanduser("~/dotfiles"))
+    facts = [
+        f"Host: {sh('hostname')}; {sh('. /etc/os-release 2>/dev/null && echo $PRETTY_NAME')}; kernel {sh('uname -r')}; {sh('nproc')} cpus; RAM {sh('free -g | awk "/Mem/{print $2}"')} GiB",
+        f"GPU: {sh('nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null') or 'none seen'}",
+        f"Display: {'yes' if os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY') else 'none (headless)'}",
+        f"Dotfiles: {dotfiles if os.path.isdir(dotfiles) else 'not cloned at ' + dotfiles}" + (f"; modules: {sh(f'ls {dotfiles}/modules | tr chr(10) chr(32)')}" if os.path.isdir(dotfiles) else ""),
+        "Installed of the usual set: " + ", ".join(t for t in ("git", "docker", "code", "php", "composer", "node", "pnpm", "python3", "uv", "cargo", "go", "himalaya", "pass", "tmux", "rg", "fd", "fzf", "jq", "ollama", "sakura", "tailscale") if shutil.which(t)),
+        "Missing of the usual set: " + ", ".join(t for t in ("git", "docker", "code", "php", "composer", "node", "pnpm", "python3", "uv", "cargo", "go", "himalaya", "pass", "tmux", "rg", "fd", "fzf", "jq", "ollama", "sakura", "tailscale") if not shutil.which(t)),
+        f"Shell: {os.environ.get('SHELL', '?')}; ~/.ssh/config: {'present' if os.path.exists(os.path.expanduser('~/.ssh/config')) else 'absent'}",
+        f"Sakura: {sh('sakura-model plan 2>/dev/null') or 'sakura-model not on PATH'}",
+    ]
+    brief = "\n".join([
+        "Set this machine up the way I like my machines." + (f" From me: {' '.join(words)}" if words else ""), "",
+        "What's true here (gathered by a script):", "```", *facts, "```", "",
+        "My memory (above, if any) says what I work on and how I like things. The dotfiles are the source of truth for shell, git, ssh "
+        "hosts, editor, packages and services: read their README and modules before doing anything by hand, run their installer for "
+        "what they cover, and only then install what's left (`sudo -A apt-get install -y`, `uv tool install`, upstream releases into ~/.local/bin).",
+        "Work in this order, proving each step with its output: 1. dotfiles present and installed; 2. shell and git identity; 3. ssh keys "
+        "exist (never copy a private key from another machine; make a new one here and tell me what to add where); 4. the tools above "
+        "that are missing and make sense for this machine's role; 5. Sakura itself: `sakura-web-setup`, models (`sakura-model models`), "
+        "the guardian (`sakura-guardian on`); 6. anything role-specific I said. Skip GUI things on a headless box.",
+        "Ask me only for secrets and accounts (passwords, tokens), as a numbered list at the end, with the exact command I'll run for each. "
+        "Finish with what's done, what's left for me, and `sakura-memory add notes` for what's special about this machine.",
+    ])
+    if mode == "print":
+        print(brief)
+        return 0
+    os.execvp("sakura-launch", ["sakura-launch", brief])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

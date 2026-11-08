@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""sakura-decide — decisions that explain themselves. Record why, where you are, as you decide; a year later `?why` answers.
+The `?decide` and `?why` keys.
+
+  ?decide "Redis for the queue: Postgres LISTEN/NOTIFY dropped jobs under load in the Oct test"
+  ?why queue                  decisions whose text matches, newest first, with repo, branch and commit at the time
+  ?why                        the last ten
+  sakura-decide list [N]      the same
+  sakura-decide export        the repo's decisions as Markdown (docs/decisions.md material)
+Stored in ~/.sakura/decisions.jsonl, so it survives the repo and is found by `sakura-recall` too. Each entry carries the
+repo, branch, commit and directory it was made in.
+"""
+import datetime as dt
+import json
+import os
+import subprocess
+import sys
+
+FILE = os.path.join(os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura")), "decisions.jsonl")
+
+
+def sh(cmd):
+    try:
+        return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def entries():
+    try:
+        return [json.loads(l) for l in open(FILE, encoding="utf-8") if l.strip()]
+    except OSError:
+        return []
+
+
+def add(text):
+    if not text:
+        sys.exit('usage: sakura-decide "what was decided: why"')
+    repo = sh("git rev-parse --show-toplevel")
+    e = {"when": dt.datetime.now().isoformat(timespec="minutes"), "text": text, "dir": os.getcwd(),
+         "repo": os.path.basename(repo) if repo else "", "branch": sh("git rev-parse --abbrev-ref HEAD") if repo else "",
+         "commit": sh("git rev-parse --short HEAD") if repo else ""}
+    os.makedirs(os.path.dirname(FILE), exist_ok=True)
+    with open(FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    print(f"recorded ({e['repo'] or 'no repo'}{' @' + e['commit'] if e['commit'] else ''}): {text}")
+
+
+def show(e):
+    where = f"{e['repo']} {e['branch']}@{e['commit']}" if e.get("repo") else e.get("dir", "")
+    print(f"{e['when'][:16].replace('T', ' ')}  {where}\n  {e['text']}")
+
+
+def why(words, n=10):
+    items = entries()
+    q = " ".join(words).lower()
+    hits = [e for e in items if all(w in (e["text"] + " " + e.get("repo", "")).lower() for w in q.split())] if q else items
+    if not hits:
+        print("no decision recorded about that" if q else "no decisions recorded yet: ?decide \"what: why\"")
+        return 1
+    for e in reversed(hits[-n:]):
+        show(e)
+    return 0
+
+
+def export():
+    repo = os.path.basename(sh("git rev-parse --show-toplevel"))
+    items = [e for e in entries() if e.get("repo") == repo] if repo else entries()
+    print(f"# Decisions{' in ' + repo if repo else ''}\n")
+    for e in items:
+        print(f"- **{e['when'][:10]}** ({e.get('branch', '')}@{e.get('commit', '')}): {e['text']}")
+
+
+def main(argv):
+    if argv[:1] in (["-h"], ["--help"]):
+        print(__doc__.strip())
+        return 0
+    if argv[:1] == ["list"]:
+        return why([], int(argv[1]) if len(argv) > 1 and argv[1].isdigit() else 10)
+    if argv[:1] == ["why"]:
+        return why(argv[1:])
+    if argv[:1] == ["export"]:
+        return export()
+    add(" ".join(argv).strip())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]) or 0)
