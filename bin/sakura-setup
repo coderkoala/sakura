@@ -31,7 +31,7 @@ def main(argv):
             words.append(a)
     dotfiles = os.environ.get("DOTFILES", os.path.expanduser("~/dotfiles"))
     facts = [
-        f"Host: {sh('hostname')}; {sh('. /etc/os-release 2>/dev/null && echo $PRETTY_NAME')}; kernel {sh('uname -r')}; {sh('nproc')} cpus; RAM {sh('free -g | awk "/Mem/{print $2}"')} GiB",
+        f"Host: {sh('hostname')}; {sh('. /etc/os-release 2>/dev/null && echo $PRETTY_NAME')}; kernel {sh('uname -r')}; {sh('nproc')} cpus; RAM {sh("free -g | awk '/^Mem/{print $2}'")} GiB",
         f"GPU: {sh('nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null') or 'none seen'}",
         f"Display: {'yes' if os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY') else 'none (headless)'}",
         f"Dotfiles: {dotfiles if os.path.isdir(dotfiles) else 'not cloned at ' + dotfiles}" + (f"; modules: {sh(f'ls {dotfiles}/modules | tr chr(10) chr(32)')}" if os.path.isdir(dotfiles) else ""),
