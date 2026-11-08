@@ -101,6 +101,24 @@
    "en.wikipedia.org",
    "britannica.com",
    "stackexchange.com"
+  ],
+  "wine": [
+   "appdb.winehq.org",
+   "areweanticheatyet.com",
+   "docs.lutris.net",
+   "docs.usebottles.com",
+   "forum.winehq.org",
+   "github.com/GloriousEggroll",
+   "github.com/Matoking/protontricks",
+   "github.com/Open-Wine-Components",
+   "lutris.net",
+   "moddb.com",
+   "nexusmods.com",
+   "pcgamingwiki.com",
+   "protondb.com",
+   "steamcommunity.com",
+   "wiki.gg",
+   "wiki.winehq.org"
   ]
  },
  "_personas": {
@@ -122,27 +140,11 @@
   "performance-engineer": "programming",
   "game-modder": "gaming",
   "game-master": "gaming",
-  "wine-helper": "gaming",
+  "wine-helper": "wine",
   "translator": "language",
   "kb": "general",
   "research-analyst": "general",
   "author": "general",
   "data-analyst": "programming"
- },
- "wine-helper": [
-  "protondb.com",
-  "pcgamingwiki.com",
-  "appdb.winehq.org",
-  "forum.winehq.org",
-  "wiki.winehq.org",
-  "github.com/GloriousEggroll",
-  "github.com/Open-Wine-Components",
-  "docs.lutris.net",
-  "lutris.net",
-  "docs.usebottles.com",
-  "steamcommunity.com",
-  "areweanticheatyet.com",
-  "github.com/Matoking/protontricks",
-  "nexusmods.com"
- ]
+ }
 }
