@@ -172,6 +172,10 @@ See [ROADMAP.md](ROADMAP.md): where it stands, what comes next, and what it's ai
 | `hooks/` | Grounding, the guard, undo snapshots, the claim check, recap context. |
 | `evals/` | One eval per feature, graded by planted input and real state, never by the model's say-so. |
 
+## What's kept where
+
+Everything Sakura accumulates (schedules, downloads, decisions, memory, backups, undo snapshots) lives in plain JSON and text under `~/.sakura`, documented with a compatibility promise in `docs/formats.md`: fields never change meaning, unknown fields are ignored, and a breaking change migrates your data once and keeps a backup.
+
 ## Measuring it
 
 ```bash
