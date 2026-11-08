@@ -29,6 +29,7 @@
 #   ?fmt [--check|--lint]   format and lint what you changed, right tool per language
 #   ?gpu   GPU doctor: Xids, heat, throttle, who holds the VRAM, what fits now  (sakura-gpu doctor|free|fit|scale|watch)
 #   ?drive put FILE gdrive:folder  |  drive sync ~/p gdrive:p --until midnight   (Google, OneDrive, Dropbox via rclone)
+#   torrent add "magnet:..."  |  torrent watch   downloads over transmission, notification when done
 #   sakura-status   one line for tmux's status bar: driver, night queue, offers, guardian
 #   ?go [request]  a session that doesn't stop to ask (sakura-trust on makes every ? like this)
 if command -v sakura-launch >/dev/null 2>&1; then

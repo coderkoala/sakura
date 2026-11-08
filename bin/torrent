@@ -166,7 +166,7 @@ def cmd_add(args):
     uri = args[0]
     name = magnet_name(uri)
     if name:
-        print(f"adding: {name}")
+        print(f"adding: {name}", flush=True)
     start_daemon()
     before = set(tids())
     r = remote("-a", uri, *(["-w", where] if where else []))

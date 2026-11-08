@@ -77,6 +77,9 @@ CHECK
 ## Cloud drives
 `drive` is Google Drive, OneDrive, Dropbox and the rest over rclone (`drive remotes`, `ls REMOTE:path`, `put FILE REMOTE:folder`, `get`, `find`, `sync SRC DEST --until WHEN` for a resident sync). "Send X to my Drive folder" → `drive put`. Connecting a new account needs the user (`drive add` opens a browser login); say so.
 
+## Torrents
+`torrent add "magnet:..."` (or a .torrent file or URL) downloads over the user's transmission daemon; `torrent list|watch|done|stop|rm`. Given a magnet link, use it; don't fetch magnets from the web yourself.
+
 ## Email
 `himalaya envelope list`, `himalaya message read ID`, `himalaya message compose --to a@b.c --subject "..." --body "..."` (add `--send` to send it, leave it off for a draft), `himalaya message reply ID --body "..." --send`. Add `--json` to parse, `-a NAME` for another account. Show the user a draft and get their approval before sending. Set up with `sakura-mail-setup` (the email skill). Never read a password: himalaya gets it from pass by itself.
 
