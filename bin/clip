@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# clip — the user's clipboard, in and out. Wayland (wl-paste/wl-copy) or X11 (xclip).
+#   clip            print what's on the clipboard
+#   clip set        put stdin on the clipboard:   some-command | clip set
+#   clip image F    save the clipboard's image to F (png)
+set -u
+# Without a display there's no clipboard; say so instead of hanging on a socket that isn't there.
+if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then echo "clip: no display (not in a graphical session)" >&2; exit 1; fi
+wl() { [ -n "${WAYLAND_DISPLAY:-}" ] && command -v "$1" >/dev/null 2>&1; }
+x11() { [ -n "${DISPLAY:-}" ] && command -v xclip >/dev/null 2>&1; }
+case "${1:-get}" in
+    get|"")
+        if x11 && timeout 3 xclip -selection clipboard -o 2>/dev/null; then exit 0; fi
+        if wl wl-paste && timeout 3 wl-paste --no-newline 2>/dev/null; then exit 0; fi
+        echo "clip: nothing on the clipboard, or no wl-paste/xclip" >&2; exit 1 ;;
+    set)
+        # xclip first: wl-copy blocks until the terminal has focus, which a script never has. Both end up on the one clipboard.
+        if x11; then timeout 3 xclip -selection clipboard -i >/dev/null 2>&1; elif wl wl-copy; then timeout 3 wl-copy </dev/stdin >/dev/null 2>&1; else echo "clip: no xclip/wl-copy for this display" >&2; exit 1; fi ;;
+    image)
+        out="${2:?clip image FILE}"
+        if wl wl-paste; then timeout 3 wl-paste --type image/png > "$out" 2>/dev/null; else timeout 3 xclip -selection clipboard -t image/png -o > "$out" 2>/dev/null; fi
+        [ -s "$out" ] || { rm -f "$out"; echo "clip: no image on the clipboard" >&2; exit 1; }
+        echo "$out" ;;
+    *) echo "usage: clip | clip set | clip image FILE" >&2; exit 2 ;;
+esac

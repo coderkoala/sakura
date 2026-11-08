@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""procwatch — long-running processes Sakura can start, watch and react to, instead of running a command and waiting.
+
+  procwatch start NAME -- COMMAND...      start it detached, log to ~/.sakura/procs/NAME.log
+  procwatch list                          what's running, with pid, uptime, last line
+  procwatch tail NAME [N]                 the last N log lines (default 40)
+  procwatch wait NAME "REGEX" [SECONDS]   block until the log matches (default 120 s); exits 1 on timeout, 2 if it died
+  procwatch on NAME "REGEX" -- COMMAND... when the log matches, run COMMAND once (the matching line is $PROCWATCH_LINE);
+                                          `notify "title" "body"` or `pa remind now ...` are good commands
+  procwatch stop NAME                     SIGTERM, then SIGKILL after 10 s
+  procwatch rm NAME                       forget a stopped one and its log
+Everything is in $SAKURA_PROCS_DIR, else ~/.sakura/procs. A dev server, a build, a tail of a remote log: start it, do
+other work, come back to `tail`, or let `on` wake you.
+"""
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+
+DIR = os.path.expanduser(os.environ.get("SAKURA_PROCS_DIR") or "~/.sakura/procs")
+
+
+def meta_path(name):
+    return os.path.join(DIR, name + ".json")
+
+
+def log_path(name):
+    return os.path.join(DIR, name + ".log")
+
+
+def load(name):
+    try:
+        return json.load(open(meta_path(name)))
+    except (OSError, ValueError):
+        return None
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def check_name(name):
+    if not re.fullmatch(r"[a-zA-Z0-9][\w.-]{0,40}", name or ""):
+        sys.exit("procwatch: a name is letters, digits, . _ -")
+
+
+def split_cmd(args):
+    if "--" not in args:
+        sys.exit("procwatch: put -- before the command")
+    i = args.index("--")
+    return args[:i], args[i + 1:]
+
+
+def cmd_start(args):
+    head, command = split_cmd(args)
+    if len(head) != 1 or not command:
+        sys.exit("usage: procwatch start NAME -- COMMAND...")
+    name = head[0]
+    check_name(name)
+    os.makedirs(DIR, exist_ok=True)
+    m = load(name)
+    if m and alive(m["pid"]):
+        sys.exit(f"procwatch: {name} is already running (pid {m['pid']}); procwatch stop {name} first")
+    log = open(log_path(name), "ab")
+    p = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, cwd=os.getcwd())
+    json.dump({"pid": p.pid, "command": command, "cwd": os.getcwd(), "started": time.time()}, open(meta_path(name), "w"))
+    print(f"{name}: pid {p.pid}, log {log_path(name)}")
+
+
+def tail_lines(name, n):
+    try:
+        with open(log_path(name), "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 65536))
+            return f.read().decode("utf-8", "replace").splitlines()[-n:]
+    except OSError:
+        return []
+
+
+def cmd_list(_):
+    names = sorted(n[:-5] for n in os.listdir(DIR) if n.endswith(".json")) if os.path.isdir(DIR) else []
+    if not names:
+        print("nothing started")
+        return
+    for name in names:
+        m = load(name) or {}
+        up = alive(m.get("pid", -1))
+        age = int(time.time() - m.get("started", time.time()))
+        last = (tail_lines(name, 1) or [""])[0]
+        print(f"{'running' if up else 'stopped'}  {name:<16} pid {m.get('pid')}  {age // 60}m  {' '.join(m.get('command', []))[:50]}\n           {last[:100]}")
+
+
+def cmd_tail(args):
+    if not args:
+        sys.exit("usage: procwatch tail NAME [N]")
+    for line in tail_lines(args[0], int(args[1]) if len(args) > 1 else 40):
+        print(line)
+
+
+def watch(name, pattern, seconds):
+    """The first new log line matching pattern within seconds, or None (1) on timeout / (2) when the process died."""
+    rx = re.compile(pattern)
+    m = load(name)
+    if not m:
+        sys.exit(f"procwatch: no process called {name}")
+    try:
+        f = open(log_path(name), "rb")
+    except OSError:
+        sys.exit(f"procwatch: no log for {name}")
+    f.seek(0, 2)
+    deadline = time.time() + seconds
+    buf = b""
+    while time.time() < deadline:
+        chunk = f.read()
+        if chunk:
+            buf += chunk
+            *lines, buf = buf.split(b"\n")
+            for raw in lines:
+                line = raw.decode("utf-8", "replace")
+                if rx.search(line):
+                    return line, 0
+        elif not alive(m["pid"]):
+            return None, 2
+        else:
+            time.sleep(0.3)
+    return None, 1
+
+
+def cmd_wait(args):
+    if len(args) < 2:
+        sys.exit('usage: procwatch wait NAME "REGEX" [SECONDS]')
+    line, code = watch(args[0], args[1], float(args[2]) if len(args) > 2 else 120)
+    if line is not None:
+        print(line)
+    elif code == 2:
+        print(f"{args[0]} exited before the log matched", file=sys.stderr)
+    else:
+        print("timed out", file=sys.stderr)
+    return code
+
+
+def cmd_on(args):
+    head, command = split_cmd(args)
+    if len(head) != 2 or not command:
+        sys.exit('usage: procwatch on NAME "REGEX" -- COMMAND...')
+    name, pattern = head
+    if os.fork():
+        print(f"watching {name} for /{pattern}/; will run: {' '.join(command)}")
+        return 0
+    os.setsid()
+    line, code = watch(name, pattern, 10 ** 8)
+    if line is not None:
+        env = dict(os.environ, PROCWATCH_LINE=line, PROCWATCH_NAME=name)
+        subprocess.run(command, env=env)
+    os._exit(0)
+
+
+def cmd_stop(args):
+    if not args:
+        sys.exit("usage: procwatch stop NAME")
+    m = load(args[0])
+    if not m or not alive(m["pid"]):
+        print(f"{args[0]} isn't running")
+        return
+    try:
+        os.killpg(m["pid"], signal.SIGTERM)
+    except OSError:
+        os.kill(m["pid"], signal.SIGTERM)
+    for _ in range(100):
+        if not alive(m["pid"]):
+            break
+        time.sleep(0.1)
+    else:
+        try:
+            os.killpg(m["pid"], signal.SIGKILL)
+        except OSError:
+            pass
+    print(f"stopped {args[0]}")
+
+
+def cmd_rm(args):
+    if not args:
+        sys.exit("usage: procwatch rm NAME")
+    m = load(args[0])
+    if m and alive(m["pid"]):
+        sys.exit(f"procwatch: {args[0]} is running; stop it first")
+    for p in (meta_path(args[0]), log_path(args[0])):
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+    print(f"forgot {args[0]}")
+
+
+def main(argv):
+    cmds = {"start": cmd_start, "list": cmd_list, "tail": cmd_tail, "wait": cmd_wait, "on": cmd_on, "stop": cmd_stop, "rm": cmd_rm}
+    if not argv or argv[0] in ("-h", "--help") or argv[0] not in cmds:
+        print(__doc__.strip())
+        return 0 if argv[:1] in (["-h"], ["--help"]) else 2
+    return cmds[argv[0]](argv[1:]) or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

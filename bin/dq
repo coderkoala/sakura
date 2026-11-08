@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""dq "SQL" [FILE...] — a query over CSV, Parquet, JSON or SQLite files with DuckDB, no install, nothing leaves the machine.
+
+  dq "select city, count(*) n from 'orders.csv' group by 1 order by 2 desc"
+  dq "select * from t limit 5" data.parquet          files named after the query are tables: t, t2, ... (or their stem with --names)
+  dq --schema orders.csv                             columns and types
+  dq "select count(*) from read_json_auto('events.jsonl')"
+  cat big.csv | dq "select avg(amount) from stdin"
+Output is a table; --csv or --json change that. DuckDB runs through `uv run --with duckdb`, cached after the first time.
+"""
+import os
+import subprocess
+import sys
+
+CODE = r'''
+import duckdb, json, os, sys
+args = json.loads(sys.argv[1])
+con = duckdb.connect()
+tables = {}
+for i, f in enumerate(args["files"]):
+    name = os.path.splitext(os.path.basename(f))[0] if args["names"] else ("t" if i == 0 else f"t{i + 1}")
+    name = "".join(c if c.isalnum() or c == "_" else "_" for c in name)
+    low = f.lower()
+    src = (f"read_parquet('{f}')" if low.endswith(".parquet") else f"read_json_auto('{f}')" if low.endswith((".json", ".jsonl", ".ndjson"))
+           else f"read_csv_auto('{f}', header=true)")
+    if low.endswith((".db", ".sqlite", ".sqlite3")):
+        con.execute("install sqlite; load sqlite")
+        con.execute(f"attach '{f}' as {name} (type sqlite)")
+        tables[name] = "sqlite database"
+        continue
+    con.execute(f"create view {name} as select * from {src}")
+    tables[name] = f
+if args["stdin"]:
+    data = sys.stdin.read()
+    p = "/tmp/dq-stdin-%d.csv" % os.getpid()
+    open(p, "w").write(data)
+    con.execute(f"create view stdin as select * from read_csv_auto('{p}', header=true)")
+if args["schema"]:
+    for name in tables:
+        print(f"-- {name}: {tables[name]}")
+        for r in con.execute(f"describe {name}").fetchall():
+            print(f"   {r[0]:<30} {r[1]}")
+    sys.exit(0)
+res = con.execute(args["sql"])
+rows = res.fetchall()
+cols = [d[0] for d in res.description] if res.description else []
+if args["fmt"] == "json":
+    print(json.dumps([dict(zip(cols, r)) for r in rows], default=str, indent=1))
+elif args["fmt"] == "csv":
+    import csv
+    w = csv.writer(sys.stdout); w.writerow(cols); w.writerows(rows)
+else:
+    rows = [[str(c) for c in r] for r in rows]
+    widths = [max([len(c)] + [len(r[i]) for r in rows]) for i, c in enumerate(cols)]
+    print(" | ".join(c.ljust(widths[i]) for i, c in enumerate(cols)))
+    print("-+-".join("-" * w for w in widths))
+    for r in rows[:args["limit"]]:
+        print(" | ".join(v.ljust(widths[i]) for i, v in enumerate(r)))
+    if len(rows) > args["limit"]:
+        print(f"... {len(rows) - args['limit']} more rows (--limit N, or --csv)")
+'''
+
+
+def main(argv):
+    import json
+    fmt, names, schema, limit, sql, files = "table", False, False, 200, None, []
+    it = iter(argv)
+    for a in it:
+        if a == "--csv":
+            fmt = "csv"
+        elif a == "--json":
+            fmt = "json"
+        elif a == "--names":
+            names = True
+        elif a == "--schema":
+            schema = True
+        elif a == "--limit":
+            limit = int(next(it, "200"))
+        elif a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        elif os.path.isfile(a):
+            files.append(os.path.abspath(a))
+        elif sql is None:
+            sql = a
+        else:
+            files.append(a)
+    if not schema and not sql:
+        print(__doc__.strip())
+        return 2
+    args = {"sql": sql or "", "files": files, "names": names, "schema": schema, "fmt": fmt, "limit": limit,
+            "stdin": not sys.stdin.isatty() and (sql or "").lower().find("stdin") >= 0}
+    cmd = ["uv", "run", "-q", "--with", "duckdb", "python3", "-c", CODE, json.dumps(args)]
+    return subprocess.run(cmd).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

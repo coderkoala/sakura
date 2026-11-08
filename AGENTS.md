@@ -48,6 +48,15 @@ CHECK
 ## Eyes
 `look FILE|screen|clip ["question"]` describes an image, screenshot, scan or PDF page with a local vision model; `look --text FILE` is OCR only, exact and fast. Asked about a screenshot, a photo or a scan, run it; never say you can't see images.
 
+## Day to day, machines, data
+- `clip` prints the user's clipboard, `clip set` fills it (`cmd | clip set`). "The thing on my clipboard" means run `clip`.
+- `dq "SQL" FILE...` queries CSV, Parquet, JSON or SQLite with DuckDB (`t`, `t2`… are the files; `--schema`). Use it instead of awk pipelines over data.
+- `procwatch start NAME -- cmd` runs something long (a server, a build) detached; `procwatch tail|wait NAME "regex"|on NAME "regex" -- cmd|stop`. Never block a turn waiting on a server.
+- `fleet` lists the user's machines (up, RAM, GPU), `fleet pick gpu|ram|cpu` names the best one, `fleet run "cmd"` runs on all. "Run it on the box with a free GPU" → `ssh "$(fleet pick gpu)" ...`.
+- `schema [TABLE | refs COLUMN]` is the project's database schema from its migrations, no connection needed.
+- `hear [FILE|SECONDS]` is speech to text (local whisper); `say "text"` speaks. `hear --notes FILE` turns a recording into notes and reminders.
+- `sakura-pr` opens a PR from this branch with a body from the diff; `sakura-review [PR]` reviews one. Asked for either, run them rather than doing it by hand.
+
 ## Files and your own documents
 - `view_file FILE [start] [end]` reads with line numbers, 200 lines at a time. `edit_file FILE` applies @@old/@@new/@@end blocks from a heredoc, exact text only; `--all` replaces every match, `--create` makes a new file.
 - `rag index PATH` makes the user's documents searchable, `rag search "<question>" [-k 6]` finds passages by meaning and keywords, and `rag status` shows what's in it. Never index a folder the user didn't name.

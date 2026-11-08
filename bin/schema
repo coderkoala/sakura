@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""schema [PATH] — the database schema of a project, from what's in the repo, with no database connection.
+
+  schema                      tables, columns and foreign keys, from migrations and schema files under this directory
+  schema TABLE                one table in full, and what references it
+  schema refs COLUMN          every table with that column, and the foreign keys on it ("which tables reference customer_id")
+  schema --json
+Reads: Laravel migrations (database/migrations/*.php), SQL files (CREATE TABLE, ALTER TABLE ... FOREIGN KEY), Prisma
+(schema.prisma), Django models (models.py), SQLAlchemy models, Rails schema.rb, Knex/TypeORM/Drizzle migrations are
+read as SQL where they contain it. Cached per repo in ~/.cache/sakura/schema until a source file changes.
+"""
+import glob
+import hashlib
+import json
+import os
+import re
+import sys
+
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "sakura", "schema")
+SKIP = {"node_modules", "vendor", ".git", "storage", "dist", "build", ".venv", "venv", "__pycache__"}
+
+
+def files(root):
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP and not d.startswith(".")]
+        for n in filenames:
+            p = os.path.join(dirpath, n)
+            low = n.lower()
+            if low.endswith(".sql") or low == "schema.prisma" or low == "schema.rb" or low == "models.py" \
+               or ("migration" in dirpath.lower() and low.endswith((".php", ".js", ".ts", ".py"))):
+                out.append(p)
+    return sorted(out)
+
+
+def add(tables, table, col=None, ctype="", fk=None):
+    t = tables.setdefault(table, {"columns": {}, "fks": []})
+    if col:
+        t["columns"].setdefault(col, ctype)
+    if fk:
+        if fk not in t["fks"]:
+            t["fks"].append(fk)
+
+
+def parse_laravel(text, tables):
+    for m in re.finditer(r"Schema::(create|table)\(\s*['\"](\w+)['\"]\s*,\s*function\s*\([^)]*\)\s*(?:use\s*\([^)]*\)\s*)?\{(.*?)\n\s*\}\);", text, re.S):
+        table, body = m.group(2), m.group(3)
+        add(tables, table)
+        for c in re.finditer(r"\$table->(\w+)\(\s*(?:['\"](\w+)['\"])?", body):
+            kind, col = c.group(1), c.group(2)
+            if kind in ("id",):
+                add(tables, table, col or "id", "bigint pk")
+            elif kind == "timestamps":
+                add(tables, table, "created_at", "timestamp"); add(tables, table, "updated_at", "timestamp")
+            elif kind == "softDeletes":
+                add(tables, table, "deleted_at", "timestamp")
+            elif kind in ("foreignId", "foreignUuid", "foreignIdFor") and col:
+                add(tables, table, col, "fk")
+                ref = re.search(re.escape(c.group(0)) + r"[^;]*?constrained\(\s*(?:['\"](\w+)['\"])?", body)
+                target = ref.group(1) if ref and ref.group(1) else (re.sub(r"_id$", "", col) + "s" if ref else None)
+                if target:
+                    add(tables, table, fk=(col, target))
+            elif kind == "foreign" and col:
+                ref = re.search(r"foreign\(\s*['\"]" + col + r"['\"]\s*\)[^;]*?references\(\s*['\"](\w+)['\"]\s*\)[^;]*?on\(\s*['\"](\w+)['\"]", body)
+                if ref:
+                    add(tables, table, fk=(col, ref.group(2)))
+            elif col and kind not in ("index", "unique", "primary", "dropColumn", "dropForeign", "dropIndex", "renameColumn", "after", "comment"):
+                add(tables, table, col, kind)
+        for d in re.finditer(r"\$table->dropColumn\(\s*\[?([^)\]]+)", body):
+            for col in re.findall(r"['\"](\w+)['\"]", d.group(1)):
+                tables.get(table, {}).get("columns", {}).pop(col, None)
+    for m in re.finditer(r"Schema::drop(?:IfExists)?\(\s*['\"](\w+)['\"]", text):
+        tables.pop(m.group(1), None)
+
+
+def parse_sql(text, tables):
+    for m in re.finditer(r"create\s+table\s+(?:if\s+not\s+exists\s+)?[`\"]?(\w+)[`\"]?\s*\((.*?)\)\s*(?:;|engine|with|partition|$)", text, re.S | re.I):
+        table, body = m.group(1), m.group(2)
+        add(tables, table)
+        for line in re.split(r",\s*\n", body):
+            line = line.strip()
+            fk = re.search(r"foreign\s+key\s*\(\s*[`\"]?(\w+)[`\"]?\s*\)\s*references\s+[`\"]?(\w+)", line, re.I)
+            if fk:
+                add(tables, table, fk=(fk.group(1), fk.group(2)))
+                continue
+            c = re.match(r"[`\"]?(\w+)[`\"]?\s+([\w()]+)", line)
+            if c and c.group(1).lower() not in ("primary", "unique", "constraint", "key", "index", "check"):
+                add(tables, table, c.group(1), c.group(2).lower())
+                ref = re.search(r"references\s+[`\"]?(\w+)", line, re.I)
+                if ref:
+                    add(tables, table, fk=(c.group(1), ref.group(1)))
+    for m in re.finditer(r"alter\s+table\s+(?:only\s+)?[`\"]?(\w+)[`\"]?\s+add\s+(?:constraint\s+\w+\s+)?foreign\s+key\s*\(\s*[`\"]?(\w+)[`\"]?\s*\)\s*references\s+[`\"]?(\w+)", text, re.I):
+        add(tables, m.group(1), fk=(m.group(2), m.group(3)))
+    for m in re.finditer(r"alter\s+table\s+(?:only\s+)?[`\"]?(\w+)[`\"]?\s+add\s+(?:column\s+)?[`\"]?(\w+)[`\"]?\s+([\w()]+)", text, re.I):
+        if m.group(2).lower() not in ("constraint", "foreign", "primary", "unique", "index"):
+            add(tables, m.group(1), m.group(2), m.group(3).lower())
+
+
+def parse_prisma(text, tables):
+    for m in re.finditer(r"model\s+(\w+)\s*\{(.*?)\n\}", text, re.S):
+        table, body = m.group(1), m.group(2)
+        add(tables, table)
+        for line in body.splitlines():
+            c = re.match(r"\s*(\w+)\s+(\w+)(\[\])?\??\s*(.*)", line)
+            if not c or c.group(1).startswith("@"):
+                continue
+            rel = re.search(r"@relation\(fields:\s*\[(\w+)\]", c.group(4))
+            if rel:
+                add(tables, table, fk=(rel.group(1), c.group(2)))
+            elif not c.group(3):
+                add(tables, table, c.group(1), c.group(2).lower())
+
+
+def parse_django(text, tables):
+    for m in re.finditer(r"class\s+(\w+)\((?:models\.)?Model\):(.*?)(?=\nclass\s|\Z)", text, re.S):
+        table, body = m.group(1), m.group(2)
+        add(tables, table)
+        for c in re.finditer(r"^\s+(\w+)\s*=\s*models\.(\w+)\(([^)]*)", body, re.M):
+            col, kind, args = c.groups()
+            if kind in ("ForeignKey", "OneToOneField"):
+                target = re.match(r"\s*['\"]?([\w.]+)", args)
+                add(tables, table, col + "_id", "fk")
+                if target:
+                    add(tables, table, fk=(col + "_id", target.group(1).split(".")[-1]))
+            elif kind != "ManyToManyField":
+                add(tables, table, col, kind.replace("Field", "").lower())
+
+
+def parse_rails(text, tables):
+    for m in re.finditer(r"create_table\s+\"(\w+)\".*?do\s*\|t\|(.*?)\n\s*end", text, re.S):
+        table, body = m.group(1), m.group(2)
+        add(tables, table, "id", "pk")
+        for c in re.finditer(r"t\.(\w+)\s+\"(\w+)\"", body):
+            if c.group(1) == "references":
+                add(tables, table, c.group(2) + "_id", "fk"); add(tables, table, fk=(c.group(2) + "_id", c.group(2) + "s"))
+            elif c.group(1) != "index":
+                add(tables, table, c.group(2), c.group(1))
+    for m in re.finditer(r"add_foreign_key\s+\"(\w+)\",\s*\"(\w+)\"(?:,\s*column:\s*\"(\w+)\")?", text):
+        add(tables, m.group(1), fk=(m.group(3) or re.sub(r"s$", "", m.group(2)) + "_id", m.group(2)))
+
+
+def build(root):
+    srcs = files(root)
+    h = hashlib.sha1()
+    for p in srcs:
+        st = os.stat(p)
+        h.update(f"{p}:{st.st_mtime_ns}:{st.st_size}".encode())
+    key = os.path.join(CACHE, h.hexdigest()[:16] + ".json")
+    try:
+        return json.load(open(key)), srcs
+    except (OSError, ValueError):
+        pass
+    tables = {}
+    for p in srcs:
+        try:
+            text = open(p, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        low = p.lower()
+        if low.endswith(".php"):
+            parse_laravel(text, tables)
+        elif low.endswith("schema.prisma"):
+            parse_prisma(text, tables)
+        elif low.endswith("models.py"):
+            parse_django(text, tables)
+        elif low.endswith("schema.rb"):
+            parse_rails(text, tables)
+        else:
+            parse_sql(text, tables)
+    for t in tables.values():
+        t["fks"] = [list(f) for f in t["fks"]]
+    os.makedirs(CACHE, exist_ok=True)
+    json.dump(tables, open(key, "w"))
+    return tables, srcs
+
+
+def show_table(name, t, tables):
+    print(f"{name}  ({len(t['columns'])} columns)")
+    for col, ctype in t["columns"].items():
+        fk = next((f for f in t["fks"] if f[0] == col), None)
+        print(f"  {col:<28} {ctype}" + (f"  -> {fk[1]}" if fk else ""))
+    refs = [(n, f[0]) for n, o in tables.items() for f in o["fks"] if f[1] == name]
+    if refs:
+        print("  referenced by: " + ", ".join(f"{n}.{c}" for n, c in refs))
+
+
+def main(argv):
+    as_json = "--json" in argv
+    argv = [a for a in argv if a != "--json"]
+    if argv[:1] in (["-h"], ["--help"]):
+        print(__doc__.strip())
+        return 0
+    root = os.getcwd()
+    if argv and os.path.isdir(argv[0]):
+        root = argv.pop(0)
+    tables, srcs = build(root)
+    if not tables:
+        print(f"no schema found under {root} ({len(srcs)} candidate files read)")
+        return 1
+    if as_json:
+        print(json.dumps(tables, indent=1))
+        return 0
+    if argv and argv[0] == "refs":
+        col = argv[1] if len(argv) > 1 else ""
+        for name, t in sorted(tables.items()):
+            if col in t["columns"]:
+                fk = next((f for f in t["fks"] if f[0] == col), None)
+                print(f"{name}.{col}" + (f" -> {fk[1]}" if fk else ""))
+        return 0
+    if argv:
+        name = argv[0]
+        if name not in tables:
+            hits = [n for n in tables if name.lower() in n.lower()]
+            if len(hits) == 1:
+                name = hits[0]
+            else:
+                print(f"no table {name}" + (f"; did you mean: {', '.join(hits[:8])}" if hits else ""))
+                return 1
+        show_table(name, tables[name], tables)
+        return 0
+    print(f"{len(tables)} tables from {len(srcs)} files under {root}")
+    for name, t in sorted(tables.items()):
+        fks = ", ".join(f"{f[0]}->{f[1]}" for f in t["fks"])
+        print(f"  {name:<30} {len(t['columns']):>3} cols" + (f"   {fks}" if fks else ""))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

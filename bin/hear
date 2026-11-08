@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""hear [SECONDS | FILE] — speech to text, on this machine. Voice in for Sakura, meetings into notes.
+
+  hear                 record from the microphone until you press Enter, then print what was said
+  hear 20              record for 20 seconds
+  hear meeting.wav     transcribe a recording (wav, mp3, m4a, ogg: anything ffmpeg reads)
+  hear --notes FILE    transcribe, then open Sakura with it to make notes, decisions and reminders (`pa remind`)
+  hear --model small   whisper model: tiny, base, small (default), medium; bigger is slower and better. Cached in ~/.cache
+Runs faster-whisper on the CPU through `uv run` (first run downloads the model, 460 MB for small). Nothing leaves the
+machine. The shell key `?hear` runs `hear` and hands the words to Sakura as a request.
+"""
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+CODE = r'''
+import sys, os
+from faster_whisper import WhisperModel
+path, size = sys.argv[1], sys.argv[2]
+model = WhisperModel(size, device="cpu", compute_type="int8", download_root=os.path.expanduser("~/.cache/sakura/whisper"))
+segments, info = model.transcribe(path, vad_filter=True, beam_size=3)
+text = " ".join(s.text.strip() for s in segments)
+print(text.strip())
+'''
+
+
+def record(seconds, path):
+    if shutil.which("pw-record"):
+        cmd = ["pw-record", "--rate", "16000", "--channels", "1", path]
+    elif shutil.which("parecord"):
+        cmd = ["parecord", "--rate=16000", "--channels=1", "--file-format=wav", path]
+    elif shutil.which("arecord"):
+        cmd = ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", path]
+    else:
+        sys.exit("hear: no recorder (pw-record, parecord or arecord)")
+    p = subprocess.Popen(cmd, stderr=subprocess.DEVNULL)
+    try:
+        if seconds:
+            print(f"recording {seconds} s…", file=sys.stderr)
+            try:
+                p.wait(timeout=seconds)
+            except subprocess.TimeoutExpired:
+                pass
+        else:
+            print("recording… press Enter to stop", file=sys.stderr)
+            try:
+                input()
+            except EOFError:
+                pass
+    finally:
+        if p.poll() is None:
+            p.terminate()
+            try:
+                p.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                p.kill()
+
+
+def transcribe(path, size):
+    if not shutil.which("uv"):
+        sys.exit("hear: uv isn't installed (curl -LsSf https://astral.sh/uv/install.sh | sh)")
+    r = subprocess.run(["uv", "run", "-q", "--with", "faster-whisper", "--with", "av<14", "python3", "-c", CODE, path, size], capture_output=True, text=True)
+    if r.returncode:
+        sys.exit("hear: transcription failed:\n" + r.stderr[-1500:])
+    return r.stdout.strip()
+
+
+def main(argv):
+    size, notes, target = os.environ.get("SAKURA_WHISPER_MODEL", "small"), False, None
+    it = iter(argv)
+    for a in it:
+        if a == "--model":
+            size = next(it, size)
+        elif a == "--notes":
+            notes = True
+        elif a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        else:
+            target = a
+    tmp = None
+    if target and os.path.isfile(target):
+        path = target
+    else:
+        seconds = int(target) if target and target.isdigit() else 0
+        tmp = path = tempfile.mktemp(prefix="hear-", suffix=".wav", dir=os.path.expanduser("~/.cache"))
+        record(seconds, path)
+    try:
+        text = transcribe(path, size)
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
+    if not text:
+        print("(nothing heard)", file=sys.stderr)
+        return 1
+    if notes:
+        brief = ("Here's a transcript. Turn it into: a short summary, the decisions taken, the action items with owners, and anything with a "
+                 "date or time as a `pa remind` you actually run. Quote the transcript only where exact words matter.\n\nTranscript:\n" + text)
+        os.execvp("sakura-launch", ["sakura-launch", brief])
+    print(text)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

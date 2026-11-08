@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# say "text" — speak, on this machine. Piper if installed (natural), else speech-dispatcher (spd-say), else espeak-ng.
+#   say "the build is green"
+#   some-command | say
+#   say --voice en_GB-alan-medium "..."    a Piper voice (downloaded once into ~/.local/share/piper)
+#   SAKURA_VOICE=... sets the default Piper voice (default en_US-lessac-medium)
+# A reminder that speaks: pa remind in 10 minutes "stand up"  (pa calls `notify`, which calls `say` when SAKURA_SPEAK=1).
+set -u
+voice="${SAKURA_VOICE:-en_US-lessac-medium}"
+[ "${1:-}" = --voice ] && { voice="$2"; shift 2; }
+if [ $# -gt 0 ]; then text="$*"; else text="$(cat)"; fi
+[ -n "$text" ] || exit 0
+vdir="${XDG_DATA_HOME:-$HOME/.local/share}/piper"
+if command -v piper >/dev/null 2>&1 || [ -x "$HOME/.local/bin/piper" ]; then
+    model="$vdir/$voice.onnx"
+    if [ ! -f "$model" ]; then
+        mkdir -p "$vdir"
+        lang="${voice%%-*}"; base="https://huggingface.co/rhasspy/piper-voices/resolve/main/${lang%_*}/$lang/${voice#*-}"
+        base="${base%-*}/${voice##*-}"
+        curl -fsSL -o "$model" "$base/$voice.onnx" && curl -fsSL -o "$model.json" "$base/$voice.onnx.json" || { rm -f "$model" "$model.json"; echo "say: couldn't fetch the voice $voice" >&2; }
+    fi
+    if [ -f "$model" ]; then
+        if command -v pw-play >/dev/null 2>&1; then player=(pw-play --rate 22050 --format s16 --channels 1 -)
+        elif command -v paplay >/dev/null 2>&1; then player=(paplay --raw --rate=22050 --format=s16le --channels=1)
+        else player=(aplay -q -r 22050 -f S16_LE -c 1); fi
+        printf '%s\n' "$text" | piper --model "$model" --output-raw 2>/dev/null | "${player[@]}" && exit 0
+    fi
+fi
+if command -v spd-say >/dev/null 2>&1; then spd-say -w -- "$text" && exit 0; fi
+if command -v espeak-ng >/dev/null 2>&1; then espeak-ng -- "$text" && exit 0; fi
+echo "say: no speech engine. One of: uv tool install piper-tts; sudo -A apt-get install -y speech-dispatcher; espeak-ng" >&2
+exit 1

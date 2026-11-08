@@ -15,9 +15,11 @@
 #   ?guard  what's about to hurt: disks, certs, failed units, backups
 #   ?pr [words]  a pull request from this branch, body from the diff;  ?review [PR|range] [--post]  findings, ranked
 #   look FILE|screen|clip [question]  eyes: a local vision model, or --text for OCR
+#   ?try [lang] question   a scratch directory, run a snippet, keep nothing
+#   ?hear   speak a request instead of typing it;  ?morning  the day on one screen (also shown at the first ? of the day)
 #   ?go [request]  a session that doesn't stop to ask (sakura-trust on makes every ? like this)
 if command -v sakura-launch >/dev/null 2>&1; then
-    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' '?pr' '?review' 2>/dev/null
+    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' '?pr' '?review' '?try' '?hear' '?morning' 2>/dev/null
     alias '?'='sakura-launch'
     alias '?fix'='sakura-fix --shell $$'
     alias '?undo'='sakura-undo'
@@ -30,6 +32,10 @@ if command -v sakura-launch >/dev/null 2>&1; then
     alias '?guard'='sakura-guardian'
     alias '?go'='SAKURA_TRUST=1 sakura-launch'
     alias '?pr'='sakura-pr'
+    alias '?try'='sakura-try'
+    alias '?morning'='sakura-morning'
+    __sakura_hear() { local t; t="$(hear "$@")" || return 1; printf 'heard: %s\n' "$t"; sakura-launch "$t"; }
+    alias '?hear'='__sakura_hear'
     alias '?review'='sakura-review'
     # ?teach hands Sakura your recent commands, so there's nothing to paste.
     __sakura_teach() { HISTTIMEFORMAT='' history 40 | sakura-teach --history - "$@"; }
@@ -43,7 +49,7 @@ if command -v sakura-launch >/dev/null 2>&1; then
     __sakura_quote_line() {
         local head rest
         case "$READLINE_LINE" in
-            '?remind '*|'?pa '*|'?fix '*|'? '*|'?? '*|'?learn '*|'?teach '*|'?tour '*|'?recall '*|'?go '*|'?pr '*) ;;
+            '?remind '*|'?pa '*|'?fix '*|'? '*|'?? '*|'?learn '*|'?teach '*|'?tour '*|'?recall '*|'?go '*|'?pr '*|'?try '*) ;;
             *) return 0 ;;
         esac
         head=${READLINE_LINE%% *}
@@ -58,6 +64,8 @@ if command -v sakura-launch >/dev/null 2>&1; then
         bind '"\C-m": "\C-x\C-q\C-j"' 2>/dev/null
         # Whatever came due while no notification could reach you.
         command -v pa >/dev/null 2>&1 && pa pending 2>/dev/null
+        # The day on one screen, once a day, when the first shell of the day opens.
+        command -v sakura-morning >/dev/null 2>&1 && sakura-morning --once 2>/dev/null
 
         # ?fix: remember the last command that failed, where, and how, so `?fix` needs no copying or explaining.
         # Ctrl-C (130) isn't a failure. Inside tmux the screen is kept too; otherwise ?fix reruns it when that's harmless.
