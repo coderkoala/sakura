@@ -1,0 +1,398 @@
+#!/usr/bin/env python3
+"""sakura-guardian — watches what's easy to forget and says so before it hurts. No model involved. The `?guard` key.
+
+  sakura-guardian               the findings, now
+  sakura-guardian --all         everything it checked, not only the findings
+  sakura-guardian --json
+  sakura-guardian tick          record a sample and notify about new findings (what the daily timer runs)
+  sakura-guardian on [HH:MM]    check every day at HH:MM (default 09:00); `off` stops it
+  sakura-guardian backup NAME PATH [--every DAYS]   watch a backup: PATH is where it lands (a directory, a restic or borg
+                                repo, or a file); it's late when nothing new has appeared in DAYS (default 2)
+  sakura-guardian restored NAME record that you test-restored a backup today (it nags after 90 days without one)
+  sakura-guardian forget NAME
+
+Checks: disks that are nearly full or will be within two weeks (from its own daily samples), tmpfs /tmp, swap, TLS
+certificates ending within three weeks (letsencrypt, acme.sh, and any PEM under /etc/ssl/certs that's yours), failed
+systemd units, a pending reboot, GPU Xid errors this boot, kept tools whose checks fail, backups that are late or never
+test-restored. Stored in $SAKURA_GUARDIAN_DIR, else ~/.sakura/guardian.
+"""
+import datetime as dt
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+DIR = os.path.expanduser(os.environ.get("SAKURA_GUARDIAN_DIR") or "~/.sakura/guardian")
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+SAMPLES = os.path.join(DIR, "disk.jsonl")
+CONF = os.path.join(DIR, "config.json")
+SEEN = os.path.join(DIR, "seen.json")
+DISK_WARN = 90
+DISK_DAYS = 14
+CERT_DAYS = 21
+RESTORE_DAYS = 90
+SKIP_FS = ("tmpfs", "devtmpfs", "squashfs", "overlay", "efivarfs", "fuse", "nsfs", "proc", "sysfs", "cgroup", "autofs", "tracefs", "ramfs")
+
+
+def sh(cmd, timeout=20):
+    try:
+        return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def load(path, default):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def save(path, data):
+    os.makedirs(DIR, exist_ok=True)
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=1)
+    os.replace(path + ".tmp", path)
+
+
+def human(n):
+    for unit in ("B", "K", "M", "G", "T"):
+        if abs(n) < 1024 or unit == "T":
+            return f"{n:.0f}{unit}" if unit in "BKM" else f"{n:.1f}{unit}"
+        n /= 1024
+
+
+# ── Disks ─────────────────────────────────────────────────────────────────────
+
+def mounts():
+    out = []
+    try:
+        with open("/proc/mounts", encoding="utf-8") as f:
+            for line in f:
+                dev, mnt, fstype = line.split()[:3]
+                if fstype.startswith(SKIP_FS) or mnt.startswith(("/snap", "/boot/efi", "/run", "/sys", "/proc", "/dev")) or dev.startswith("/dev/loop"):
+                    continue
+                if any(m["mount"] == mnt for m in out):
+                    continue
+                try:
+                    st = os.statvfs(mnt)
+                except OSError:
+                    continue
+                total = st.f_blocks * st.f_frsize
+                if total < 512 * 1024 * 1024:
+                    continue
+                out.append({"mount": mnt, "total": total, "used": total - st.f_bfree * st.f_frsize, "avail": st.f_bavail * st.f_frsize})
+    except OSError:
+        pass
+    return out
+
+
+def record_sample(disks):
+    os.makedirs(DIR, exist_ok=True)
+    with open(SAMPLES, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"t": int(time.time()), "d": {m["mount"]: m["used"] for m in disks}}) + "\n")
+    # Keep about four months of daily samples.
+    try:
+        lines = open(SAMPLES, encoding="utf-8").read().splitlines()
+        if len(lines) > 400:
+            with open(SAMPLES, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines[-300:]) + "\n")
+    except OSError:
+        pass
+
+
+def days_to_full(mount, disk):
+    """Days until this mount is full at the rate of the last fortnight's samples, or None when there's too little data."""
+    pts = []
+    try:
+        for line in open(SAMPLES, encoding="utf-8"):
+            try:
+                s = json.loads(line)
+            except ValueError:
+                continue
+            if mount in s.get("d", {}) and s["t"] > time.time() - 14 * 86400:
+                pts.append((s["t"], s["d"][mount]))
+    except OSError:
+        return None
+    pts.append((time.time(), disk["used"]))
+    pts = sorted(set(pts))
+    if len(pts) < 3 or pts[-1][0] - pts[0][0] < 2 * 86400:
+        return None
+    n = len(pts)
+    mx, my = sum(p[0] for p in pts) / n, sum(p[1] for p in pts) / n
+    sxx = sum((p[0] - mx) ** 2 for p in pts)
+    if not sxx:
+        return None
+    rate = sum((p[0] - mx) * (p[1] - my) for p in pts) / sxx  # bytes per second
+    if rate <= 0:
+        return None
+    return disk["avail"] / rate / 86400
+
+
+def check_disks(findings, all_):
+    disks = mounts()
+    for d in disks:
+        pct = 100 * d["used"] / d["total"] if d["total"] else 0
+        days = days_to_full(d["mount"], d)
+        line = f"{d['mount']}: {pct:.0f}% used, {human(d['avail'])} free" + (f", full in about {days:.0f} days at this rate" if days is not None else "")
+        if pct >= DISK_WARN:
+            findings.append(("disk", f"{line}. Find what's big: `sudo -A du -xh --max-depth=2 {d['mount']} 2>/dev/null | sort -rh | head -20`"))
+        elif days is not None and days <= DISK_DAYS:
+            findings.append(("disk", f"{line}."))
+        else:
+            all_.append(("disk", line))
+    try:
+        st = os.statvfs("/tmp")
+        total = st.f_blocks * st.f_frsize
+        used = total - st.f_bfree * st.f_frsize
+        if "tmpfs" in sh("findmnt -no FSTYPE /tmp") and total:
+            pct = 100 * used / total
+            line = f"/tmp is RAM (tmpfs): {pct:.0f}% of {human(total)} used"
+            (findings if pct >= 50 else all_).append(("tmp", line + (". Build caches belong under ~/.cache, not /tmp." if pct >= 50 else "")))
+    except OSError:
+        pass
+    return disks
+
+
+def check_memory(findings, all_):
+    mem = {}
+    try:
+        for line in open("/proc/meminfo", encoding="utf-8"):
+            k, v = line.split(":")
+            mem[k] = int(v.split()[0]) * 1024
+    except (OSError, ValueError):
+        return
+    if mem.get("SwapTotal"):
+        pct = 100 * (mem["SwapTotal"] - mem["SwapFree"]) / mem["SwapTotal"]
+        line = f"swap: {pct:.0f}% of {human(mem['SwapTotal'])} in use"
+        (findings if pct >= 60 else all_).append(("memory", line + (". Something is being pushed out of RAM." if pct >= 60 else "")))
+    else:
+        findings.append(("memory", "no swap at all: one big job can get a process killed instead of slowed. The dotfiles swap module adds some."))
+    avail = mem.get("MemAvailable", 0)
+    if mem.get("MemTotal") and avail < 0.08 * mem["MemTotal"]:
+        findings.append(("memory", f"only {human(avail)} of RAM available right now"))
+
+
+# ── Certificates ──────────────────────────────────────────────────────────────
+
+def cert_paths():
+    paths = set(glob.glob("/etc/letsencrypt/live/*/cert.pem") + glob.glob(os.path.expanduser("~/.acme.sh/*/*.cer"))
+                + glob.glob("/etc/ssl/private/*.crt") + glob.glob("/etc/nginx/ssl/*.crt") + glob.glob("/etc/nginx/ssl/*.pem")
+                + glob.glob(os.path.expanduser("~/.local/share/caddy/certificates/*/*/*.crt")) + glob.glob("/var/lib/caddy/.local/share/caddy/certificates/*/*/*.crt"))
+    paths |= set(load(CONF, {}).get("certs", []))
+    return sorted(p for p in paths if os.access(p, os.R_OK))
+
+
+def check_certs(findings, all_):
+    if not shutil.which("openssl"):
+        return
+    for path in cert_paths():
+        out = sh(f"openssl x509 -in {json.dumps(path)} -noout -enddate -subject 2>/dev/null")
+        m = re.search(r"notAfter=(.+)", out)
+        if not m:
+            continue
+        try:
+            end = dt.datetime.strptime(m.group(1).strip(), "%b %d %H:%M:%S %Y %Z")
+        except ValueError:
+            continue
+        left = (end - dt.datetime.utcnow()).days
+        subj = re.search(r"CN\s*=\s*([^,/\n]+)", out)
+        name = subj.group(1).strip() if subj else os.path.basename(os.path.dirname(path))
+        line = f"certificate {name} ends in {left} days ({path})"
+        (findings if left <= CERT_DAYS else all_).append(("cert", line + (". Renew it, or check why the renewal timer didn't." if left <= CERT_DAYS else "")))
+
+
+# ── System ────────────────────────────────────────────────────────────────────
+
+def check_system(findings, all_):
+    if shutil.which("systemctl"):
+        for scope, flag in (("system", ""), ("user", "--user ")):
+            out = sh(f"systemctl {flag}--no-legend --plain --failed 2>/dev/null")
+            units = [l.split()[0] for l in out.splitlines() if l.strip()]
+            if units:
+                findings.append(("systemd", f"failed {scope} units: {', '.join(units[:8])}. `systemctl {flag}status {units[0]}`"))
+            else:
+                all_.append(("systemd", f"no failed {scope} units"))
+    if os.path.exists("/var/run/reboot-required"):
+        pkgs = sh("cat /var/run/reboot-required.pkgs 2>/dev/null").split()
+        findings.append(("reboot", "a reboot is pending" + (f" for {', '.join(pkgs[:5])}" if pkgs else "")))
+    if shutil.which("nvidia-smi") or os.path.exists("/proc/driver/nvidia"):
+        xids = re.findall(r"NVRM: Xid \(PCI:[^)]*\): (\d+)", sh("journalctl -k -b --no-pager -q 2>/dev/null | grep -F 'Xid' || true", 30))
+        if xids:
+            findings.append(("gpu", f"{len(xids)} GPU Xid errors this boot (codes {', '.join(sorted(set(xids)))}). 120 or 154 means the GPU needs a reboot."))
+        else:
+            all_.append(("gpu", "no GPU Xid errors this boot"))
+    if shutil.which("sakura-tool"):
+        out = sh("sakura-tool check 2>&1", 120)
+        bad = [l for l in out.splitlines() if re.search(r"\b(FAIL|failed|broken)\b", l)]
+        if bad:
+            findings.append(("tools", "kept tools whose check fails: " + "; ".join(l.strip() for l in bad[:4])))
+
+
+# ── Backups ───────────────────────────────────────────────────────────────────
+
+def newest_in(path):
+    """When the backup last changed: the newest mtime under PATH (repos count their data/ and snapshots)."""
+    if os.path.isfile(path):
+        return os.stat(path).st_mtime
+    newest = os.stat(path).st_mtime  # an empty directory counts from its own change
+    for root, dirs, files in os.walk(path):
+        dirs[:] = [d for d in dirs if not d.startswith(".") or d == ".git"][:200]
+        for n in files:
+            try:
+                newest = max(newest, os.stat(os.path.join(root, n)).st_mtime)
+            except OSError:
+                pass
+        if root.count(os.sep) - path.count(os.sep) >= 3:
+            dirs[:] = []
+    return newest
+
+
+def check_backups(findings, all_):
+    conf = load(CONF, {})
+    backups = conf.get("backups", {})
+    if not backups:
+        all_.append(("backup", "no backups registered: `sakura-guardian backup NAME PATH` to watch one"))
+        return
+    for name, b in backups.items():
+        path = os.path.expanduser(b["path"])
+        if not os.path.exists(path):
+            findings.append(("backup", f"backup {name}: {path} isn't there"))
+            continue
+        age = (time.time() - newest_in(path)) / 86400
+        every = b.get("every", 2)
+        line = f"backup {name}: last changed {age:.1f} days ago"
+        if age > every:
+            findings.append(("backup", f"{line}; it should change every {every}. Check the job that writes {path}."))
+        else:
+            all_.append(("backup", line))
+        restored = b.get("restored")
+        since = (time.time() - restored) / 86400 if restored else None
+        if since is None:
+            findings.append(("backup", f"backup {name} has never been test-restored. A backup that was never restored is a hope, not a backup: "
+                                       f"restore one file somewhere else, then `sakura-guardian restored {name}`."))
+        elif since > RESTORE_DAYS:
+            findings.append(("backup", f"backup {name}: last test-restore {since:.0f} days ago. Restore one file again, then `sakura-guardian restored {name}`."))
+        else:
+            all_.append(("backup", f"backup {name}: test-restored {since:.0f} days ago"))
+
+
+# ── Commands ──────────────────────────────────────────────────────────────────
+
+def run_checks(record=False):
+    findings, all_ = [], []
+    disks = check_disks(findings, all_)
+    if record:
+        record_sample(disks)
+    check_memory(findings, all_)
+    check_certs(findings, all_)
+    check_system(findings, all_)
+    check_backups(findings, all_)
+    return findings, all_
+
+
+def cmd_show(args):
+    findings, all_ = run_checks()
+    if "--json" in args:
+        print(json.dumps({"findings": [{"kind": k, "text": t} for k, t in findings], "ok": [{"kind": k, "text": t} for k, t in all_]}, indent=1))
+        return 1 if findings else 0
+    if findings:
+        print(f"{len(findings)} thing{'s' if len(findings) != 1 else ''} to look at:")
+        for k, t in findings:
+            print(f"  ! {t}")
+    else:
+        print("nothing to worry about")
+    if "--all" in args:
+        print("checked:")
+        for k, t in all_:
+            print(f"  · {t}")
+    return 1 if findings else 0
+
+
+def cmd_tick(_):
+    findings, _ = run_checks(record=True)
+    seen = load(SEEN, {})
+    now = time.time()
+    new = [t for _, t in findings if now - seen.get(t, 0) > 6 * 86400]  # say it once a week, not every day
+    for t in new:
+        seen[t] = now
+    save(SEEN, {k: v for k, v in seen.items() if now - v < 30 * 86400})
+    if new:
+        try:
+            subprocess.run([os.path.join(ROOT, "bin", "notify"), "Sakura guardian", "; ".join(new)[:400]], capture_output=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    for t in new:
+        print(t)
+    return 0
+
+
+def cmd_on(args):
+    if not shutil.which("systemctl"):
+        sys.exit("sakura-guardian: no systemctl here; run `sakura-guardian tick` from your own scheduler")
+    units = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "systemd", "user")
+    os.makedirs(units, exist_ok=True)
+    if args[:1] == ["off"]:
+        subprocess.run(["systemctl", "--user", "disable", "--now", "sakura-guardian.timer"], capture_output=True)
+        print("the guardian is off")
+        return 0
+    at = args[0] if args and re.fullmatch(r"\d{1,2}:\d{2}", args[0]) else "09:00"
+    me = os.path.realpath(__file__)
+    with open(os.path.join(units, "sakura-guardian.service"), "w", encoding="utf-8") as f:
+        f.write(f"[Unit]\nDescription=Sakura guardian\n[Service]\nType=oneshot\nExecStart={me} tick\n")
+    with open(os.path.join(units, "sakura-guardian.timer"), "w", encoding="utf-8") as f:
+        f.write(f"[Unit]\nDescription=Sakura guardian, daily at {at}\n[Timer]\nOnCalendar=*-*-* {at}:00\nPersistent=true\nAccuracySec=5min\n[Install]\nWantedBy=timers.target\n")
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    subprocess.run(["systemctl", "--user", "enable", "--now", "sakura-guardian.timer"], capture_output=True)
+    cmd_tick([])
+    print(f"the guardian checks every day at {at}")
+    return 0
+
+
+def cmd_backup(args):
+    if len(args) < 2:
+        sys.exit("usage: sakura-guardian backup NAME PATH [--every DAYS]")
+    conf = load(CONF, {})
+    every = int(args[args.index("--every") + 1]) if "--every" in args and args.index("--every") + 1 < len(args) else 2
+    conf.setdefault("backups", {})[args[0]] = {"path": args[1], "every": every, **({"restored": conf["backups"][args[0]]["restored"]} if args[0] in conf.get("backups", {}) and conf["backups"][args[0]].get("restored") else {})}
+    save(CONF, conf)
+    print(f"watching backup {args[0]} at {args[1]}: late after {every} days without a change, and it wants a test-restore every {RESTORE_DAYS} days")
+    return 0
+
+
+def cmd_restored(args):
+    conf = load(CONF, {})
+    if not args or args[0] not in conf.get("backups", {}):
+        sys.exit("usage: sakura-guardian restored NAME (one of: " + ", ".join(conf.get("backups", {})) + ")")
+    conf["backups"][args[0]]["restored"] = time.time()
+    save(CONF, conf)
+    print(f"noted: {args[0]} test-restored today")
+    return 0
+
+
+def cmd_forget(args):
+    conf = load(CONF, {})
+    if args and conf.get("backups", {}).pop(args[0], None) is not None:
+        save(CONF, conf)
+        print(f"forgot backup {args[0]}")
+        return 0
+    sys.exit("usage: sakura-guardian forget NAME")
+
+
+def main(argv):
+    if argv[:1] in (["-h"], ["--help"]):
+        print(__doc__.strip())
+        return 0
+    cmds = {"tick": cmd_tick, "on": cmd_on, "backup": cmd_backup, "restored": cmd_restored, "forget": cmd_forget}
+    if argv and argv[0] in cmds:
+        return cmds[argv[0]](argv[1:]) or 0
+    return cmd_show(argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

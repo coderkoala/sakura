@@ -70,6 +70,8 @@ Hosts are in ~/.ssh/config. Connections are multiplexed, so many ssh calls are c
 - `sakura-recall "<words>"` searches past conversations.
 - `sakura-recap [today|yesterday|week|3d|DATE] [--full]` is the record of what you did: asks, commands, refusals, files changed, answers. Asked "what did you do", run it and answer from it, never from memory.
 - "forget X" → `sakura-memory remove`. Secrets are refused.
+- `sakura-guardian` is what's about to hurt on this machine (disks, certs, failed units, backups), from checks, not memory. Asked "is anything wrong with this box", run it.
+- `sakura-tonight` queues a job (sakura-worker's format on stdin) for the night shift; `sakura-tonight list|report`. When the user says "do it tonight" or "while I sleep", queue it there instead of doing it now.
 
 ## Big jobs
 Run one job in a fresh context, with no quoting to get wrong:

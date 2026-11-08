@@ -6,12 +6,28 @@
 #   ?fix  fix the command that just failed (words after it are a hint)
 #   ?undo put back everything Sakura's last turn changed (again: redo)
 #   ?recap what Sakura did today, from the record (yesterday, week, 3d, a date; --full)
+#   ?receipts  the same, every command (the audit trail)
+#   ?recall <words>  search past conversations
+#   ?tour [PATH] [question]  any codebase in five minutes, cited
+#   ?tonight <<'JOB' ... JOB   queue work for the night shift; ?tonight list / report
+#   ?teach [words]  turn what you just did in the shell into a kept tool or a scheduled job
+#   ?learn <topic>  a mentor's explanation, at your level
+#   ?guard  what's about to hurt: disks, certs, failed units, backups
 if command -v sakura-launch >/dev/null 2>&1; then
-    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' 2>/dev/null
+    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' 2>/dev/null
     alias '?'='sakura-launch'
     alias '?fix'='sakura-fix --shell $$'
     alias '?undo'='sakura-undo'
     alias '?recap'='sakura-recap'
+    alias '?receipts'='sakura-recap --full'
+    alias '?recall'='sakura-recall'
+    alias '?tour'='sakura-tour'
+    alias '?tonight'='sakura-tonight'
+    alias '?learn'='sakura-learn'
+    alias '?guard'='sakura-guardian'
+    # ?teach hands Sakura your recent commands, so there's nothing to paste.
+    __sakura_teach() { HISTTIMEFORMAT='' history 40 | sakura-teach --history - "$@"; }
+    alias '?teach'='__sakura_teach'
     alias '??'='sakura-launch --coordinator'
     alias '?remind'='pa remind'
     alias '?pa'='pa ask'
@@ -21,7 +37,7 @@ if command -v sakura-launch >/dev/null 2>&1; then
     __sakura_quote_line() {
         local head rest
         case "$READLINE_LINE" in
-            '?remind '*|'?pa '*|'?fix '*|'? '*|'?? '*) ;;
+            '?remind '*|'?pa '*|'?fix '*|'? '*|'?? '*|'?learn '*|'?teach '*|'?tour '*|'?recall '*) ;;
             *) return 0 ;;
         esac
         head=${READLINE_LINE%% *}

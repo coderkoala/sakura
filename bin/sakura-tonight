@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""sakura-tonight — a night shift. Queue work before bed; it runs while you sleep, each job checked, and in the morning
+there's a report with the diffs to approve. This is what the `?tonight` key runs.
+
+  ?tonight <<'JOB'          queue a job, in sakura-worker's format: header lines, a blank line, the brief
+  verify: make test
+  scope: src/*
+
+  make the parser accept trailing commas
+  JOB
+  ?tonight "words"          the same, a brief with no headers, in this directory
+  ?tonight list             what's queued, and what ran last night
+  ?tonight cancel ID
+  ?tonight at 01:30         when the shift starts (default 01:00); `?tonight at off` stops the timer
+  ?tonight report [DATE]    the morning report (default: the latest)
+  ?tonight run              run the queue now, in the foreground (what the timer runs)
+
+Each job runs as a worker in the directory it was queued from: no network, no commit and no mail credentials, whatever the
+job says, so nothing leaves the machine and nothing is committed until you've read the diff. Its changes stay in the
+working tree; `git diff` shows them, `git stash` or `?undo` puts them back. Jobs run one after another, each with
+its own time limit (default 1800 s). Stored in $SAKURA_TONIGHT_DIR, else ~/.sakura/tonight.
+"""
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+DIR = os.path.expanduser(os.environ.get("SAKURA_TONIGHT_DIR") or "~/.sakura/tonight")
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+QUEUE = os.path.join(DIR, "queue.json")
+REPORTS = os.path.join(DIR, "reports")
+DEFAULT_AT = "01:00"
+DEFAULT_TIMEOUT = 1800
+# What a night job never gets, however it's written: a route out of the machine or into history.
+DROPPED = {"network": "the network", "commit": "committing", "secrets": "credentials"}
+
+
+def load():
+    try:
+        with open(QUEUE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"at": DEFAULT_AT, "jobs": [], "seq": 0}
+
+
+def save(data):
+    os.makedirs(DIR, exist_ok=True)
+    tmp = QUEUE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=1)
+    os.replace(tmp, QUEUE)
+
+
+def parse_job(text):
+    """(settings, brief), like sakura-worker, minus what a night job can't have."""
+    settings, lines, dropped = {}, text.strip().splitlines(), []
+    i = 0
+    while i < len(lines):
+        m = re.match(r"(verify|scope|retries|timeout|network|commit|write|secrets)\s*:\s*(.*)$", lines[i].strip(), re.I)
+        if not m:
+            break
+        key = m.group(1).lower()
+        if key in DROPPED:
+            dropped.append(key)
+        else:
+            settings[key] = m.group(2).strip()
+        i += 1
+    return settings, "\n".join(lines[i:]).strip(), dropped
+
+
+def job_text(job):
+    head = "".join(f"{k}: {v}\n" for k, v in job["settings"].items())
+    return f"{head}\n{job['brief']}\n"
+
+
+def ensure_timer(at):
+    if os.environ.get("SAKURA_TONIGHT_NO_TIMER") or not shutil.which("systemctl"):
+        return
+    units = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "systemd", "user")
+    os.makedirs(units, exist_ok=True)
+    if at == "off":
+        subprocess.run(["systemctl", "--user", "disable", "--now", "sakura-tonight.timer"], capture_output=True)
+        return
+    me = os.path.realpath(__file__)
+    service = f"[Unit]\nDescription=Sakura night shift\n[Service]\nType=oneshot\nExecStart={me} run\nNice=10\n"
+    timer = (f"[Unit]\nDescription=Sakura night shift at {at}\n[Timer]\nOnCalendar=*-*-* {at}:00\nPersistent=true\n"
+             "AccuracySec=1min\n[Install]\nWantedBy=timers.target\n")
+    changed = False
+    for name, text in (("sakura-tonight.service", service), ("sakura-tonight.timer", timer)):
+        p = os.path.join(units, name)
+        try:
+            same = open(p, encoding="utf-8").read() == text
+        except OSError:
+            same = False
+        if not same:
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(text)
+            changed = True
+    if changed:
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    subprocess.run(["systemctl", "--user", "enable", "--now", "sakura-tonight.timer"], capture_output=True)
+
+
+def cmd_add(args):
+    text = " ".join(args).strip()
+    if not text and not sys.stdin.isatty():
+        text = sys.stdin.read()
+    settings, brief, dropped = parse_job(text)
+    if not brief:
+        sys.exit("sakura-tonight: no job given. Pipe one in sakura-worker's format, or give the brief as words.")
+    data = load()
+    data["seq"] = data.get("seq", 0) + 1
+    job = {"id": data["seq"], "added": dt.datetime.now().isoformat(timespec="seconds"), "dir": os.getcwd(),
+           "settings": settings, "brief": brief, "status": "queued"}
+    data["jobs"].append(job)
+    save(data)
+    ensure_timer(data.get("at", DEFAULT_AT))
+    print(f"queued #{job['id']} for tonight at {data.get('at', DEFAULT_AT)}, in {job['dir']}: {' '.join(brief.split())[:80]}")
+    if dropped:
+        print("  dropped: " + ", ".join(f"`{k}:` ({DROPPED[k]})" for k in dropped) + ". A night job gets none of these.")
+    if not settings.get("verify"):
+        print("  no `verify:` line, so it will pass as UNVERIFIED. Give it a command that exits 0 only when the job is done.")
+
+
+def cmd_list(_):
+    data = load()
+    queued = [j for j in data["jobs"] if j["status"] == "queued"]
+    print(f"night shift at {data.get('at', DEFAULT_AT)}; {len(queued)} queued")
+    for j in queued:
+        print(f"  #{j['id']}  {j['dir']}\n      {' '.join(j['brief'].split())[:100]}" + (f"\n      verify: {j['settings']['verify']}" if j["settings"].get("verify") else ""))
+    latest = latest_report()
+    if latest:
+        print(f"last report: {latest}")
+
+
+def cmd_cancel(args):
+    if not args:
+        sys.exit("usage: sakura-tonight cancel ID")
+    data = load()
+    before = len(data["jobs"])
+    data["jobs"] = [j for j in data["jobs"] if not (j["status"] == "queued" and str(j["id"]) == args[0])]
+    save(data)
+    print("cancelled" if len(data["jobs"]) < before else f"no queued job #{args[0]}")
+
+
+def cmd_at(args):
+    if not args or not (args[0] == "off" or re.fullmatch(r"\d{1,2}:\d{2}", args[0])):
+        sys.exit("usage: sakura-tonight at HH:MM | off")
+    at = args[0] if args[0] == "off" else f"{int(args[0].split(':')[0]):02d}:{args[0].split(':')[1]}"
+    data = load()
+    data["at"] = at
+    save(data)
+    ensure_timer(at)
+    print("the night shift is off" if at == "off" else f"the night shift starts at {at}")
+
+
+def latest_report():
+    try:
+        names = sorted(n for n in os.listdir(REPORTS) if n.endswith(".md"))
+    except OSError:
+        return None
+    return os.path.join(REPORTS, names[-1]) if names else None
+
+
+def cmd_report(args):
+    path = os.path.join(REPORTS, f"{args[0]}.md") if args else latest_report()
+    if not path or not os.path.exists(path):
+        sys.exit("sakura-tonight: no report yet")
+    sys.stdout.write(open(path, encoding="utf-8").read())
+
+
+def diff_of(cwd):
+    """What the working tree shows after the job, for the morning: stat, and the diff itself when it's small."""
+    try:
+        stat = subprocess.run(["git", "-C", cwd, "status", "--short"], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return "", ""
+    if not stat.strip():
+        return "", ""
+    try:
+        diff = subprocess.run(["git", "-C", cwd, "--no-pager", "diff", "--stat"], capture_output=True, text=True, timeout=30).stdout
+        full = subprocess.run(["git", "-C", cwd, "--no-pager", "diff"], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        diff, full = "", ""
+    return stat + diff, full if len(full) < 12000 else full[:12000] + "\n… (truncated; run git diff there)"
+
+
+def run_job(job):
+    timeout = int(job["settings"].get("timeout", DEFAULT_TIMEOUT))
+    env = dict(os.environ)
+    env.pop("SAKURA_COORDINATOR", None)
+    env.pop("SAKURA_WORKER", None)
+    if not os.path.isdir(job["dir"]):
+        return "FAILED", f"its directory is gone: {job['dir']}", "", ""
+    try:
+        r = subprocess.run([os.path.join(ROOT, "bin", "sakura-worker")], input=job_text(job), cwd=job["dir"], env=env,
+                           capture_output=True, text=True, timeout=timeout * 2 + 900)
+        out = r.stdout
+    except subprocess.TimeoutExpired:
+        out = "WORKER FAILED\nwhy: it ran out of time and was stopped"
+    m = re.search(r"^WORKER (\w+)", out, re.M)
+    status = m.group(1) if m else "FAILED"
+    stat, full = diff_of(job["dir"])
+    return status, out.strip(), stat, full
+
+
+def notify(title, body):
+    try:
+        subprocess.run([os.path.join(ROOT, "bin", "notify"), title, body], capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def cmd_run(_):
+    data = load()
+    queued = [j for j in data["jobs"] if j["status"] == "queued"]
+    if not queued:
+        print("nothing queued")
+        return
+    os.makedirs(REPORTS, exist_ok=True)
+    started = dt.datetime.now()
+    path = os.path.join(REPORTS, f"{started:%Y-%m-%d}.md")
+    lines = [f"# Night shift, {started:%A %Y-%m-%d}, started {started:%H:%M}", "",
+             "Each job ran as a worker with no network, no commit and no credentials. Changes are in the working tree, uncommitted: "
+             "read the diff, then commit it or `git checkout -- .` there.", ""]
+    passed = 0
+    for job in queued:
+        t0 = time.time()
+        print(f"== #{job['id']} in {job['dir']}: {' '.join(job['brief'].split())[:80]}", flush=True)
+        status, out, stat, full = run_job(job)
+        took = int(time.time() - t0)
+        job.update(status=status.lower(), ran=dt.datetime.now().isoformat(timespec="seconds"), took=took, report=out[-3000:])
+        save(data)
+        passed += status in ("PASSED", "UNVERIFIED")
+        lines += [f"## #{job['id']}: {status} in {took // 60} min, {job['dir']}", "", "```", job["brief"], "```", ""]
+        lines += ["Worker:", "```", out[-3000:], "```", ""]
+        if stat:
+            lines += ["Changes in the working tree:", "```", stat.rstrip(), "```", ""]
+            if full:
+                lines += ["<details><summary>diff</summary>", "", "```diff", full.rstrip(), "```", "</details>", ""]
+        else:
+            lines += ["No change in the working tree." + (" (It's not a git repo, so there's nothing to compare.)" if not os.path.isdir(os.path.join(job["dir"], ".git")) else ""), ""]
+        print(f"   {status} in {took}s", flush=True)
+    done = dt.datetime.now()
+    lines.insert(1, f"\n{passed} of {len(queued)} passed. Finished {done:%H:%M}.")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    data["jobs"] = [j for j in data["jobs"] if j["status"] == "queued"] + [j for j in data["jobs"] if j["status"] != "queued"][-50:]
+    save(data)
+    notify("Night shift", f"{passed} of {len(queued)} passed. ?tonight report")
+    print(f"report: {path}")
+
+
+def main(argv):
+    if argv[:1] in (["-h"], ["--help"]):
+        print(__doc__.strip())
+        return 0
+    cmds = {"list": cmd_list, "cancel": cmd_cancel, "at": cmd_at, "report": cmd_report, "run": cmd_run, "add": cmd_add}
+    if argv and argv[0] in cmds:
+        cmds[argv[0]](argv[1:])
+    else:
+        cmd_add(argv)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

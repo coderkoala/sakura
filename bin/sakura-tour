@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""sakura-tour [PATH] [question...] — any codebase in five minutes. This is what the `?tour` key runs.
+
+It gathers the facts first, with no model: the languages, the manifests and what they declare, the entry points, how to
+run and test it, where the most-changed files are, and the recent history. Then Sakura reads what matters and walks you
+through it, citing files and lines, and answers your question if you asked one.
+  --print        print the gathered facts and stop
+  --exec         one-shot, no TUI; prints the walkthrough (evals, scripts)
+  --json         with --exec, print the run as JSON events
+"""
+import collections
+import json
+import os
+import re
+import subprocess
+import sys
+
+MANIFESTS = {
+    "package.json": "node", "composer.json": "php", "pyproject.toml": "python", "setup.py": "python", "requirements.txt": "python",
+    "Cargo.toml": "rust", "go.mod": "go", "pom.xml": "java", "build.gradle": "java", "build.gradle.kts": "kotlin", "Gemfile": "ruby",
+    "mix.exs": "elixir", "CMakeLists.txt": "c/c++", "Makefile": "make", "Dockerfile": "docker", "docker-compose.yml": "compose",
+    "compose.yaml": "compose", "pubspec.yaml": "dart", "Package.swift": "swift", "deno.json": "deno", "flake.nix": "nix",
+}
+DOCS = ("README.md", "README.rst", "README", "readme.md", "CONTRIBUTING.md", "AGENTS.md", "CLAUDE.md", "ARCHITECTURE.md", "docs/README.md")
+RUN_FILES = ("Makefile", "justfile", "Taskfile.yml", "package.json", "composer.json", "pyproject.toml", "Cargo.toml", "go.mod", "docker-compose.yml", "compose.yaml")
+SKIP_DIRS = {".git", "node_modules", "vendor", "target", "dist", "build", ".venv", "venv", "__pycache__", ".next", ".cache", ".idea", ".tox", "storage", "coverage"}
+EXT_LANG = {".py": "Python", ".js": "JavaScript", ".ts": "TypeScript", ".tsx": "TypeScript", ".jsx": "JavaScript", ".php": "PHP", ".rs": "Rust",
+            ".go": "Go", ".java": "Java", ".kt": "Kotlin", ".rb": "Ruby", ".vue": "Vue", ".svelte": "Svelte", ".c": "C", ".h": "C", ".cpp": "C++",
+            ".cc": "C++", ".cs": "C#", ".swift": "Swift", ".sh": "Shell", ".bash": "Shell", ".sql": "SQL", ".ex": "Elixir", ".exs": "Elixir",
+            ".dart": "Dart", ".lua": "Lua", ".scala": "Scala", ".hs": "Haskell", ".nix": "Nix", ".tf": "Terraform", ".md": "Markdown"}
+ENTRY_NAMES = {"main.py", "app.py", "manage.py", "wsgi.py", "asgi.py", "cli.py", "__main__.py", "index.js", "index.ts", "server.js", "server.ts",
+               "main.js", "main.ts", "app.js", "app.ts", "main.go", "main.rs", "lib.rs", "artisan", "index.php", "Program.cs", "main.c", "main.cpp"}
+LIMIT_FILES = 40000
+
+
+def sh(cmd, cwd, timeout=20):
+    try:
+        return subprocess.run(cmd, cwd=cwd, shell=True, capture_output=True, text=True, timeout=timeout).stdout
+    except (subprocess.SubprocessError, OSError):
+        return ""
+
+
+def walk(root):
+    """(lang -> file count, [manifests], [entry points], total files, [top dirs]). Bounded, so a monorepo doesn't take a minute."""
+    langs, manifests, entries, total, top = collections.Counter(), [], [], 0, []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith("."))
+        rel = os.path.relpath(dirpath, root)
+        if rel == ".":
+            top = [d for d in dirnames]
+        for name in filenames:
+            total += 1
+            if total > LIMIT_FILES:
+                return langs, manifests, entries, total, top
+            ext = os.path.splitext(name)[1].lower()
+            if ext in EXT_LANG:
+                langs[EXT_LANG[ext]] += 1
+            path = name if rel == "." else os.path.join(rel, name)
+            if name in MANIFESTS and rel.count(os.sep) < 2:
+                manifests.append(path)
+            if name in ENTRY_NAMES and rel.count(os.sep) < 3:
+                entries.append(path)
+    return langs, manifests, entries, total, top
+
+
+def head(path, lines=40, chars=2500):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = "".join(f.readline() for _ in range(lines))
+        return text[:chars]
+    except OSError:
+        return ""
+
+
+def scripts_of(root, name):
+    """The runnable targets a manifest declares: npm/composer scripts, Makefile targets, pyproject scripts."""
+    path = os.path.join(root, name)
+    text = head(path, lines=400, chars=40000)
+    if not text:
+        return []
+    if name in ("package.json", "composer.json"):
+        try:
+            return sorted((json.loads(text).get("scripts") or {}).keys())[:20]
+        except ValueError:
+            return []
+    if name in ("Makefile", "justfile"):
+        return sorted(set(re.findall(r"^([a-zA-Z][\w.-]*)\s*:(?!=)", text, re.M)))[:25]
+    if name == "pyproject.toml":
+        return sorted(set(re.findall(r"^\[tool\.([\w.-]+)", text, re.M)))[:15]
+    if name == "Cargo.toml":
+        return sorted(set(re.findall(r'^\[\[bin\]\]\s*\nname\s*=\s*"([^"]+)"', text, re.M)))[:15]
+    return []
+
+
+def git_facts(root):
+    if not os.path.isdir(os.path.join(root, ".git")) and not sh("git rev-parse --git-dir", root).strip():
+        return {}
+    log = sh("git --no-pager log --no-merges --date=short --format='%ad %s' -n 12", root).strip()
+    churn = "\n".join(" ".join(l.split()) for l in sh("git --no-pager log --no-merges --name-only --format= -n 400 2>/dev/null | grep -v '^$' | sort | uniq -c | sort -rn | head -12", root).splitlines())
+    authors = sh("git --no-pager shortlog -sn --no-merges HEAD 2>/dev/null | head -5", root)
+    first = sh("git --no-pager log --reverse --date=short --format=%ad | head -1", root).strip()
+    count = sh("git rev-list --count HEAD 2>/dev/null", root).strip()
+    branch = sh("git rev-parse --abbrev-ref HEAD 2>/dev/null", root).strip()
+    return {"log": log, "churn": churn.strip(), "authors": authors.strip(), "first": first, "count": count, "branch": branch}
+
+
+def gather(root):
+    langs, manifests, entries, total, top = walk(root)
+    parts = [f"Repository: {root}", f"Files: {total}{'+' if total > LIMIT_FILES else ''}; top-level: {', '.join(top[:30]) or '(flat)'}"]
+    if langs:
+        parts.append("Languages: " + ", ".join(f"{l} ({n})" for l, n in langs.most_common(8)))
+    if manifests:
+        parts.append("Manifests: " + ", ".join(manifests[:20]))
+    if entries:
+        parts.append("Likely entry points: " + ", ".join(entries[:15]))
+    runs = []
+    for name in RUN_FILES:
+        if os.path.exists(os.path.join(root, name)):
+            s = scripts_of(root, name)
+            if s:
+                runs.append(f"{name}: {', '.join(s)}")
+    if runs:
+        parts.append("How it's run and tested (declared targets):\n  " + "\n  ".join(runs))
+    g = git_facts(root)
+    if g:
+        parts.append(f"Git: {g['count']} commits since {g['first']}, branch {g['branch']}\nTop authors:\n{g['authors']}")
+        if g["churn"]:
+            parts.append("Most changed files (last 400 commits), count then path:\n" + g["churn"])
+        if g["log"]:
+            parts.append("Recent commits:\n" + g["log"])
+    for name in DOCS:
+        text = head(os.path.join(root, name), lines=60, chars=3000)
+        if text.strip():
+            parts.append(f"--- {name} (first lines) ---\n{text.rstrip()}")
+            break
+    for name in manifests[:3]:
+        if name.endswith(("package.json", "composer.json", "pyproject.toml", "Cargo.toml", "go.mod")):
+            parts.append(f"--- {name} (first lines) ---\n{head(os.path.join(root, name), lines=45, chars=1800).rstrip()}")
+    return "\n\n".join(parts)
+
+
+def brief(facts, question):
+    ask = (f"My question: {question}\nAnswer it first, with file:line citations, then the shorter tour below." if question else
+           "Walk me through this codebase.")
+    return "\n".join([
+        "Give me a tour of this codebase, as the senior engineer who knows it would in five minutes.",
+        "", ask, "",
+        "Facts gathered by a script (no model), so they're reliable; read the files they point at before you say what they do:",
+        "```", facts, "```", "",
+        "Cover, in this order, with a `path:line` citation for every claim about the code:",
+        "1. What it is and who it's for, in two lines.",
+        "2. The shape: the main parts and how a request or run flows through them (name the files).",
+        "3. How to run it and run its tests, with the exact commands from the manifests above.",
+        "4. Where the bodies are buried: the most-changed files, the biggest ones, TODO/FIXME/HACK comments (`rg -n 'TODO|FIXME|HACK|XXX'`), "
+        "anything with no tests, and anything odd you saw.",
+        "5. Where to start reading, three files in order.",
+        "Read with `rg -n` and `view_file`; never dump whole files. Only say what you read: a file you didn't open gets no description. "
+        "Keep it to about 40 lines.",
+    ])
+
+
+def main(argv):
+    mode, json_out, words = "tui", False, []
+    for a in argv:
+        if a in ("--exec", "--print"):
+            mode = a[2:]
+        elif a == "--json":
+            json_out = True
+        elif a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        else:
+            words.append(a)
+    root = os.getcwd()
+    words = " ".join(words).split()  # the shell key quotes the whole line as one word
+    if words and os.path.isdir(os.path.expanduser(words[0])):
+        root = os.path.realpath(os.path.expanduser(words.pop(0)))
+    question = " ".join(words).strip()
+    facts = gather(root)
+    if mode == "print":
+        print(facts)
+        return 0
+    text = brief(facts, question)
+    print(f"sakura: touring {root}", file=sys.stderr)
+    os.chdir(root)
+    launch = ["sakura-launch"]
+    if mode == "exec":
+        launch += ["--exec", "--skip-git-repo-check"] + (["--json"] if json_out else []) + [text]
+    else:
+        launch += [text]
+    try:
+        os.execvp(launch[0], launch)
+    except OSError as e:
+        print(f"sakura-tour: couldn't start sakura-launch: {e}", file=sys.stderr)
+        return 127
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

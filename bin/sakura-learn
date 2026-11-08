@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""sakura-learn <topic or question> — a mentor, not an answer machine. This is what the `?learn` key runs.
+
+Explains why as well as what, at your level, with a real example on this machine where it can, and remembers what
+you've learned (sakura-memory), so the next explanation starts where you are.
+  --print   print the brief and stop
+  --exec    one-shot, no TUI (evals, scripts)
+  --json    with --exec, print the run as JSON events
+"""
+import os
+import sys
+
+
+def brief(topic):
+    return "\n".join([
+        f"Teach me: {topic}",
+        "",
+        "You're my mentor, the senior colleague who explains things at 2am without making me feel small. Rules:",
+        "- Start from what I already know: my saved memory (above, if any) says what I work on and what I've learned before. "
+        "Pitch it one level above that, not at a beginner and not at an expert, and say which level you chose in half a line.",
+        "- Why before what. Give the mental model first, then the mechanics, then the one mistake everyone makes.",
+        "- Show, don't tell: where it applies to this machine or this repo, run a real, harmless command here and explain its output, "
+        "instead of a made-up example. Reading commands only; don't change anything.",
+        "- Anything that changes over time (versions, defaults, best practice) gets looked up, not remembered.",
+        "- End with: one thing to try myself, and one question that checks I got it. Keep the whole thing under 40 lines.",
+        "- Then, in one line, save what I've now learned: `sakura-memory add user \"knows <topic>, at <level>\"`, replacing an earlier "
+        "line about the same topic if there is one.",
+    ])
+
+
+def main(argv):
+    mode, json_out, words = "tui", False, []
+    for a in argv:
+        if a in ("--exec", "--print"):
+            mode = a[2:]
+        elif a == "--json":
+            json_out = True
+        elif a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        else:
+            words.append(a)
+    topic = " ".join(words).strip()
+    if not topic:
+        print("usage: sakura-learn <topic or question>", file=sys.stderr)
+        return 2
+    text = brief(topic)
+    if mode == "print":
+        print(text)
+        return 0
+    launch = ["sakura-launch"]
+    if mode == "exec":
+        launch += ["--exec", "--skip-git-repo-check"] + (["--json"] if json_out else []) + [text]
+    else:
+        launch += [text]
+    try:
+        os.execvp(launch[0], launch)
+    except OSError as e:
+        print(f"sakura-learn: couldn't start sakura-launch: {e}", file=sys.stderr)
+        return 127
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

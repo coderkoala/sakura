@@ -53,7 +53,7 @@ if [ -L "$SAKURA_HOME/AGENTS.md" ]; then rm -f "$SAKURA_HOME/AGENTS.md"; fi
 } > "$SAKURA_HOME/AGENTS.md"
 link "$ROOT/rules" "$SAKURA_HOME/rules"
 link "$ROOT/skills" "$HOME/.agents/skills"
-for tool in web_search wikipedia fetch_url curated_search consult sakura-model sakura-guard-install sakura-launch sakura-worker sakura-memory sakura-recall sakura-tool sakura-browser sakura-web-setup live view_file edit_file rag sakura-mail-setup pa sakura-fix sakura-undo sakura-recap; do
+for tool in web_search wikipedia fetch_url curated_search consult sakura-model sakura-guard-install sakura-launch sakura-worker sakura-memory sakura-recall sakura-tool sakura-browser sakura-web-setup live view_file edit_file rag sakura-mail-setup pa sakura-fix sakura-undo sakura-recap sakura-tour sakura-tonight sakura-teach sakura-learn sakura-guardian; do
     ln -sf "$ROOT/bin/$tool" "$HOME/.local/bin/$tool"
 done
 

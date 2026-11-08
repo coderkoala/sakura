@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""sakura-teach [words...] — do it once, never again. This is what the `?teach` key runs.
+
+Point at what you just did in the shell, and Sakura turns it into a tool it keeps (`sakura-tool keep`, so the tool has
+to pass a check before it's kept) or, when it's something to do on a schedule, a `pa job`. The shell key passes your
+recent commands; say in words which ones, or what the tool should be called and do.
+  --history FILE   the recent shell commands, one per line (`-` for stdin; the key passes them this way)
+  --last N         how many of them to show Sakura (default 25)
+  --print          print the brief and stop
+  --exec           one-shot, no TUI; prints the answer (evals, scripts)
+  --json           with --exec, print the run as JSON events
+"""
+import os
+import re
+import sys
+
+NOISE = re.compile(r"^\s*(?:\?|ls|cd|clear|exit|history|pwd|sakura-\S+|fg|bg|jobs)\b|^\s*$")
+
+
+def read_history(path, last):
+    try:
+        text = sys.stdin.read() if path == "-" else open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return []
+    lines = []
+    for line in text.splitlines():
+        line = re.sub(r"^\s*\d+\s+", "", line.rstrip())
+        if NOISE.match(line):
+            continue
+        if lines and lines[-1] == line:
+            continue
+        lines.append(line)
+    return lines[-last:]
+
+
+def brief(commands, words):
+    parts = ["Make what I just did repeatable, so I never do it by hand again."]
+    if words:
+        parts.append(f"From me: {words}")
+    if commands:
+        parts += ["", "My recent shell commands, oldest first (the ones that matter are usually the last few):", "```"] + commands + ["```"]
+    else:
+        parts += ["", "No shell history came through, so work from what I said above."]
+    parts += [
+        "",
+        "Decide which it is, and say so in one line:",
+        "- Something I'll run again by hand, with input that varies → a kept tool. Write a small script (bash or python3, no new "
+        "dependencies), test it on the real input here, then keep it with `sakura-tool keep NAME ./FILE --about \"one line\" <<'CHECK'`, "
+        "where the check pipes a tiny known input through NAME and greps for the known output. The check must fail without the tool. "
+        "Pick a short name that isn't already a command (`command -v NAME`). Secrets never go into a tool: read them from the "
+        "environment or a file the user names.",
+        "- Something that should happen on a schedule, with nobody at the keyboard → `pa job every ...: <the brief>` or `pa watch ...` "
+        "(`pa --help`), not a cron job of your own.",
+        "Finish by showing the kept tool's name and how to call it (or the pa line), and the check's output. Don't ask me to confirm "
+        "the name or the check; make the standard call and tell me what you chose.",
+    ]
+    return "\n".join(parts)
+
+
+def main(argv):
+    mode, json_out, history, last, words = "tui", False, None, 25, []
+    it = iter(argv)
+    for a in it:
+        if a == "--history":
+            history = next(it, None)
+        elif a == "--last":
+            last = int(next(it, "25"))
+        elif a == "--json":
+            json_out = True
+        elif a in ("--exec", "--print"):
+            mode = a[2:]
+        elif a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        else:
+            words.append(a)
+    commands = read_history(history, last) if history else []
+    if history == "-" and mode == "tui":
+        try:  # the TUI needs the terminal back after the history came through stdin
+            os.dup2(os.open("/dev/tty", os.O_RDONLY), 0)
+        except OSError:
+            pass
+    text = brief(commands, " ".join(words).strip())
+    if mode == "print":
+        print(text)
+        return 0
+    launch = ["sakura-launch"]
+    if mode == "exec":
+        launch += ["--exec", "--skip-git-repo-check"] + (["--json"] if json_out else []) + [text]
+    else:
+        launch += [text]
+    try:
+        os.execvp(launch[0], launch)
+    except OSError as e:
+        print(f"sakura-teach: couldn't start sakura-launch: {e}", file=sys.stderr)
+        return 127
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
