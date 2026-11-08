@@ -24,6 +24,7 @@
 #   ?explain [question]  explain what's on the screen (tmux) or in the pipe:  make 2>&1 | ?explain
 #   ?how what you want   the one command, printed, not run (-r runs it after a y/n)
 #   cmd | ? "question"   anything piped into ? arrives under the request
+#   sakura-status   one line for tmux's status bar: driver, night queue, offers, guardian
 #   ?go [request]  a session that doesn't stop to ask (sakura-trust on makes every ? like this)
 if command -v sakura-launch >/dev/null 2>&1; then
     unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' '?pr' '?review' '?try' '?hear' '?morning' '?red' '?decide' '?why' '?setup' '?on' '?explain' '?how' 2>/dev/null
@@ -76,6 +77,13 @@ if command -v sakura-launch >/dev/null 2>&1; then
     if [[ $- == *i* ]] && [ -n "${BASH_VERSION:-}" ]; then
         bind -x '"\C-x\C-q": __sakura_quote_line' 2>/dev/null
         bind '"\C-m": "\C-x\C-q\C-j"' 2>/dev/null
+        # ?on and logs complete host names from ssh's config; ?tonight, ?guard and pa complete their subcommands.
+        __sakura_hosts() { awk 'tolower($1)=="host"{for(i=2;i<=NF;i++) if($i !~ /[*?]/) print $i}' ~/.ssh/config ~/.ssh/config.d/* "${DOTFILES:-$HOME/dotfiles}/ssh/hosts" 2>/dev/null | sort -u; }
+        _sakura_host_comp() { COMPREPLY=($(compgen -W "$(__sakura_hosts)" -- "${COMP_WORDS[COMP_CWORD]}")); }
+        complete -F _sakura_host_comp '?on' sakura-on logs 2>/dev/null
+        complete -W 'list cancel at report run' '?tonight' sakura-tonight 2>/dev/null
+        complete -W 'on off tick backup restored forget --all --json' '?guard' sakura-guardian 2>/dev/null
+        complete -W 'remind list cancel brief standup roles todo clock log watch job autoreply mail offer yes no listen pending' pa 2>/dev/null
         # Whatever came due while no notification could reach you.
         command -v pa >/dev/null 2>&1 && pa pending 2>/dev/null
         # The day on one screen, once a day, when the first shell of the day opens.

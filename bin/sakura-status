@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# sakura-status — one line for a tmux status bar or a prompt: the driver, the night queue, the guardian, offers waiting.
+#   set -g status-right '#(sakura-status)'      in ~/.tmux.conf (tmux reruns it every status-interval)
+#   sakura-status --long                        the same with words
+set -u
+home="${SAKURA_HOME:-$HOME/.sakura}"
+drv="·"; curl -fsS -m 1 http://127.0.0.1:8091/health >/dev/null 2>&1 && drv="●"
+q=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(sum(1 for j in d['jobs'] if j['status']=='queued'))" "${SAKURA_TONIGHT_DIR:-$home/tonight}/queue.json" 2>/dev/null || echo 0)
+offers=$(python3 -c "import json,sys,time;d=json.load(open(sys.argv[1]));print(sum(1 for o in d if not o.get('done') and o['expires']>time.time()))" "${SAKURA_PA_DIR:-$home/pa}/offers.json" 2>/dev/null || echo 0)
+g=$(cat "${SAKURA_GUARDIAN_DIR:-$home/guardian}/seen.json" 2>/dev/null | python3 -c "import json,sys,time;d=json.load(sys.stdin);print(sum(1 for v in d.values() if time.time()-v<86400))" 2>/dev/null || echo 0)
+if [ "${1:-}" = --long ]; then
+    echo "driver $([ "$drv" = "●" ] && echo up || echo down) · $q queued tonight · $offers offers waiting · $g guardian findings today"
+else
+    out="🌸$drv"; [ "$q" != 0 ] && out="$out ☾$q"; [ "$offers" != 0 ] && out="$out ?$offers"; [ "$g" != 0 ] && out="$out !$g"
+    echo "$out"
+fi

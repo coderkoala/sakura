@@ -1172,15 +1172,25 @@ def sec_team(s):
     return out
 
 
-SECTIONS = {"schedule": ("Reminders", sec_schedule), "calendar": ("Calendar", sec_calendar), "todo": ("To-do", sec_todo), "mail": ("Mail", sec_mail), "weather": ("Weather", sec_weather),
+def sec_errors(s):
+    """The machine's errors in the last day, grouped, from `logs` (no model)."""
+    try:
+        out = subprocess.run([os.path.join(ROOT, "bin", "logs"), "--since", "24h"], capture_output=True, text=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    rows = [l.split("\t") for l in out.splitlines()[1:] if "\t" in l]
+    return [f"{r[0]}× {r[3]}: {r[4][:70]}" for r in rows[:4]]
+
+
+SECTIONS = {"schedule": ("Reminders", sec_schedule), "calendar": ("Calendar", sec_calendar), "errors": ("Errors (24h, `logs`)", sec_errors), "todo": ("To-do", sec_todo), "mail": ("Mail", sec_mail), "weather": ("Weather", sec_weather),
             "news": ("News", sec_news), "repos": ("Repos", sec_repos), "prs": ("Pull requests and issues", sec_prs), "ci": ("Failed builds", sec_ci), "vulns": ("Vulnerable dependencies", sec_vulns),
             "system": ("This machine", sec_system), "certs": ("Certificates", sec_certs), "support": ("End of support", sec_support), "exploited": ("Being exploited", sec_exploited),
             "papers": ("New papers", sec_papers), "writing": ("Writing", sec_writing), "time": ("Time", sec_time), "team": ("Team", sec_team)}
 BASE = ["schedule", "calendar", "todo", "mail", "weather"]
 ROLES = {
     "everyone": (BASE + ["news"], "reminders, calendar, to-do, mail, weather, news on your topics"),
-    "developer": (["repos", "prs", "ci", "vulns"], "unpushed work, reviews waiting, failed builds, vulnerable dependencies"),
-    "sysadmin": (["system", "certs", "support"], "disks, failed services, updates, certificates, end of support"),
+    "developer": (["repos", "prs", "ci", "vulns", "errors"], "unpushed work, reviews waiting, failed builds, vulnerable dependencies"),
+    "sysadmin": (["system", "errors", "certs", "support"], "disks, failed services, updates, certificates, end of support"),
     "security": (["exploited", "vulns", "certs"], "what's being exploited in your products, vulnerable dependencies, certificates"),
     "manager": (["team", "prs", "time"], "PRs going quiet, reviews waiting on you, where the time went"),
     "student": (["papers"], "deadlines come from to-do, classes from calendar, and papers on your topics"),
