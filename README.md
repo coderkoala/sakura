@@ -143,6 +143,12 @@ See [ROADMAP.md](ROADMAP.md): where it stands, what comes next, and what it's ai
 python3 evals/run.py              # 31 cases, graded against live sources
 python3 evals/ssh_chain.py        # ssh, pull and deploy on a throwaway container, graded inside it (needs docker)
 python3 evals/coordinator.py      # workers and a coordinator session, graded by the repo's real state
+python3 evals/wall.py             # the sandbox around workers, graded by a canary server and the disk
+python3 evals/fix.py              # ?fix, graded by the command working afterwards and a canary for the one it mustn't rerun
+python3 evals/undo.py             # ?undo, graded by file hashes
+python3 evals/tour.py             # ?tour, graded by its citations existing and the real test command
+python3 evals/tonight.py          # the night shift, graded by disk, git, a canary and the report
+python3 evals/teach.py            # ?teach, graded by sakura-tool's gate and running the tool
 ```
 
 ## Install

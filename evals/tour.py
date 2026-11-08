@@ -60,11 +60,18 @@ def tour(d, *words, timeout=900):
     return commands, answer
 
 
+def resolve(name, d):
+    """The file a citation means: the path as given, or a bare file name that's unique in the tree."""
+    if os.path.exists(os.path.join(d, name)):
+        return name
+    hits = [os.path.relpath(os.path.join(r, f), d) for r, _, fs in os.walk(d) for f in fs if f == os.path.basename(name) and "/.git/" not in r + "/"]
+    return hits[0] if len(hits) == 1 else None
+
+
 def cited(answer, d):
-    """(files cited that exist, files cited that don't). A citation is path or path:line."""
+    """(files cited that exist, files cited that don't). A citation is path or path:line; a bare name counts if it's unique."""
     names = set(re.findall(r"(?<![\w/])((?:[\w.-]+/)*[\w-]+\.(?:py|md|txt|toml|json|sh|yml|yaml|cfg|ini))(?::\d+)?", answer))
-    names = {n for n in names if n not in ("README.md",) or True}
-    exist = {n for n in names if os.path.exists(os.path.join(d, n))}
+    exist = {n for n in names if resolve(n, d)}
     return exist, names - exist
 
 
@@ -72,9 +79,10 @@ def line_citations_true(answer, d):
     """Every path:line cited points at a line that exists and isn't blank."""
     ok = bad = 0
     for path, line in re.findall(r"((?:[\w.-]+/)*[\w-]+\.py):(\d+)", answer):
+        real = resolve(path, d)
         try:
-            lines = open(os.path.join(d, path)).read().splitlines()
-        except OSError:
+            lines = open(os.path.join(d, real)).read().splitlines()
+        except (OSError, TypeError):
             bad += 1
             continue
         n = int(line)

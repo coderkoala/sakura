@@ -6,6 +6,8 @@
 #   --coordinator   a session that plans and hands the work to disposable workers (the `??` key)
 #   --exec ARGS     a one-shot `sakura exec` on the same model (how sakura-worker runs)
 set -u
+# sudo -A inside Sakura: the askpass is Sakura's, so it's set here, not in every shell.
+export SUDO_ASKPASS="${SUDO_ASKPASS:-$HOME/.config/sakura/askpass}"
 mode=tui
 case "${1:-}" in
     --coordinator) mode=coordinator; shift; export SAKURA_COORDINATOR=1 ;;

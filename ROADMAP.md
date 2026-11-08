@@ -23,7 +23,7 @@ Measured on one machine with an 8 GB GPU. Results vary between runs, so treat th
 | Reminders, briefs, watches, auto-reply | Workers with `network: yes` (keys, agents and sockets hidden unless the job names them) |
 | A sandbox around workers: no network, writes only where the job allows | |
 | `?fix`, `?undo`, `?recap` | `?tonight` on a real night's queue (the eval runs one) |
-| `?tour`, `?teach` (one eval case each) | `?learn` (no eval: nothing but a reader can grade a lesson) |
+| `?tour` (9/9), `?tonight` (11/11) | `?teach` (1/3: it writes the script, then stops before `sakura-tool keep`) and `?learn` (no eval: nothing but a reader can grade a lesson) |
 | The guardian's checks (deterministic) | The guardian's disk projection, until it has a fortnight of samples |
 
 ## Next: make what exists trustworthy
@@ -67,6 +67,28 @@ Shipped: **`?learn`: a mentor, not an answer machine.** See the README.
 **Meetings and voice.** Local transcription into notes, decisions and reminders. Speak to it when your hands are full.
 
 **For everyone who isn't a developer.** Forms, letters, tax paperwork and small-business records, in the language you think in, starting with English and नेपाली, with the documents staying at home.
+
+## Next abilities (2026-11-08 brainstorm, in build order)
+
+Not more harnesses: things it can't do yet.
+1. **Hardware economy in `sakura-model`:** keep the system prompt's KV cache warm between turns; unload the driver after 20 idle minutes and reload on the next `?`; refuse a long eval or night job when the GPU is hot or has thrown an Xid this boot.
+2. **Eyes:** `look FILE` with a local vision model that fits 8 GB: screenshots, error dialogs, scans, receipts, whiteboards.
+3. **`?pr` and `?review`:** a PR from the branch with a body from the diff and commits; findings on a PR's diff. All through `gh`.
+4. **Voice:** whisper.cpp in, Piper out; meetings into notes, decisions and reminders.
+5. **The ntfy reply loop:** answer a push with "do it" and `pa` runs it; approve the night shift from bed.
+6. **Long-running processes:** start a server, tail it, wake Sakura on a pattern.
+7. **Structured data:** DuckDB on CSVs and logs as a one-line tool.
+8. **The fleet:** what each machine is for, which has the GPU or RAM free, run it there; morning check that they're up.
+9. **Clipboard in and out** (`wl-paste`, `wl-copy`): "fix the stack trace on my clipboard".
+10. **`?red`:** a failing test, or one written from a sentence, iterated to green with a small diff.
+11. **Schema snapshot per repo:** "which tables reference customer_id" without grepping migrations.
+12. **`?try`:** a throwaway directory in the repo's language, runs a snippet, keeps nothing.
+13. **Offline docs packs into `rag`:** Laravel 13, PHP 8.5, Vue 3, answers citing the right version with no network.
+14. **Worktree workers:** each worker in its own `git worktree`, so two lanes are safe.
+15. **Morning page:** brief, guardian, last night's report and the calendar on one screen at the day's first `?`.
+16. **Mail that acts:** triage rules learned from you; calendar invites accepted or declined.
+17. **Lazy skills and per-topic tool reference, a 2b router for classification, so the 9b and the driver wake only for real work.**
+18. **Receipts and forms:** OCR into a ledger; tax paperwork in नेपाली and English from templates.
 
 ## Not doing
 
