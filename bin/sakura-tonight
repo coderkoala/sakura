@@ -221,6 +221,16 @@ def cmd_run(_):
     if not queued:
         print("nothing queued")
         return
+    # A hot card, or one that has thrown a fatal Xid, shouldn't start hours of work: say so and keep the queue.
+    try:
+        g = subprocess.run([os.path.join(ROOT, "bin", "sakura-model"), "gpu", "--check"], capture_output=True, text=True, timeout=60)
+        if g.returncode and "no NVIDIA GPU" not in g.stdout:
+            why = g.stdout.strip().splitlines()[-1]
+            print(f"night shift not started: {why}")
+            notify("Night shift", f"not started: {why}")
+            return
+    except (OSError, subprocess.SubprocessError):
+        pass
     os.makedirs(REPORTS, exist_ok=True)
     started = dt.datetime.now()
     path = os.path.join(REPORTS, f"{started:%Y-%m-%d}.md")

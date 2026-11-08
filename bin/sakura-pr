@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""sakura-pr [words...] — a pull request from this branch, with a body written from the diff and the commits. The `?pr` key.
+
+The facts come from git and gh with no model: the base branch, the commits since it, the files and the diff. Sakura
+reads them and writes the title and body in the repo's own style (its PR template, its recent PRs), then opens the
+PR with `gh pr create` and prints the URL. Words after it steer the body ("mention the migration", "draft").
+  --base BRANCH   the base (default: the repo's default branch)
+  --draft         open it as a draft
+  --print         print the brief and stop
+  --exec          one-shot, no TUI (scripts)
+"""
+import os
+import subprocess
+import sys
+
+DIFF_CAP = 14000
+
+
+def sh(cmd, timeout=60):
+    try:
+        return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def gather(base, draft, words):
+    branch = sh("git rev-parse --abbrev-ref HEAD")
+    if not branch or branch == "HEAD":
+        sys.exit("sakura-pr: not on a branch")
+    base = base or sh("gh repo view --json defaultBranchRef -q .defaultBranchRef.name") or "main"
+    if branch == base:
+        sys.exit(f"sakura-pr: you're on {base} itself; make a branch first")
+    if sh(f"git rev-parse --verify --quiet origin/{base}") == "":
+        sh("git fetch -q origin " + base)
+    merge_base = sh(f"git merge-base HEAD origin/{base}") or sh(f"git merge-base HEAD {base}")
+    rng = f"{merge_base}..HEAD" if merge_base else f"{base}..HEAD"
+    commits = sh(f"git --no-pager log --format='%h %s%n%b' {rng}")
+    stat = sh(f"git --no-pager diff --stat {rng}")
+    diff = sh(f"git --no-pager diff {rng}")
+    if len(diff) > DIFF_CAP:
+        diff = diff[:DIFF_CAP] + f"\n… ({len(diff) - DIFF_CAP} more characters; read specific files with git diff {rng} -- FILE)"
+    unpushed = sh(f"git --no-pager log --oneline origin/{branch}..HEAD 2>/dev/null")
+    dirty = sh("git status --porcelain")
+    template = ""
+    for p in (".github/pull_request_template.md", ".github/PULL_REQUEST_TEMPLATE.md", "PULL_REQUEST_TEMPLATE.md", "docs/pull_request_template.md"):
+        if os.path.isfile(p):
+            template = open(p, encoding="utf-8", errors="replace").read()[:3000]
+            break
+    recent = sh("gh pr list --state merged --limit 3 --json title,body -q '.[] | \"## \" + .title + \"\\n\" + (.body // \"\")[:600]'", 30)
+    existing = sh(f"gh pr list --head {branch} --json url -q '.[0].url'", 30)
+    parts = [
+        "Open a pull request for this branch." + (" Open it as a draft." if draft else ""),
+        f"Branch: {branch}  → base: {base}",
+    ]
+    if words:
+        parts.append(f"From me: {words}")
+    if existing:
+        parts.append(f"A PR already exists for this branch: {existing}. Update its title and body with `gh pr edit` instead of opening another.")
+    if dirty:
+        parts.append("Uncommitted changes exist (git status). Leave them alone; the PR is the committed work only. Mention it in one line to me.")
+    if unpushed or sh(f"git rev-parse --verify --quiet origin/{branch}") == "":
+        parts.append(f"The branch isn't fully pushed. Push it first: git push -u origin {branch}")
+    parts += ["", "Commits since the base:", "```", commits or "(none)", "```", "Files:", "```", stat or "(no changes)", "```", "Diff:", "```diff", diff or "(empty)", "```"]
+    if template:
+        parts += ["", "The repo's PR template; follow its sections:", "```", template, "```"]
+    if recent:
+        parts += ["", "Recently merged PRs here, for the house style:", recent]
+    parts += [
+        "",
+        "Write the title (under 70 characters, imperative, no ticket number unless the branch name has one) and the body: what changed and "
+        "why, how it was tested (only what the diff or commits show was tested; don't invent test runs), and anything a reviewer should look "
+        "at first. Plain prose and short bullets, no headings beyond the template's, no emoji, no mention of being an AI.",
+        f"Then run exactly: gh pr create --base {base} --title \"...\" --body-file FILE" + (" --draft" if draft else "") +
+        " (write the body to a temp file first, so quoting can't break it), and finish with the PR's URL. Don't merge, don't request reviewers.",
+    ]
+    return "\n".join(parts)
+
+
+def main(argv):
+    base, draft, mode, words = None, False, "tui", []
+    it = iter(argv)
+    for a in it:
+        if a == "--base":
+            base = next(it, None)
+        elif a == "--draft":
+            draft = True
+        elif a in ("--print", "--exec"):
+            mode = a[2:]
+        elif a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        else:
+            words.append(a)
+    if "draft" in [w.lower() for w in words]:
+        draft = True
+    text = gather(base, draft, " ".join(words).strip())
+    if mode == "print":
+        print(text)
+        return 0
+    launch = ["sakura-launch"] + (["--exec", "--skip-git-repo-check", text] if mode == "exec" else [text])
+    os.execvp(launch[0], launch)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

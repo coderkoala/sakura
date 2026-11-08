@@ -13,9 +13,11 @@
 #   ?teach [words]  turn what you just did in the shell into a kept tool or a scheduled job
 #   ?learn <topic>  a mentor's explanation, at your level
 #   ?guard  what's about to hurt: disks, certs, failed units, backups
+#   ?pr [words]  a pull request from this branch, body from the diff;  ?review [PR|range] [--post]  findings, ranked
+#   look FILE|screen|clip [question]  eyes: a local vision model, or --text for OCR
 #   ?go [request]  a session that doesn't stop to ask (sakura-trust on makes every ? like this)
 if command -v sakura-launch >/dev/null 2>&1; then
-    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' 2>/dev/null
+    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' '?pr' '?review' 2>/dev/null
     alias '?'='sakura-launch'
     alias '?fix'='sakura-fix --shell $$'
     alias '?undo'='sakura-undo'
@@ -27,6 +29,8 @@ if command -v sakura-launch >/dev/null 2>&1; then
     alias '?learn'='sakura-learn'
     alias '?guard'='sakura-guardian'
     alias '?go'='SAKURA_TRUST=1 sakura-launch'
+    alias '?pr'='sakura-pr'
+    alias '?review'='sakura-review'
     # ?teach hands Sakura your recent commands, so there's nothing to paste.
     __sakura_teach() { HISTTIMEFORMAT='' history 40 | sakura-teach --history - "$@"; }
     alias '?teach'='__sakura_teach'
@@ -39,7 +43,7 @@ if command -v sakura-launch >/dev/null 2>&1; then
     __sakura_quote_line() {
         local head rest
         case "$READLINE_LINE" in
-            '?remind '*|'?pa '*|'?fix '*|'? '*|'?? '*|'?learn '*|'?teach '*|'?tour '*|'?recall '*|'?go '*) ;;
+            '?remind '*|'?pa '*|'?fix '*|'? '*|'?? '*|'?learn '*|'?teach '*|'?tour '*|'?recall '*|'?go '*|'?pr '*) ;;
             *) return 0 ;;
         esac
         head=${READLINE_LINE%% *}

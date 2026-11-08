@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""look FILE|screen|clip [question] — eyes. Describes an image, a screenshot, a scan or a PDF page with a local vision
+model, or reads the text off it. Nothing leaves the machine.
+
+  look shot.png                     what's in it
+  look error.png "what does the dialog say, and what should I do"
+  look screen [question]            take a screenshot of the whole screen first (grim, gnome-screenshot or import)
+  look clip [question]              the image on the clipboard (wl-paste / xclip)
+  look invoice.pdf [question]       the first page; --page N for another
+  look --text scan.jpg              OCR only (tesseract), fast and exact: the text as it appears, no model
+  look --model NAME ...             another Ollama vision model (default: $SAKURA_VISION_MODEL, else the first of the known ones that's pulled)
+Prints text. For a screenshot of a terminal or an error, --text is often the better first step; the model is for what
+text alone doesn't give you (layout, a chart, a whiteboard, a photo).
+"""
+import base64
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.request
+
+OLLAMA = os.environ.get("OLLAMA_API_BASE", "http://127.0.0.1:11434")
+KNOWN = ["huihui_ai/qwen2.5-vl-abliterated:3b", "qwen2.5vl:3b", "qwen2.5vl:7b", "minicpm-v", "llava-phi3", "moondream"]
+MAX_SIDE = 1600
+
+
+def have_models():
+    try:
+        with urllib.request.urlopen(OLLAMA + "/api/tags", timeout=5) as r:
+            return [m["name"] for m in json.load(r).get("models", [])]
+    except Exception:
+        return []
+
+
+def pick_model(wanted):
+    have = have_models()
+    if wanted:
+        return wanted
+    for m in KNOWN:
+        if m in have or m + ":latest" in have:
+            return m
+    sys.exit("look: no vision model is pulled. Get one with: ollama pull " + KNOWN[0] + "  (3 GB)")
+
+
+def screenshot(path):
+    for cmd in (["grim", path], ["gnome-screenshot", "-f", path], ["spectacle", "-b", "-n", "-o", path], ["import", "-window", "root", path], ["scrot", path]):
+        if shutil.which(cmd[0]) and subprocess.run(cmd, capture_output=True).returncode == 0 and os.path.getsize(path) > 0:
+            return
+    sys.exit("look: couldn't take a screenshot (install grim on Wayland, or gnome-screenshot/scrot)")
+
+
+def clipboard(path):
+    for cmd in (["wl-paste", "--type", "image/png"], ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"]):
+        if shutil.which(cmd[0]):
+            r = subprocess.run(cmd, capture_output=True)
+            if r.returncode == 0 and r.stdout[:4] == b"\x89PNG":
+                open(path, "wb").write(r.stdout)
+                return
+    sys.exit("look: no image on the clipboard")
+
+
+def to_image(src, page):
+    """A PNG/JPEG path for the model: PDFs are rendered, big images shrunk (the model sees ~1 MP anyway)."""
+    low = src.lower()
+    if low.endswith(".pdf"):
+        if not shutil.which("pdftoppm"):
+            sys.exit("look: pdftoppm (poppler-utils) is needed for PDFs")
+        out = tempfile.mktemp(prefix="look-")
+        subprocess.run(["pdftoppm", "-f", str(page), "-l", str(page), "-r", "110", "-png", "-singlefile", src, out], check=True, capture_output=True)
+        return out + ".png"
+    if shutil.which("convert"):
+        out = tempfile.mktemp(prefix="look-", suffix=".png")
+        if subprocess.run(["convert", src, "-resize", f"{MAX_SIDE}x{MAX_SIDE}>", out], capture_output=True).returncode == 0:
+            return out
+    return src
+
+
+def ocr(image):
+    if not shutil.which("tesseract"):
+        sys.exit("look: tesseract isn't installed: sudo -A apt-get install -y tesseract-ocr")
+    r = subprocess.run(["tesseract", image, "-", "--psm", "3"], capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def ask(model, image, question):
+    with open(image, "rb") as f:
+        img = base64.b64encode(f.read()).decode()
+    prompt = question or ("Describe what this shows, precisely and briefly. Read out any text that matters (errors, numbers, names, labels) "
+                          "exactly as written. If it's a diagram or a whiteboard, give its structure. Don't guess at what isn't visible.")
+    body = json.dumps({"model": model, "prompt": prompt, "images": [img], "stream": False, "keep_alive": 0,
+                       "options": {"temperature": 0.1, "num_predict": 900}}).encode()
+    req = urllib.request.Request(OLLAMA + "/api/generate", data=body, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=int(os.environ.get("LOOK_TIMEOUT", "300"))) as r:
+            return json.load(r).get("response", "").strip()
+    except Exception as e:
+        sys.exit(f"look: {model} failed: {e}  (is Ollama up? is the model pulled? ollama pull {model})")
+
+
+def main(argv):
+    text_only, model, page, words = False, os.environ.get("SAKURA_VISION_MODEL"), 1, []
+    it = iter(argv)
+    for a in it:
+        if a == "--text":
+            text_only = True
+        elif a == "--model":
+            model = next(it, None)
+        elif a == "--page":
+            page = int(next(it, "1"))
+        elif a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        else:
+            words.append(a)
+    if not words:
+        print(__doc__.strip())
+        return 2
+    src, question = words[0], " ".join(words[1:]).strip()
+    tmp = None
+    if src == "screen":
+        tmp = src = tempfile.mktemp(prefix="look-screen-", suffix=".png")
+        screenshot(src)
+    elif src == "clip":
+        tmp = src = tempfile.mktemp(prefix="look-clip-", suffix=".png")
+        clipboard(src)
+    elif not os.path.isfile(src):
+        sys.exit(f"look: no such file: {src}")
+    image = to_image(src, page)
+    try:
+        if text_only:
+            out = ocr(image)
+            print(out or "(no text found)")
+        else:
+            m = pick_model(model)
+            out = ask(m, image, question)
+            print(f"[look: {m}]\n{out}" if out else "(the model returned nothing)")
+    finally:
+        for p in (tmp, image if image != src else None):
+            if p and os.path.exists(p):
+                os.unlink(p)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

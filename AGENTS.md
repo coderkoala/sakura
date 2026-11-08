@@ -45,6 +45,9 @@ CHECK
 - Kept tools are on PATH in later sessions and listed at the start of each one. A name that's already a command is refused.
 - `sakura-tool list`, `sakura-tool check [NAME]`, `sakura-tool remove NAME`. A worker can keep a tool only with `write: ~/.sakura/tools` in its job. Never put a secret in one.
 
+## Eyes
+`look FILE|screen|clip ["question"]` describes an image, screenshot, scan or PDF page with a local vision model; `look --text FILE` is OCR only, exact and fast. Asked about a screenshot, a photo or a scan, run it; never say you can't see images.
+
 ## Files and your own documents
 - `view_file FILE [start] [end]` reads with line numbers, 200 lines at a time. `edit_file FILE` applies @@old/@@new/@@end blocks from a heredoc, exact text only; `--all` replaces every match, `--create` makes a new file.
 - `rag index PATH` makes the user's documents searchable, `rag search "<question>" [-k 6]` finds passages by meaning and keywords, and `rag status` shows what's in it. Never index a folder the user didn't name.

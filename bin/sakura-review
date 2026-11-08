@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""sakura-review [PR | URL | RANGE | --staged] [words...] — findings on a change, ranked, with file:line. The `?review` key.
+
+With nothing: the working tree's diff against the base branch (or the staged diff with --staged). With a PR number or URL:
+that PR's diff and description through gh. The facts are gathered first; Sakura reads the code around each hunk before
+it judges it, and reports only what it can point at.
+  --post      let it post the findings as one PR comment (otherwise it only prints them)
+  --print     print the brief and stop
+  --exec      one-shot, no TUI (scripts)
+"""
+import os
+import re
+import subprocess
+import sys
+
+DIFF_CAP = 20000
+
+
+def sh(cmd, timeout=60):
+    try:
+        return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def gather(target, staged, post, words):
+    pr = None
+    if target and re.fullmatch(r"\d+", target):
+        pr = target
+    elif target and "/pull/" in target:
+        pr = target.rstrip("/").rsplit("/", 1)[-1]
+    if pr:
+        meta = sh(f"gh pr view {pr} --json title,body,author,baseRefName,headRefName,additions,deletions,changedFiles "
+                  f"-q '\"# \" + .title + \"  (#{pr}, by \" + .author.login + \", \" + .headRefName + \" → \" + .baseRefName + \", +\" + (.additions|tostring) + \" -\" + (.deletions|tostring) + \", \" + (.changedFiles|tostring) + \" files)\\n\\n\" + (.body // \"\")'", 60)
+        diff = sh(f"gh pr diff {pr}", 120)
+        what = f"pull request #{pr}"
+        checkout = f"The code is in this checkout only if the branch is here; to read around a hunk, `gh pr checkout {pr}` is fine, or read the files on the PR's branch with `git show origin/BRANCH:FILE`."
+    else:
+        base = sh("gh repo view --json defaultBranchRef -q .defaultBranchRef.name") or "main"
+        if staged:
+            diff, what = sh("git --no-pager diff --staged"), "the staged changes"
+        elif target and ".." in target:
+            diff, what = sh(f"git --no-pager diff {target}"), f"the range {target}"
+        else:
+            mb = sh(f"git merge-base HEAD origin/{base}") or sh(f"git merge-base HEAD {base}") or base
+            diff, what = sh(f"git --no-pager diff {mb}") , f"this branch against {base} (committed and uncommitted)"
+        meta = sh("git --no-pager log --oneline -8")
+        checkout = "The code is in this directory: read around every hunk with view_file before judging it."
+    if not diff:
+        sys.exit(f"sakura-review: nothing to review in {what}")
+    if len(diff) > DIFF_CAP:
+        diff = diff[:DIFF_CAP] + f"\n… ({len(diff) - DIFF_CAP} more characters; the rest by file: " + ("gh pr diff" if pr else "git diff") + " -- FILE)"
+    parts = [f"Review {what}.", ""]
+    if words:
+        parts.append(f"From me: {words}")
+    parts += [meta, "", "```diff", diff, "```", "", checkout, "",
+              "Look for what breaks: wrong logic, missing error handling at a boundary, off-by-one, a race, a security hole (injection, "
+              "auth, secrets, path traversal), data loss, a migration without a rollback, a test that can't fail, a dependency added without need. "
+              "Not style, naming or formatting unless it hides a bug.",
+              "For each finding: severity (blocker / should fix / nit), `file:line`, what's wrong in one sentence, and the concrete input or "
+              "sequence that makes it fail. Only what you can point at in the code you read; if you're not sure, say what you'd test. "
+              "Rank by severity, worst first; at most ten. If there's nothing real, say so in one line rather than inventing nits.",
+              "End with one line: merge, merge after fixes, or not yet.",
+              ]
+    if pr and post:
+        parts.append(f"Then post the findings as one comment: write them to a temp file and run `gh pr comment {pr} --body-file FILE`. Don't approve or request changes.")
+    elif pr:
+        parts.append("Print the findings here; don't post anything to the PR.")
+    return "\n".join(parts)
+
+
+def main(argv):
+    target, staged, post, mode, words = None, False, False, "tui", []
+    for a in argv:
+        if a == "--staged":
+            staged = True
+        elif a == "--post":
+            post = True
+        elif a in ("--print", "--exec"):
+            mode = a[2:]
+        elif a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        elif target is None and (re.fullmatch(r"\d+", a) or "/pull/" in a or ".." in a):
+            target = a
+        else:
+            words.append(a)
+    text = gather(target, staged, post, " ".join(words).strip())
+    if mode == "print":
+        print(text)
+        return 0
+    launch = ["sakura-launch"] + (["--exec", "--skip-git-repo-check", text] if mode == "exec" else [text])
+    os.execvp(launch[0], launch)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

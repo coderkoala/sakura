@@ -14,6 +14,7 @@ doesn't qualify keeps the 9b on Ollama; `up` failing is not an error for the cal
   sakura-model up       start the server (no-op if running). Exit 0 only when it answers
   sakura-model down     stop it and free the VRAM
   sakura-model status   is it up, and what does it hold
+  sakura-model gpu      temperature, Xid errors this boot, who holds the VRAM. --check exits 1 when a long job shouldn't start
   sakura-model pull     download the model (15.6 GB), resumable, checksum verified
   sakura-model models   every model that suits this machine, and which are missing
   sakura-model pull-all download the missing ones, most needed first, while the disk allows
@@ -48,7 +49,9 @@ HEADROOM_MIB = 800      # measured: leaves the 5200 MiB cache that ran 26 eval c
 MIN_BUDGET_MIB = 5000   # below this too few experts fit; lower budgets were not evaluated
 MAX_CACHE_MIB = 15000   # the experts' own size: more VRAM than this buys nothing
 MIN_RAM_GIB = 28        # 15.6 GB of model stays mapped beside the desktop
-IDLE_SLEEP_SECONDS = 1800
+IDLE_SLEEP_SECONDS = 1200   # the model leaves VRAM after 20 idle minutes; the next `?` brings it back
+HOT_C = 83                  # a card this hot shouldn't start hours of work
+BAD_XIDS = {"79", "120", "154"}  # fell off the bus, GSP exception, reset required: nothing runs right until a reboot
 
 
 def vram():
@@ -132,6 +135,8 @@ def up():
                ENGINE, "-m", MODEL, "--alias", SLUG, "--host", "127.0.0.1", "--port", str(PORT),
                "-ngl", "99", "--cpu-moe", "--moe-cache-mib", str(cache), "-c", "32768", "--jinja", "-fa", "on",
                "-ctk", "q8_0", "-ctv", "q8_0", "--parallel", "1", "--no-webui",
+               # The 7k-token system prompt is the same every turn: reuse its KV cache, in chunks, so only the new part is read.
+               "--cache-reuse", "256",
                "--sleep-idle-seconds", str(IDLE_SLEEP_SECONDS)]
         if subprocess.run(cmd).returncode != 0:
             return 1
@@ -145,6 +150,48 @@ def up():
         time.sleep(1)
     print("sakura-model: server did not answer in 180 s", file=sys.stderr)
     return 1
+
+
+def gpu_state():
+    """(temperature C or None, [xid codes this boot], [(process, MiB)])."""
+    temp, xids, holders = None, [], []
+    try:
+        temp = int(subprocess.run(["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
+                                  capture_output=True, text=True, timeout=10).stdout.split()[0])
+    except Exception:
+        pass
+    try:
+        import re
+        log = subprocess.run("journalctl -k -b --no-pager -q 2>/dev/null | grep -F Xid", shell=True, capture_output=True, text=True, timeout=30).stdout
+        xids = re.findall(r"Xid \(PCI:[^)]*\): (\d+)", log)
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-compute-apps=process_name,used_memory", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=10).stdout
+        holders = [(l.rsplit(",", 1)[0].strip().rsplit("/", 1)[-1], int(l.rsplit(",", 1)[1])) for l in out.splitlines() if "," in l]
+    except Exception:
+        pass
+    return temp, xids, holders
+
+
+def gpu(check=False):
+    temp, xids, holders = gpu_state()
+    if temp is None and not holders:
+        print("no NVIDIA GPU answering")
+        return 1 if check else 0
+    bad = sorted(set(xids) & BAD_XIDS)
+    print(f"temperature: {temp} C" + (f" (hot: over {HOT_C})" if temp is not None and temp >= HOT_C else ""))
+    print(f"Xid errors this boot: {len(xids)}" + (f" (codes {', '.join(sorted(set(xids)))}; {', '.join(bad)} means a reboot is needed)" if xids else ""))
+    print("VRAM held by: " + (", ".join(f"{p} {m} MiB" for p, m in holders) or "nobody"))
+    if check:
+        if bad:
+            print(f"not safe for a long job: Xid {', '.join(bad)} this boot; reboot first")
+            return 1
+        if temp is not None and temp >= HOT_C:
+            print(f"not safe for a long job: {temp} C; let it cool")
+            return 1
+    return 0
 
 
 def pull():
@@ -189,6 +236,7 @@ def ollama_models():
         (rag, "rag search", 0, 0.7),
         (fast, "SAKURA_FAST=1", 0, 1.9),
         (roles["coder-fast"], "consult coder-fast", 0, 1.9),
+        (os.environ.get("SAKURA_VISION_MODEL", "huihui_ai/qwen2.5-vl-abliterated:3b"), "look (images, screenshots, scans)", 0, 3.2),
         (roles["security"], "consult security", 16, 4.7),
         (roles["prose"], "consult prose", 16, 4.9),
         (roles["coder"], "consult coder", 24, 9.0),
@@ -306,6 +354,8 @@ def main():
         v = vram()
         print(("up" if healthy() else "down"), f"at {URL}", f"VRAM {v[1]}/{v[0]} MiB" if v else "")
         return 0
+    if cmd == "gpu":
+        return gpu(check="--check" in sys.argv[2:])
     if cmd == "pull":
         return pull()
     if cmd == "models":
