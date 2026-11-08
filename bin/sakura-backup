@@ -1,0 +1,376 @@
+#!/usr/bin/env python3
+"""sakura-backup — makes backups with restic and proves they restore. The guardian watches; this closes the loop.
+
+  sakura-backup init NAME DEST --source PATH [--source PATH ...]
+                                        a new encrypted restic repo at DEST (a directory, sftp:host:/path, or any
+                                        restic URL). The password is generated and kept in ~/.sakura/backup/NAME.pass,
+                                        mode 0600, never printed. Copy it somewhere that isn't this machine.
+  sakura-backup run NAME                back the sources up (dedup, --exclude-caches, excludes: node_modules, .cache,
+                                        *.tmp — set "excludes" in the config to change them). Prints the snapshot.
+  sakura-backup prove NAME              restore one random file from the latest snapshot to a scratch dir, compare its
+                                        bytes to the live file, run `restic check`, then tell the guardian it was
+                                        test-restored. A backup that was never restored is a hope, not a backup.
+  sakura-backup restore NAME [PATH] --to DIR   a real restore, everything or one path. --to is required: it never
+                                        writes over the live source.
+  sakura-backup list                    every configured backup: dest, sources, snapshots, last snapshot, last proved
+  sakura-backup snapshots NAME
+  sakura-backup schedule NAME "every day 03:00"   run-and-prove on that schedule, via `pa cron`
+  sakura-backup forget NAME --keep-daily 7 [...]  restic forget --prune with the policy you give
+
+Config in ~/.sakura/backup/NAME.json ($SAKURA_BACKUP_DIR overrides); the password only ever travels by
+RESTIC_PASSWORD_FILE, never on a command line.
+"""
+import datetime as dt
+import json
+import os
+import random
+import re
+import secrets
+import shutil
+import stat
+import string
+import subprocess
+import sys
+import tempfile
+
+DIR = os.path.expanduser(os.environ.get("SAKURA_BACKUP_DIR") or "~/.sakura/backup")
+BIN = os.path.dirname(os.path.realpath(__file__))
+DEFAULT_EXCLUDES = ["node_modules", ".cache", "*.tmp"]
+
+
+def ensure():
+    if shutil.which("restic"):
+        return
+    sys.stderr.write("sakura-backup: restic isn't installed. Install it with:\n  sudo -A apt-get install -y restic\n")
+    sys.exit(1)
+
+
+def conf_path(name):
+    return os.path.join(DIR, name + ".json")
+
+
+def pass_path(name):
+    return os.path.join(DIR, name + ".pass")
+
+
+def check_name(name):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name or ""):
+        sys.exit(f"sakura-backup: {name!r} isn't a usable name (letters, digits, . _ - only)")
+    return name
+
+
+def load_conf(name):
+    check_name(name)
+    try:
+        with open(conf_path(name), encoding="utf-8") as f:
+            conf = json.load(f)
+    except OSError:
+        known = ", ".join(all_names()) or "none yet"
+        sys.exit(f"sakura-backup: no backup named {name} (configured: {known})")
+    except ValueError:
+        sys.exit(f"sakura-backup: {conf_path(name)} isn't valid JSON; fix or remove it")
+    pf = pass_path(name)
+    if not os.path.exists(pf):
+        sys.exit(f"sakura-backup: the password file {pf} is gone. Without it the repo can't be opened; restore it from wherever you copied it.")
+    mode = stat.S_IMODE(os.stat(pf).st_mode)
+    if mode & 0o077:
+        os.chmod(pf, 0o600)
+    return conf
+
+
+def all_names():
+    try:
+        return sorted(n[:-5] for n in os.listdir(DIR) if n.endswith(".json"))
+    except OSError:
+        return []
+
+
+def restic(name, conf, *args, timeout=3600):
+    """Run restic against this backup's repo. The password goes by RESTIC_PASSWORD_FILE only."""
+    env = dict(os.environ)
+    env["RESTIC_REPOSITORY"] = conf["dest"]
+    env["RESTIC_PASSWORD_FILE"] = pass_path(name)
+    env.pop("RESTIC_PASSWORD", None)
+    env.pop("RESTIC_PASSWORD_COMMAND", None)
+    try:
+        return subprocess.run(["restic", *args], env=env, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        sys.exit(f"sakura-backup: restic {args[0]} took longer than {timeout}s and was stopped")
+
+
+def fail(r, doing):
+    err = (r.stderr or r.stdout).strip()
+    sys.exit(f"sakura-backup: {doing} failed (restic exit {r.returncode}):\n  " + "\n  ".join(err.splitlines()[-6:]))
+
+
+def is_local(dest):
+    return "://" not in dest and not re.match(r"^[A-Za-z0-9]+:", dest)
+
+
+def human(n):
+    for unit in ("B", "K", "M", "G", "T"):
+        if abs(n) < 1024 or unit == "T":
+            return f"{n:.0f}{unit}" if unit in "BK" else f"{n:.1f}{unit}"
+        n /= 1024
+
+
+def guardian(*args):
+    return subprocess.run([os.path.join(BIN, "sakura-guardian"), *args], capture_output=True, text=True, timeout=60)
+
+
+# ── Commands ──────────────────────────────────────────────────────────────────
+
+def cmd_init(args):
+    sources, rest = [], []
+    it = iter(args)
+    for a in it:
+        if a == "--source":
+            sources.append(next(it, None) or sys.exit("sakura-backup: --source needs a path"))
+        else:
+            rest.append(a)
+    if len(rest) != 2 or not sources:
+        sys.exit("usage: sakura-backup init NAME DEST --source PATH [--source PATH ...]")
+    name, dest = check_name(rest[0]), rest[1]
+    if os.path.exists(conf_path(name)) or os.path.exists(pass_path(name)):
+        sys.exit(f"sakura-backup: a backup named {name} already exists ({conf_path(name)}); pick another name")
+    sources = [os.path.abspath(os.path.expanduser(s)) for s in sources]
+    for s in sources:
+        if not os.path.exists(s):
+            sys.exit(f"sakura-backup: source {s} doesn't exist")
+    if is_local(dest):
+        dest = os.path.abspath(os.path.expanduser(dest))
+        if any(dest == s or dest.startswith(s + os.sep) for s in sources):
+            sys.exit(f"sakura-backup: the repo {dest} is inside a source; a backup that lives in what it backs up dies with it")
+    ensure()
+    os.makedirs(DIR, exist_ok=True)
+    password = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32))
+    fd = os.open(pass_path(name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(password + "\n")
+    conf = {"v": 1, "dest": dest, "sources": sources, "excludes": DEFAULT_EXCLUDES}
+    r = restic(name, conf, "init")
+    if r.returncode:
+        os.unlink(pass_path(name))
+        fail(r, f"creating the repo at {dest}")
+    with open(conf_path(name), "w", encoding="utf-8") as f:
+        json.dump(conf, f, indent=1)
+        f.write("\n")
+    print(f"backup {name}: encrypted repo at {dest}, sources {', '.join(sources)}")
+    print(f"the repo password is in {pass_path(name)} (mode 0600). Copy it somewhere that isn't this machine:")
+    print(f"without it, the backup is unreadable. Next: sakura-backup run {name}")
+    return 0
+
+
+def backup_once(name, conf):
+    """One restic backup; returns (snapshot_id, summary dict)."""
+    for s in conf["sources"]:
+        if not os.path.exists(s):
+            sys.exit(f"sakura-backup: source {s} is missing; not backing up a hole where it was")
+    excludes = conf.get("excludes", DEFAULT_EXCLUDES)
+    args = ["backup", "--json", "--exclude-caches"]
+    for e in excludes:
+        args += ["--exclude", e]
+    r = restic(name, conf, *args, *conf["sources"])
+    if r.returncode:
+        fail(r, f"backing up {name}")
+    summary = {}
+    for line in r.stdout.splitlines():
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if obj.get("message_type") == "summary":
+            summary = obj
+    sid = (summary.get("snapshot_id") or "")[:8]
+    if not sid:
+        sys.exit(f"sakura-backup: restic finished but reported no snapshot for {name}")
+    return sid, summary
+
+
+def cmd_run(args):
+    if not args:
+        sys.exit("usage: sakura-backup run NAME")
+    ensure()
+    name = args[0]
+    conf = load_conf(name)
+    sid, s = backup_once(name, conf)
+    print(f"backup {name}: snapshot {sid} — {s.get('files_new', 0)} new, {s.get('files_changed', 0)} changed, "
+          f"{s.get('files_unmodified', 0)} unchanged files, {human(s.get('total_bytes_processed', 0))} scanned, "
+          f"{human(s.get('data_added', 0))} added in {s.get('total_duration', 0):.1f}s")
+    return 0
+
+
+def snapshot_files(name, conf):
+    """The files of the latest snapshot, as restic ls reports them."""
+    r = restic(name, conf, "ls", "--json", "latest")
+    if r.returncode:
+        fail(r, f"listing the latest snapshot of {name}")
+    files = []
+    for line in r.stdout.splitlines():
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if obj.get("type") == "file" and obj.get("path"):
+            files.append({"path": obj["path"], "size": obj.get("size", 0)})
+    return files
+
+
+def cmd_prove(args):
+    if not args:
+        sys.exit("usage: sakura-backup prove NAME")
+    ensure()
+    name = args[0]
+    conf = load_conf(name)
+    files = snapshot_files(name, conf)
+    if not files:
+        sys.exit(f"sakura-backup: the latest snapshot of {name} has no files to restore; run `sakura-backup run {name}` first")
+    pick = random.choice([f for f in files if f["size"] > 0] or files)
+    with tempfile.TemporaryDirectory(prefix="sakura-prove-") as tmp:
+        r = restic(name, conf, "restore", "latest", "--target", tmp, "--include", pick["path"])
+        if r.returncode:
+            fail(r, f"restoring {pick['path']} from {name}")
+        restored = tmp + pick["path"]
+        if not os.path.isfile(restored):
+            sys.exit(f"sakura-backup: restic said it restored {pick['path']} but nothing landed in the scratch dir")
+        got = open(restored, "rb").read()
+        if len(got) != pick["size"]:
+            sys.exit(f"sakura-backup: restored {pick['path']} is {len(got)} bytes, the snapshot says {pick['size']}")
+        if os.path.isfile(pick["path"]):
+            if got != open(pick["path"], "rb").read():
+                sys.exit(f"sakura-backup: restored {pick['path']} differs from the live file. If the file changed since "
+                         f"the last run that's stale, not broken: `sakura-backup run {name}` and prove again.")
+            verdict = "bytes match the live file"
+        else:
+            if pick["size"] > 0 and not got:
+                sys.exit(f"sakura-backup: restored {pick['path']} came back empty")
+            verdict = "the live file is gone; the restore wrote its bytes"
+    r = restic(name, conf, "check")
+    if r.returncode:
+        fail(r, f"`restic check` on {name}")
+    g = guardian("restored", name)
+    if g.returncode and is_local(conf["dest"]):
+        guardian("backup", name, conf["dest"])
+        g = guardian("restored", name)
+    print(f"proven: {os.path.basename(pick['path'])} ({human(pick['size'])}) restored from the latest snapshot; "
+          f"{verdict}; restic check found no errors")
+    if g.returncode:
+        print(f"(the guardian doesn't watch {name} yet: `sakura-guardian backup {name} PATH` to make it nag)")
+    else:
+        print(g.stdout.strip() or f"guardian noted: {name} test-restored today")
+    return 0
+
+
+def cmd_restore(args):
+    to = None
+    if "--to" in args:
+        i = args.index("--to")
+        to = args[i + 1] if i + 1 < len(args) else None
+        args = args[:i] + args[i + 2:]
+    if not args or not to:
+        sys.exit("usage: sakura-backup restore NAME [PATH] --to DIR   (--to is required; it never writes over the live source)")
+    ensure()
+    name, path = args[0], args[1] if len(args) > 1 else None
+    conf = load_conf(name)
+    to = os.path.abspath(os.path.expanduser(to))
+    if any(to == s or s.startswith(to + os.sep) or to.startswith(s + os.sep) for s in conf["sources"]):
+        sys.exit(f"sakura-backup: {to} overlaps a live source. Restore somewhere clean, compare, then move what you want.")
+    r = restic(name, conf, "restore", "latest", "--target", to, *(["--include", path] if path else []))
+    if r.returncode:
+        fail(r, f"restoring {name}")
+    print(f"restored {path or 'everything'} from the latest snapshot of {name} into {to}")
+    print("  " + "\n  ".join(l for l in (r.stderr or r.stdout).strip().splitlines()[-3:] if l.strip()))
+    return 0
+
+
+def cmd_list(_):
+    names = all_names()
+    if not names:
+        print("no backups yet: sakura-backup init NAME DEST --source PATH")
+        return 0
+    ensure()
+    gconf = {}
+    try:
+        gdir = os.path.expanduser(os.environ.get("SAKURA_GUARDIAN_DIR") or "~/.sakura/guardian")
+        with open(os.path.join(gdir, "config.json"), encoding="utf-8") as f:
+            gconf = json.load(f).get("backups", {})
+    except (OSError, ValueError):
+        pass
+    for name in names:
+        conf = load_conf(name)
+        r = restic(name, conf, "snapshots", "--json", timeout=60)
+        if r.returncode:
+            state = "unreachable: " + (r.stderr.strip().splitlines() or ["?"])[-1][:60]
+        else:
+            try:
+                snaps = json.loads(r.stdout or "[]")
+            except ValueError:
+                snaps = []
+            if snaps:
+                last = dt.datetime.fromisoformat(snaps[-1]["time"].replace("Z", "+00:00"))
+                age = (dt.datetime.now(dt.timezone.utc) - last).total_seconds() / 86400
+                state = f"{len(snaps)} snapshot{'s' if len(snaps) != 1 else ''}, last {age:.1f} days ago"
+            else:
+                state = "no snapshots yet"
+        restored = gconf.get(name, {}).get("restored")
+        proved = f"proved {(dt.datetime.now().timestamp() - restored) / 86400:.0f} days ago" if restored else "never proved"
+        print(f"{name}: {conf['dest']}  ← {', '.join(conf['sources'])}")
+        print(f"  {state}; {proved}")
+    return 0
+
+
+def cmd_snapshots(args):
+    if not args:
+        sys.exit("usage: sakura-backup snapshots NAME")
+    ensure()
+    conf = load_conf(args[0])
+    r = restic(args[0], conf, "snapshots", "--compact")
+    if r.returncode:
+        fail(r, f"listing snapshots of {args[0]}")
+    sys.stdout.write(r.stdout)
+    return 0
+
+
+def cmd_schedule(args):
+    if len(args) < 2:
+        sys.exit('usage: sakura-backup schedule NAME "every day 03:00"')
+    name, when = args[0], " ".join(args[1:])
+    load_conf(name)
+    me = os.path.realpath(__file__)
+    r = subprocess.run([os.path.join(BIN, "pa"), "cron", when, "--", f"{me} run {name} && {me} prove {name}"],
+                       capture_output=True, text=True, timeout=60)
+    if r.returncode:
+        sys.exit(f"sakura-backup: pa couldn't schedule it: {(r.stderr or r.stdout).strip()[-200:]}")
+    print(f"scheduled: {when} → run {name}, then prove it. " + r.stdout.strip())
+    return 0
+
+
+def cmd_forget(args):
+    if not args:
+        sys.exit("usage: sakura-backup forget NAME --keep-daily 7 [--keep-weekly 4 ...]")
+    name, policy = args[0], args[1:]
+    if not any(a.startswith("--keep") for a in policy):
+        sys.exit("sakura-backup: forget needs a keep policy (--keep-last N, --keep-daily N, ...), or it would keep everything or nothing by accident")
+    ensure()
+    conf = load_conf(name)
+    r = restic(name, conf, "forget", "--prune", *policy)
+    if r.returncode:
+        fail(r, f"forgetting old snapshots of {name}")
+    kept = [l for l in r.stdout.splitlines() if re.search(r"snapshots? (have been removed|remain)|keep \d+|remove \d+", l)]
+    print("\n".join(kept) or r.stdout.strip().splitlines()[-1])
+    return 0
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    cmds = {"init": cmd_init, "run": cmd_run, "prove": cmd_prove, "restore": cmd_restore,
+            "list": cmd_list, "snapshots": cmd_snapshots, "schedule": cmd_schedule, "forget": cmd_forget}
+    if argv[0] not in cmds:
+        sys.exit(f"sakura-backup: no command {argv[0]!r} (one of: {', '.join(cmds)}; --help explains)")
+    return cmds[argv[0]](argv[1:]) or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
