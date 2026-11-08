@@ -62,6 +62,8 @@ flowchart TD
 
 ## What's built
 
+The short version: the keys in `shell/sakura.bash` cover fixing, undoing, recapping, touring code, night shifts, teaching tools, decisions, remote machines, logs, tables, formatting, the GPU, cloud drives and schedules. The detail:
+
 - **The agent.** Rebranded Open Interpreter fork → `sakura` (and `?`). Config home `~/.sakura`. Local Ollama,
   `chat` wire API. Generalist → muscle escalation (`spawn_agent` / `/model`).
 - **Approval UX.** No prompts by default: the guard, `?undo` and `?recap` are what hold things back. `sakura-trust off` brings back prompt-everywhere (`q` approve / `w` "do it differently"); `safe-reads.rules` auto-runs
@@ -166,8 +168,9 @@ See [ROADMAP.md](ROADMAP.md): where it stands, what comes next, and what it's ai
 | `rules/` | Exec-policy: `safe-reads.rules` auto-allows read-only commands. |
 | `skills/` | The 39 persona skills. |
 | `mcp/sakura-web/` | The web-knowledge core (`webkit.py`), MCP server, curated `sources.json`. |
-| `bin/` | `web_search` · `wikipedia` · `fetch_url` · `curated_search` CLIs. |
-| `hooks/` | `web_ground.py` — the time-sensitive grounding hook. |
+| `bin/` | Every command: the `?` keys, `pa`, `drive`, `fleet`, `logs`, `tbl`, `fmt`, `sakura-gpu`, … Each one's `--help` is its manual; the key list is the header of `shell/sakura.bash`. |
+| `hooks/` | Grounding, the guard, undo snapshots, the claim check, recap context. |
+| `evals/` | One eval per feature, graded by planted input and real state, never by the model's say-so. |
 
 ## Measuring it
 

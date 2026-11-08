@@ -30,7 +30,7 @@ Measured on one machine with an 8 GB GPU, driver Ornith 1.5 35B-A3B since 0.9.5 
 ## Next: make what exists trustworthy
 
 1. **Run evals in a disposable machine.** `evals/in-box.sh EVAL` (2026-11-08) runs one inside a throwaway Ubuntu container that shares the host's network, so the driver stays on the host and nothing the eval installs lands here. Proven with `fix.py --only import-typo` (2/2 inside the box). Full runs still happen on the host until the container has had a complete pass.
-2. **Real-world passes.** A real mail provider, including OAuth for those that require it. A real CAPTCHA in the visible window. A second device end to end.
+2. **Real-world passes.** Scripted as checklists in `docs/real-world.md` (mail against a real provider, a real CAPTCHA with a human, a second device end to end), with a results table. Each needs an account, a screen or a machine, so a person runs them; OAuth-only mail providers are the open item.
 3. **`pa` across devices.** Reminders that follow you, firing once, not on all seven. Repeating calendar events. Reminders that work while logged out.
 4. **Runs in more places.** A build for older glibc and for ARM, and a real run on a 6 GB card.
 5. **Fewer tokens.** Measured 2026-11-08 with the driver's tokenizer: `prompts/base.md` 1,874, `AGENTS.md` 2,824 (it grew with tonight's tools), `coordinator.md` 642, plus the engine's own text and the skills list. Every token removed is more room to work; AGENTS.md's tool reference is the place to cut, by topic, behind an intent-driven injection (abilities item 17).
