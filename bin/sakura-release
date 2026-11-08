@@ -40,7 +40,7 @@ say "== 5/7 engine assets"
 assets="${SAKURA_RELEASE_ASSETS:-$HOME/.cache/sakura/release-assets}"
 mkdir -p "$assets"
 if [ ! -s "$assets/sakura-linux-x86_64.tar.gz" ]; then
-    last="$(gh release list --limit 15 --json tagName,assets -q '[.[] | select(.assets | length > 0)][0].tagName')"
+    last="$(for t in $(gh release list --limit 15 --json tagName -q '.[].tagName'); do gh release view "$t" --json assets -q 'select(.assets | length > 0)' >/dev/null 2>&1 && gh release view "$t" --json assets -q '.assets[0].name' 2>/dev/null | grep -q sakura-linux && { echo "$t"; break; }; done)"
     [ -n "$last" ] || { echo "release: no earlier release carries the engine assets" >&2; exit 1; }
     say "  fetching from $last"
     run gh release download "$last" -D "$assets" --clobber
