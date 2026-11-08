@@ -44,9 +44,9 @@ def kept(tools):
     return names, check.returncode == 0 and bool(names)
 
 
-def run_tool(tools, name, stdin, *args):
+def run_tool(tools, name, stdin, *args, cwd=None):
     env = dict(os.environ, PATH=os.environ["PATH"] + os.pathsep + os.path.join(tools, "bin"))
-    r = subprocess.run([name, *args], env=env, input=stdin, capture_output=True, text=True, timeout=60)
+    r = subprocess.run([name, *args], env=env, cwd=cwd, input=stdin, capture_output=True, text=True, timeout=60)
     return r.stdout
 
 
@@ -61,7 +61,7 @@ def column_count(d, tools):
     if names:
         for args in (("city",), ("orders.csv", "city"), ("city", "orders.csv"), ("2",), ("orders.csv", "2"), ("2", "orders.csv"), ("-c", "city"), ("--column", "city")):
             try:
-                out = run_tool(tools, names[0], open(os.path.join(d, "orders.csv")).read(), *args)
+                out = run_tool(tools, names[0], open(os.path.join(d, "orders.csv")).read(), *args, cwd=d)
             except (OSError, subprocess.SubprocessError):
                 out = ""
             if "Kathmandu" in out:
