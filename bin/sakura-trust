@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# sakura-trust on|off|status — whether Sakura asks before each command that changes something.
+#
+# Off (the default), the TUI stops at every mutating or unknown command: q approves, w says "no, do this instead".
+# On, nothing asks: the guard still refuses what's mechanically closed (the guard itself, search-engine scraping, mail the
+# user wanted to see first, installing round a kept tool's check, …), every write is still snapshotted for ?undo, and ?recap
+# still records it all. Workers always run without approvals; this is about the session you're sitting at.
+# One session only: SAKURA_TRUST=1 ? ...   or   SAKURA_TRUST=0 ? ... to ask again despite the switch.
+set -u
+file="${SAKURA_HOME:-$HOME/.sakura}/trust"
+case "${1:-status}" in
+    on)  mkdir -p "$(dirname "$file")" && : > "$file" && echo "Sakura won't ask before commands now. ?undo puts a turn back, ?recap shows what it did. sakura-trust off to ask again." ;;
+    off) rm -f "$file" && echo "Sakura asks before each command that changes something (q yes, w do it differently)." ;;
+    status) if [ -e "$file" ]; then echo "on: Sakura doesn't ask before commands"; else echo "off: Sakura asks before commands that change something"; fi ;;
+    *) echo "usage: sakura-trust on|off|status" >&2; exit 2 ;;
+esac

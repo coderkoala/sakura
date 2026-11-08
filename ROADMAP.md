@@ -22,6 +22,9 @@ Measured on one machine with an 8 GB GPU. Results vary between runs, so treat th
 | Local document search, office files, the shared browser | Anything on a second machine, or on real 6 GB hardware |
 | Reminders, briefs, watches, auto-reply | Workers with `network: yes` (keys, agents and sockets hidden unless the job names them) |
 | A sandbox around workers: no network, writes only where the job allows | |
+| `?fix`, `?undo`, `?recap` | `?tonight` on a real night's queue (the eval runs one) |
+| `?tour`, `?teach` (one eval case each) | `?learn` (no eval: nothing but a reader can grade a lesson) |
+| The guardian's checks (deterministic) | The guardian's disk projection, until it has a fortnight of samples |
 
 ## Next: make what exists trustworthy
 
@@ -35,25 +38,25 @@ Measured on one machine with an 8 GB GPU. Results vary between runs, so treat th
 
 Each of these should make someone stop and show a friend. In rough order of value for effort.
 
-**`?fix`: the error you were about to spend an hour on.** A command fails. Type `?fix`. It already has the command, the output and the directory, and it fixes the cause, or tells you what it found. No copying, no pasting, no explaining.
+Shipped: **`?fix`: the error you were about to spend an hour on.** See the README.
 
-**`?undo`: never afraid again.** Every change it makes is snapshotted first. One key puts everything back, however many files it touched. This changes what people dare to ask for.
+Shipped: **`?undo`: never afraid again.** See the README.
 
 **`?recall`: your whole past, searchable.** "What was that command I used to fix nginx in March?" "Why did we pick Redis?" Across shell history, past sessions, notes, mail and documents, with the source cited, and none of it leaving the machine. The longer you use it, the more it's worth.
 
-**`?tonight`: a night shift.** Queue work before bed. It runs while the GPU is idle, each job verified, and in the morning you get a report and diffs to approve. Nothing is pushed or sent without you.
+Shipped: **`?tonight`: a night shift.** See the README.
 
-**`?tour`: any codebase in five minutes.** Clone something unfamiliar or inherit a legacy system. It reads it and walks you through what matters, where the bodies are buried, and how to run it, citing files and lines.
+Shipped: **`?tour`: any codebase in five minutes.** See the README.
 
 **`?setup`: a new machine feels like yours by lunchtime.** Your tools, config, keys workflow and habits, from what it knows about you. Tell it what's different and it adapts.
 
-**`?teach`: do it once, never again.** Show it a task, or point at what you just did in the shell. It writes a tested tool or a recurring job, proven by the same gate `sakura-tool` uses.
+Shipped: **`?teach`: do it once, never again.** See the README.
 
-**`?receipts`: what exactly did it do, and how do we know?** A plain record of every action, why it was taken and what proved it. Trust you can audit, and an answer to "what changed on this box last week?"
+Shipped: **`?receipts`: what exactly did it do, and how do we know?** See the README.
 
-**The guardian.** It quietly watches what's easy to forget, and tells you before it hurts: the disk that fills in nine days, the certificate ending soon, and above all the backup that has never been test-restored. It proves backups by restoring them.
+Shipped: **The guardian.** See the README.
 
-**`?learn`: a mentor, not an answer machine.** It explains why as well as what, at your level, and remembers what you already know. For the junior who has nobody to ask at 2am.
+Shipped: **`?learn`: a mentor, not an answer machine.** See the README.
 
 **Offline packs.** Before a flight or an outage, it fetches the docs for your exact stack and versions. Then it works with no internet at all, including in places where connectivity can't be assumed.
 

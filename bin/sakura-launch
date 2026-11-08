@@ -131,6 +131,10 @@ if [ "$mode" = exec ]; then
     [ -n "${SAKURA_WORKER:-}" ] && worker_wall
     exec sakura exec "${flags[@]}" "$@"
 fi
+# sakura-trust on (or SAKURA_TRUST=1 for one session): no approval prompts. The guard, ?undo and ?recap stay.
+trust="${SAKURA_TRUST:-}"
+[ -z "$trust" ] && [ -e "${SAKURA_HOME:-$HOME/.sakura}/trust" ] && trust=1
+[ "$trust" = 1 ] && flags+=(-c 'approval_policy="never"')
 if [ "$#" -gt 0 ]; then
     exec sakura "${flags[@]}" "$*"
 fi
