@@ -158,6 +158,8 @@ def cmd_on(args):
         print(f"watching {name} for /{pattern}/; will run: {' '.join(command)}")
         return 0
     os.setsid()
+    devnull = os.open(os.devnull, os.O_RDWR)  # let go of the caller's pipes, or a script that started us waits for the match
+    os.dup2(devnull, 0); os.dup2(devnull, 1); os.dup2(devnull, 2)
     line, code = watch(name, pattern, 10 ** 8)
     if line is not None:
         env = dict(os.environ, PROCWATCH_LINE=line, PROCWATCH_NAME=name)

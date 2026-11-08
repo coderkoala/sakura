@@ -46,7 +46,7 @@ def hosts():
                     if not SKIP.search(h) and h not in seen:
                         seen.add(h)
                         out.append(h)
-    read("~/.ssh/config")
+    read(os.environ.get("SAKURA_SSH_CONFIG", "~/.ssh/config"))
     return out
 
 

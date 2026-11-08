@@ -43,7 +43,7 @@ def add(tables, table, col=None, ctype="", fk=None):
 
 
 def parse_laravel(text, tables):
-    for m in re.finditer(r"Schema::(create|table)\(\s*['\"](\w+)['\"]\s*,\s*function\s*\([^)]*\)\s*(?:use\s*\([^)]*\)\s*)?\{(.*?)\n\s*\}\);", text, re.S):
+    for m in re.finditer(r"Schema::(create|table)\(\s*['\"](\w+)['\"]\s*,\s*function\s*\([^)]*\)\s*(?:use\s*\([^)]*\)\s*)?\{(.*?)\}\s*\)\s*;", text, re.S):
         table, body = m.group(2), m.group(3)
         add(tables, table)
         for c in re.finditer(r"\$table->(\w+)\(\s*(?:['\"](\w+)['\"])?", body):

@@ -51,6 +51,9 @@ def brief(commands, words):
         "environment or a file the user names.",
         "- Something that should happen on a schedule, with nobody at the keyboard → `pa job every ...: <the brief>` or `pa watch ...` "
         "(`pa --help`), not a cron job of your own.",
+        "The job isn't done until `sakura-tool keep` has printed that it kept the tool (or the `pa` line has run). A script left on disk "
+        "is not a kept tool. Nobody has limited your tool calls: run as many as it takes, and if the keep check fails, read why and fix "
+        "the check or the script, then keep again.",
         "Finish by showing the kept tool's name and how to call it (or the pa line), and the check's output. Don't ask me to confirm "
         "the name or the check; make the standard call and tell me what you chose.",
     ]
