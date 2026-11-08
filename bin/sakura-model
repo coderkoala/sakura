@@ -15,6 +15,8 @@ doesn't qualify keeps the 9b on Ollama; `up` failing is not an error for the cal
   sakura-model down     stop it and free the VRAM
   sakura-model status   is it up, and what does it hold
   sakura-model gpu      temperature, Xid errors this boot, who holds the VRAM. --check exits 1 when a long job shouldn't start
+  sakura-model driver [NAME]   which driver file runs (qwen36, the evaluated one; ornith15, a candidate). Switching restarts the server
+  sakura-model advise   what whatmodel.sh rates for this RAM and VRAM beside Sakura's line. Sends only those two numbers, only when you run it
   sakura-model pull     download the model (15.6 GB), resumable, checksum verified
   sakura-model models   every model that suits this machine, and which are missing
   sakura-model pull-all download the missing ones, most needed first, while the disk allows
@@ -32,13 +34,35 @@ import urllib.request
 PORT = 8091
 URL = f"http://127.0.0.1:{PORT}"
 UNIT = "sakura-model"
-SLUG = "qwen36-q3"
-REPO = "mradermacher/Huihui-Qwen3.6-35B-A3B-abliterated-i1-GGUF"
-REVISION = "860d616938187b0a7fb2dfcb24d07911b6364904"
-FILENAME = "Huihui-Qwen3.6-35B-A3B-abliterated.i1-Q3_K_M.gguf"
-SIZE = 16764765344
-SHA256 = "a73d0d6e38be6c72745f3a60c311c8bfc4e4aea84a617651fb2b4d27e7ffc3a8"
+# Drivers: the same shape (35B MoE, ~3B active, Q3_K_M, abliterated by huihui, quantised by mradermacher), so the VRAM budget
+# below holds for all of them. `sakura-model driver NAME` switches; the default is the one that's been evaluated here.
+DRIVERS = {
+    "qwen36": {"repo": "mradermacher/Huihui-Qwen3.6-35B-A3B-abliterated-i1-GGUF", "revision": "860d616938187b0a7fb2dfcb24d07911b6364904",
+               "file": "Huihui-Qwen3.6-35B-A3B-abliterated.i1-Q3_K_M.gguf", "size": 16764765344,
+               "sha256": "a73d0d6e38be6c72745f3a60c311c8bfc4e4aea84a617651fb2b4d27e7ffc3a8",
+               "about": "Qwen3.6 35B-A3B, evaluated here: run 30/31, wall 27/28 (whatmodel.sh score 67)"},
+    "ornith15": {"repo": "mradermacher/Huihui-Ornith-1.5-35B-A3B-abliterated-i1-GGUF", "revision": "bb7ed149cb070175c6b130fa8827672550abda86",
+                 "file": "Huihui-Ornith-1.5-35B-A3B-abliterated.i1-Q3_K_M.gguf", "size": 17166660096,
+                 "sha256": "cae4302e05b2395a57869a88fb4885b54767392f69919b891b2be2ef753e5d45",
+                 "about": "Ornith 1.5 35B-A3B, candidate: whatmodel.sh score 69, 80 tok/s elsewhere; not evaluated here yet"},
+}
 MODEL_DIR = os.environ.get("SAKURA_MODEL_DIR", os.path.expanduser("~/.local/share/sakura/models"))
+DRIVER_FILE = os.path.join(os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura")), "driver")
+
+
+def driver_name():
+    name = os.environ.get("SAKURA_DRIVER")
+    if not name:
+        try:
+            name = open(DRIVER_FILE).read().strip()
+        except OSError:
+            name = ""
+    return name if name in DRIVERS else "qwen36"
+
+
+DRIVER = DRIVERS[driver_name()]
+SLUG = "qwen36-q3"  # the alias the launcher and evals address; kept stable across drivers so nothing else changes
+REPO, REVISION, FILENAME, SIZE, SHA256 = DRIVER["repo"], DRIVER["revision"], DRIVER["file"], DRIVER["size"], DRIVER["sha256"]
 MODEL = os.path.join(MODEL_DIR, FILENAME)
 ENGINE_DIR = os.environ.get("SAKURA_ENGINE_DIR", "/usr/local/lib/ollama")
 ENGINE = os.path.join(ENGINE_DIR, "llama-server")
@@ -191,6 +215,48 @@ def gpu(check=False):
         if temp is not None and temp >= HOT_C:
             print(f"not safe for a long job: {temp} C; let it cool")
             return 1
+    return 0
+
+
+def driver(args):
+    if not args:
+        cur = driver_name()
+        for name, d in DRIVERS.items():
+            here = os.path.isfile(os.path.join(MODEL_DIR, d["file"])) and os.path.getsize(os.path.join(MODEL_DIR, d["file"])) == d["size"]
+            print(f"{'*' if name == cur else ' '} {name:<9} {'here' if here else 'not downloaded':<14} {d['about']}")
+        return 0
+    name = args[0]
+    if name not in DRIVERS:
+        print(f"sakura-model: no driver {name}; one of: {', '.join(DRIVERS)}", file=sys.stderr)
+        return 2
+    os.makedirs(os.path.dirname(DRIVER_FILE), exist_ok=True)
+    with open(DRIVER_FILE, "w") as f:
+        f.write(name + "\n")
+    d = DRIVERS[name]
+    subprocess.run(["systemctl", "--user", "stop", UNIT], capture_output=True)
+    print(f"driver: {name} ({d['about']}). " + ("Downloaded; the next `sakura-model up` runs it." if os.path.isfile(os.path.join(MODEL_DIR, d["file"])) else "Not downloaded yet: sakura-model pull"))
+    return 0
+
+
+def advise():
+    """whatmodel.sh's list for this machine, next to what Sakura runs. A lookup the user asks for, sending RAM and VRAM only."""
+    ram_kib = int(open("/proc/meminfo").readline().split()[1])
+    v = vram()
+    url = f"https://whatmodel.sh/?ram={ram_kib}&vram={v[0] if v else 0}&n=15&format=json"
+    try:
+        data = json.load(urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "curl/8"}), timeout=20))
+    except Exception as e:
+        print(f"sakura-model: whatmodel.sh didn't answer: {e}", file=sys.stderr)
+        return 1
+    print(f"whatmodel.sh for {ram_kib // 1048576} GiB RAM and {v[0] if v else 0} MiB VRAM (its scores, measured elsewhere):")
+    mine = {"Qwen3.6 35B-A3B": "the driver (qwen36)", "Ornith 1.5 35B-A3B": "driver candidate (sakura-model driver ornith15)",
+            "Qwen3.5 9B": "the fallback 9b", "Spark-X2.6 4B": "fast-tier candidate"}
+    for m in data.get("models", []):
+        sp = m.get("speed") or {}
+        tag = next((v for k, v in mine.items() if k.lower() in m["name"].lower()), "")
+        print(f"  {m.get('rank', '?'):>4}  {m['name']:<34} {m.get('score', 0):>5.1f}  ~{m.get('need_gb', '?')} GB  {str(sp.get('value', '')) + ' tok/s' if sp else '':<10} {tag}")
+    print("A higher score isn't a better Sakura: the driver has to call tools in the qwen-code shape and pass evals/run.py here. "
+          "To try one: download it, `SAKURA_DRIVER=ornith15 sakura-model up`, then evals/run.py --model qwen36-q3 --base-url http://127.0.0.1:8091/v1.")
     return 0
 
 
@@ -356,6 +422,10 @@ def main():
         return 0
     if cmd == "gpu":
         return gpu(check="--check" in sys.argv[2:])
+    if cmd == "driver":
+        return driver(sys.argv[2:])
+    if cmd == "advise":
+        return advise()
     if cmd == "pull":
         return pull()
     if cmd == "models":
