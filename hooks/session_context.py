@@ -30,6 +30,19 @@ def build(cwd, coordinator):
     tools = tools_module().snapshot()
     if tools:
         parts.append("<kept_tools>\nCommands you wrote and kept earlier, on PATH. Run them in the shell.\n" + tools + "\n</kept_tools>")
+    # Project memory: a .sakura.md at the repo root is that project's standing notes, written by the user or by Sakura
+    # on request. It loads only in sessions started inside the repo, so it costs nothing elsewhere.
+    try:
+        import subprocess
+        top = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=5).stdout.strip()
+        note = os.path.join(top or cwd, ".sakura.md")
+        if os.path.isfile(note):
+            text = open(note, encoding="utf-8", errors="replace").read()[:3000]
+            why = memory_module().flagged(text)
+            parts.append(f"<project file=\"{note}\">\n" + (f"[withheld: {why}. Read it yourself: cat {note}]" if why else
+                         "This project's standing notes, from its .sakura.md. Background, possibly stale; the user's words now win.\n\n" + text) + "\n</project>")
+    except Exception:
+        pass
     try:
         packs = importlib.machinery.SourceFileLoader("docpack", os.path.join(ROOT, "bin", "docpack")).load_module().snapshot()
         if packs:

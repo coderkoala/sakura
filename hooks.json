@@ -29,6 +29,11 @@
             "type": "command",
             "command": "python3 __SAKURA_DIR__/hooks/recap_context.py",
             "timeout": 25
+          },
+          {
+            "type": "command",
+            "command": "python3 __SAKURA_DIR__/hooks/recall_context.py",
+            "timeout": 25
           }
         ]
       }

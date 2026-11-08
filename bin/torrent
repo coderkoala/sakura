@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+"""torrent — BitTorrent transfers over a local transmission-daemon, run as you, RPC on 127.0.0.1 only.
+
+  torrent add MAGNET|FILE|URL [--dir PATH]  add a magnet link, a .torrent file, or an http(s) URL to one;
+                                            starts the daemon if needed, prints the id and name
+  torrent list [--json]                     id, done %, speed down/up, ETA, state, name
+  torrent watch [ID]                        progress every 5 s until done; notifies and prints the file path.
+                                            Ctrl-C stops the watch, not the download
+  torrent done [--json]                     finished transfers and where their files are
+  torrent stop ID | start ID                pause / resume a transfer
+  torrent rm ID [--data]                    forget a transfer; with --data its files are deleted too
+  torrent daemon stop                       stop the daemon (transfers resume where they left off next start)
+Config lives in ~/.sakura/torrent (SAKURA_TORRENT_DIR), files land in ~/Downloads/torrents
+(SAKURA_TORRENT_DOWNLOADS). It manages transfers you already have links for.
+"""
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import time
+
+HOST = "127.0.0.1"
+PORT = 9096
+CONF = os.path.expanduser(os.environ.get("SAKURA_TORRENT_DIR") or "~/.sakura/torrent")
+DOWNLOADS = os.path.expanduser(os.environ.get("SAKURA_TORRENT_DOWNLOADS") or "~/Downloads/torrents")
+NOTIFY = os.path.join(os.path.dirname(os.path.realpath(__file__)), "notify")
+
+
+def ensure():
+    """transmission-remote and transmission-daemon on PATH, or the one command that installs them."""
+    if shutil.which("transmission-remote") and shutil.which("transmission-daemon"):
+        return
+    sys.stderr.write("torrent: transmission isn't installed. Install it with:\n"
+                     "  sudo -A apt-get install -y transmission-cli transmission-daemon\n")
+    sys.exit(1)
+
+
+def magnet_name(uri):
+    """The dn= display name of a magnet link, or None."""
+    if not uri.startswith("magnet:"):
+        return None
+    import urllib.parse
+    q = urllib.parse.parse_qs(urllib.parse.urlsplit(uri).query)
+    return (q.get("dn") or [None])[0]
+
+
+def daemon_flags(help_text, config_dir, download_dir):
+    """The daemon's start flags, but only those its --help actually lists (they move between 3.x and 4.x)."""
+    flags = []
+    for flag, value in (("--config-dir", config_dir), ("--download-dir", download_dir),
+                        ("--rpc-bind-address", HOST), ("--port", str(PORT)), ("--allowed", HOST),
+                        ("--no-auth", None), ("--no-portmap", None), ("--no-dht", None)):
+        if re.search(r"(^|[\s,])" + re.escape(flag) + r"(?=[\s=,]|$)", help_text, re.M):
+            flags.append(flag)
+            if value is not None:
+                flags.append(value)
+    return flags
+
+
+def rpc_up():
+    s = socket.socket()
+    s.settimeout(0.5)
+    try:
+        s.connect((HOST, PORT))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def start_daemon():
+    ensure()
+    if rpc_up():
+        return
+    os.makedirs(CONF, exist_ok=True)
+    os.makedirs(DOWNLOADS, exist_ok=True)
+    h = subprocess.run(["transmission-daemon", "--help"], capture_output=True, text=True)
+    subprocess.run(["transmission-daemon", *daemon_flags(h.stdout + h.stderr, CONF, DOWNLOADS)],
+                   capture_output=True, text=True)
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if rpc_up():
+            print(f"daemon up on {HOST}:{PORT}; files land in {DOWNLOADS}")
+            return
+        time.sleep(0.3)
+    sys.exit(f"torrent: the daemon didn't answer on {HOST}:{PORT} within 15 s; its log is in {CONF}")
+
+
+def remote(*args):
+    ensure()
+    return subprocess.run(["transmission-remote", f"{HOST}:{PORT}", *args], capture_output=True, text=True)
+
+
+def need_daemon(as_json=False):
+    """True when the daemon is up; otherwise say so (or print []) so list/done/watch exit clean."""
+    ensure()
+    if rpc_up():
+        return True
+    print("[]" if as_json else "the daemon isn't running; torrent add starts it")
+    return False
+
+
+def tids():
+    r = remote("-l")
+    if r.returncode:
+        sys.exit(f"torrent: {(r.stderr or r.stdout).strip()[-200:]}")
+    return [m.group(1) for m in (re.match(r"\s*(\d+)\*?\s", l) for l in r.stdout.splitlines()) if m]
+
+
+def info(tid):
+    d = {"id": tid}
+    for line in remote("-t", tid, "-i").stdout.splitlines():
+        if ": " in line:
+            k, v = line.split(": ", 1)
+            d[k.strip().lower()] = v.strip()
+    return d
+
+
+def rows(only=None):
+    return [info(t) for t in tids() if only is None or t == only]
+
+
+def pct(d):
+    try:
+        return float(d.get("percent done", "0").rstrip("%"))
+    except ValueError:
+        return 0.0
+
+
+def eta(d):
+    return d.get("eta", "").split(" (")[0] or "-"
+
+
+def path(d):
+    return os.path.join(d.get("location") or DOWNLOADS, d.get("name", ""))
+
+
+def fmt(d):
+    return (f"{d['id']:>4}  {d.get('percent done', '?'):>6}  "
+            f"{d.get('download speed', '0')} down / {d.get('upload speed', '0')} up  "
+            f"{eta(d):<12} {d.get('state', '?'):<12} {d.get('name', '?')}")
+
+
+def slim(d):
+    return {"id": int(d["id"]), "done": d.get("percent done"), "down": d.get("download speed"),
+            "up": d.get("upload speed"), "eta": eta(d), "state": d.get("state"),
+            "name": d.get("name"), "path": path(d)}
+
+
+def cmd_add(args):
+    where = None
+    if "--dir" in args:
+        i = args.index("--dir")
+        if i + 1 >= len(args):
+            print("usage: torrent add MAGNET|FILE|URL [--dir PATH]", file=sys.stderr)
+            return 2
+        where = os.path.abspath(os.path.expanduser(args[i + 1]))
+        del args[i:i + 2]
+    if not args:
+        print("usage: torrent add MAGNET|FILE|URL [--dir PATH]", file=sys.stderr)
+        return 2
+    uri = args[0]
+    name = magnet_name(uri)
+    if name:
+        print(f"adding: {name}")
+    start_daemon()
+    before = set(tids())
+    r = remote("-a", uri, *(["-w", where] if where else []))
+    if r.returncode:
+        sys.exit(f"torrent: add failed: {(r.stderr or r.stdout).strip()[-200:]}")
+    for _ in range(10):
+        new = [t for t in tids() if t not in before]
+        if new:
+            for t in new:
+                print(f"added {t}: {info(t).get('name', '?')}")
+            return 0
+        time.sleep(0.3)
+    print("added (already present, or still resolving); torrent list shows it")
+    return 0
+
+
+def cmd_list(args):
+    as_json = "--json" in args
+    if not need_daemon(as_json):
+        return 0
+    ts = rows()
+    if as_json:
+        print(json.dumps([slim(d) for d in ts], indent=1))
+    elif not ts:
+        print("no torrents")
+    else:
+        for d in ts:
+            print(fmt(d))
+    return 0
+
+
+def cmd_done(args):
+    as_json = "--json" in args
+    if not need_daemon(as_json):
+        return 0
+    fin = [d for d in rows() if pct(d) >= 100]
+    if as_json:
+        print(json.dumps([slim(d) for d in fin], indent=1))
+    elif not fin:
+        print("nothing finished yet")
+    else:
+        for d in fin:
+            print(f"{d['id']:>4}  {path(d)}")
+    return 0
+
+
+def cmd_watch(args):
+    if not need_daemon():
+        return 0
+    want = args[0] if args else None
+    seen_done = set()
+    first = True
+    try:
+        while True:
+            ts = rows(want)
+            if not ts:
+                if want:
+                    sys.exit(f"torrent: no torrent {want}")
+                print("nothing to watch")
+                return 0
+            for d in ts:
+                print(fmt(d), flush=True)
+            for d in ts:
+                if pct(d) >= 100 and d["id"] not in seen_done:
+                    seen_done.add(d["id"])
+                    if not first:
+                        subprocess.run([NOTIFY, f"torrent finished: {d.get('name', '')}", path(d)])
+                    print(f"finished: {path(d)}", flush=True)
+            if all(pct(d) >= 100 for d in ts):
+                return 0
+            first = False
+            time.sleep(5)
+            print()
+    except KeyboardInterrupt:
+        print("\nwatch stopped; the downloads keep going")
+        return 0
+
+
+def act(args, usage, *flags):
+    if not args or not args[0].isdigit():
+        sys.exit(usage)
+    r = remote("-t", args[0], *flags)
+    if r.returncode:
+        sys.exit(f"torrent: {(r.stderr or r.stdout).strip()[-200:]}")
+    return args[0]
+
+
+def cmd_stop(args):
+    print(f"paused {act(args, 'usage: torrent stop ID', '-S')}")
+    return 0
+
+
+def cmd_start(args):
+    print(f"resumed {act(args, 'usage: torrent start ID', '-s')}")
+    return 0
+
+
+def cmd_rm(args):
+    data = "--data" in args
+    args = [a for a in args if a != "--data"]
+    tid = act(args, "usage: torrent rm ID [--data]", "--remove-and-delete" if data else "--remove")
+    print(f"removed {tid} and deleted its files" if data else f"removed {tid} (files kept)")
+    return 0
+
+
+def cmd_daemon(args):
+    if args != ["stop"]:
+        sys.exit("usage: torrent daemon stop")
+    ensure()
+    if not rpc_up():
+        print("the daemon isn't running")
+        return 0
+    remote("--exit")
+    for _ in range(50):
+        if not rpc_up():
+            break
+        time.sleep(0.1)
+    print("daemon stopped; transfers resume where they left off next start")
+    return 0
+
+
+def main(argv):
+    cmds = {"add": cmd_add, "list": cmd_list, "watch": cmd_watch, "done": cmd_done,
+            "stop": cmd_stop, "start": cmd_start, "rm": cmd_rm, "daemon": cmd_daemon}
+    if not argv or argv[0] in ("-h", "--help") or argv[0] not in cmds:
+        print(__doc__.strip())
+        return 0 if argv[:1] in (["-h"], ["--help"]) else 2
+    return cmds[argv[0]](argv[1:]) or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
