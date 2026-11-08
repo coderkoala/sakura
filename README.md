@@ -135,6 +135,8 @@ The lower budget stands in for a 6 GB card by limiting the cache; it hasn't run 
 `consult` compete for the same VRAM while this server is awake (it leaves VRAM after 20 idle minutes and reuses the system
 prompt's KV cache between turns).
 
+**The fast tier.** `SAKURA_FAST=1 ?` runs Spark-X2.6 4B (abliterated, Q8, 4.4 GB): 28/30 on `evals/run.py` at a median of 8 seconds a case, measured 2026-11-08, against the 9b's 30/31. It makes real tool calls through the engine. It's a candidate to replace the 9b as the fallback too, once `evals/wall.py` and `evals/pa.py` have run on it.
+
 **Choosing a driver.** `sakura-model driver` lists the driver files Sakura knows, all the same shape (35B MoE, 3B active,
 Q3_K_M, abliterated), so the VRAM budget holds for each: `qwen36` is the one evaluated here; `ornith15` (Ornith 1.5 35B-A3B)
 is a candidate that rates higher on whatmodel.sh. `sakura-model driver ornith15` then `sakura-model pull` switches;

@@ -2,7 +2,7 @@
 # sakura-launch [request...] — open Sakura in a fresh session. This is what the `?` key runs.
 #
 # Uses the big driver if this machine qualifies (sakura-model), otherwise the 9b on Ollama. Sakura's own hooks do its
-# lookups, so they have to run on every launch. Set SAKURA_MODEL to force a model, or SAKURA_FAST=1 for the 2b.
+# lookups, so they have to run on every launch. Set SAKURA_MODEL to force a model, or SAKURA_FAST=1 for the 4B Spark.
 #   --coordinator   a session that plans and hands the work to disposable workers (the `??` key)
 #   --exec ARGS     a one-shot `sakura exec` on the same model (how sakura-worker runs)
 set -u
@@ -87,7 +87,8 @@ worker_hidden() {
     printf '%s\n' "$h/.config/sakura/sudo.pass" "$h/.secrets.local"
 }
 big="${SAKURA_BIG_MODEL:-huihui_ai/qwen3.5-abliterated:9b}"
-fast="${SAKURA_FAST_MODEL:-huihui_ai/qwen3.5-abliterated:2b}"
+# Spark-X2.6 4B (abliterated, Q8): evals/run.py 28/30 at a median 8 s per case on 2026-11-08, against the 9b's 30/31.
+fast="${SAKURA_FAST_MODEL:-hf.co/FrostWolfAI/Spark-X2.6-4B-abliterated-GGUF:Q8_0}"
 
 if ! command -v sakura >/dev/null 2>&1; then
     echo "sakura: the binary isn't installed. To build it, see patches/README.md in the Sakura repo." >&2

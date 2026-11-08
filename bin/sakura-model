@@ -295,12 +295,12 @@ def ollama_models():
     roles = SourceFileLoader("consult", os.path.join(BIN, "consult")).load_module().ROLES
     rag = os.environ.get("SAKURA_RAG_MODEL", "qwen3-embedding:0.6b")
     big = os.environ.get("SAKURA_BIG_MODEL", "huihui_ai/qwen3.5-abliterated:9b")
-    fast = os.environ.get("SAKURA_FAST_MODEL", "huihui_ai/qwen3.5-abliterated:2b")
+    fast = os.environ.get("SAKURA_FAST_MODEL", "hf.co/FrostWolfAI/Spark-X2.6-4B-abliterated-GGUF:Q8_0")
     # RAM floors: the model loaded beside a desktop. Sizes: the Q4 downloads, measured 2026-11.
     return [
         (big, "the agent when the driver can't run, and the intent check", 0, 6.6),
         (rag, "rag search", 0, 0.7),
-        (fast, "SAKURA_FAST=1", 0, 1.9),
+        (fast, "SAKURA_FAST=1: Spark-X2.6 4B, 28/30 on evals/run.py, median 8 s", 0, 4.4),
         (roles["coder-fast"], "consult coder-fast", 0, 1.9),
         (os.environ.get("SAKURA_VISION_MODEL", "huihui_ai/qwen2.5-vl-abliterated:3b"), "look (images, screenshots, scans)", 0, 3.2),
         (roles["security"], "consult security", 16, 4.7),
