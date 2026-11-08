@@ -1,0 +1,344 @@
+#!/usr/bin/env python3
+"""dl — a small download manager: resumable, queued, background, with a notification when one lands. The `?dl` key.
+
+  dl URL [URL...] [--dir PATH] [--name NAME] [--sha256 HEX]   queue and start downloading (curl, resumable, 10 retries)
+  dl list [--json]            id, %, speed, size, state, file
+  dl watch                    live progress every 2 s; notifies as each finishes. Ctrl-C stops the watch, not the downloads
+  dl stop ID | resume ID      pause (the .part stays) and carry on from where it stopped
+  dl resume                   resume everything stopped or failed (after a reboot, say)
+  dl rm ID [--data]           forget one; --data also deletes its file
+  dl done                     finished files, with paths (and sha256 verdicts where one was given)
+Files land in ~/Downloads (SAKURA_DL_DOWNLOADS overrides; --dir per download), as NAME.part until complete. State in
+~/.sakura/dl (SAKURA_DL_DIR). Resume uses HTTP ranges (curl -C -): a server that refuses ranges restarts that file from
+zero and the list says so. With --sha256 the finished file is verified and the verdict recorded.
+"""
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import urllib.parse
+
+DIR = os.path.expanduser(os.environ.get("SAKURA_DL_DIR") or "~/.sakura/dl")
+DOWNLOADS = os.path.expanduser(os.environ.get("SAKURA_DL_DOWNLOADS") or "~/Downloads")
+QUEUE = os.path.join(DIR, "queue.json")
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+def load():
+    try:
+        d = json.load(open(QUEUE))
+        return d if isinstance(d, dict) else {"v": 1, "items": d}
+    except (OSError, ValueError):
+        return {"v": 1, "items": []}
+
+
+def save(d):
+    os.makedirs(DIR, exist_ok=True)
+    tmp = QUEUE + ".tmp"
+    json.dump(d, open(tmp, "w"), indent=1)
+    os.replace(tmp, QUEUE)
+
+
+def name_from(url):
+    path = urllib.parse.unquote(urllib.parse.urlparse(url).path)
+    base = os.path.basename(path.rstrip("/")) or "download"
+    return re.sub(r"[^\w.+-]", "_", base)[:120]
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, TypeError):
+        return False
+    except PermissionError:
+        return True
+
+
+def total_of(item):
+    return item.get("total") or 0
+
+
+def part_path(item):
+    return item["file"] + ".part"
+
+
+def state_of(item):
+    if item.get("state") in ("done", "failed", "stopped", "bad-checksum"):
+        return item["state"]
+    return "downloading" if alive(item.get("pid")) else "stalled"
+
+
+def probe_size(url):
+    """Content-Length and whether ranges are accepted, from a HEAD. (0, None) when the server won't say."""
+    r = subprocess.run(["curl", "-sIL", "-m", "20", url], capture_output=True, text=True)
+    size, ranges = 0, None
+    for block in r.stdout.lower().split("\r\n\r\n"):
+        m = re.search(r"^content-length:\s*(\d+)", block, re.M)
+        if m:
+            size = int(m.group(1))
+        if re.search(r"^accept-ranges:\s*bytes", block, re.M):
+            ranges = True
+        elif re.search(r"^accept-ranges:\s*none", block, re.M):
+            ranges = False
+    return size, ranges
+
+
+def spawn(item):
+    """A detached curl for one item; a tiny parent finalizes (rename, checksum, notify) and updates the queue."""
+    pid = os.fork()
+    if pid:
+        return pid
+    os.setsid()
+    devnull = os.open(os.devnull, os.O_RDWR)
+    os.dup2(devnull, 0)
+    log = open(os.path.join(DIR, f"{item['id']}.log"), "ab", buffering=0)
+    os.dup2(log.fileno(), 1)
+    os.dup2(log.fileno(), 2)
+    part = part_path(item)
+    cmd = ["curl", "-fL", "--retry", "10", "--retry-delay", "3", "--retry-all-errors", "-C", "-", "-o", part, item["url"]]
+    rc = subprocess.run(cmd).returncode
+    d = load()
+    me = next((x for x in d["items"] if x["id"] == item["id"]), None)
+    if me is None:
+        os._exit(0)
+    if rc == 0 and os.path.exists(part):
+        verdict = ""
+        if me.get("sha256"):
+            h = hashlib.sha256()
+            with open(part, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+            ok = h.hexdigest() == me["sha256"].lower()
+            me["checksum"] = "ok" if ok else f"MISMATCH (got {h.hexdigest()})"
+            verdict = " · checksum ok" if ok else " · CHECKSUM MISMATCH"
+            if not ok:
+                me["state"] = "bad-checksum"
+                save(d)
+                notify("Download checksum FAILED", os.path.basename(me["file"]))
+                os._exit(1)
+        os.replace(part, me["file"])
+        me["state"] = "done"
+        me["finished"] = time.time()
+        save(d)
+        notify("Download finished", os.path.basename(me["file"]) + verdict)
+    else:
+        me["state"] = "failed" if me.get("state") != "stopped" else "stopped"
+        save(d)
+        if me["state"] == "failed":
+            notify("Download failed", f"{os.path.basename(me['file'])} (curl exit {rc}); dl resume {me['id']}")
+    os._exit(0)
+
+
+def notify(title, body):
+    try:
+        subprocess.run([os.path.join(ROOT, "bin", "notify"), title, body], capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def start(d, item):
+    item["state"] = "downloading"
+    item["pid"] = spawn(item)
+    save(d)
+
+
+def cmd_add(urls, dest, name, sha):
+    d = load()
+    os.makedirs(dest, exist_ok=True)
+    for url in urls:
+        if not re.match(r"https?://", url):
+            print(f"dl: not an http(s) link: {url}  (magnets go to `torrent add`)")
+            continue
+        fname = name if name and len(urls) == 1 else name_from(url)
+        file = os.path.join(dest, fname)
+        n = 1
+        while any(x["file"] == file and x.get("state") != "done" for x in d["items"]):
+            n += 1
+            file = os.path.join(dest, f"{n}-{fname}")
+        size, ranges = probe_size(url)
+        item = {"id": format(abs(hash(url + str(time.time()))) % 100000, "05d"), "url": url, "file": file,
+                "total": size, "ranges": ranges, "added": time.time(), "state": "queued"}
+        if sha and len(urls) == 1:
+            item["sha256"] = sha
+        d["items"].append(item)
+        start(d, item)
+        note = "" if ranges in (True, None) else " (server refuses ranges: a resume restarts it)"
+        print(f"{item['id']}  {os.path.basename(file)}  {human(size) if size else 'size unknown'}{note}")
+    return 0
+
+
+def human(n):
+    for u in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or u == "TB":
+            return f"{n:.0f} {u}" if u in ("B", "KB") else f"{n / 1:.1f} {u}".replace(".0 ", " ")
+        n /= 1024
+
+
+def row(item, prev=None, dt=1.0):
+    have = 0
+    p = part_path(item)
+    if os.path.exists(p):
+        have = os.path.getsize(p)
+    elif os.path.exists(item["file"]):
+        have = os.path.getsize(item["file"])
+    total = total_of(item)
+    pct = f"{100 * have / total:5.1f}%" if total else "    ?"
+    speed = ""
+    if prev is not None:
+        bps = max(0, have - prev) / dt
+        speed = f"{human(bps)}/s" if bps else ""
+    st = state_of(item)
+    return have, f"{item['id']}  {pct}  {human(have):>9} of {human(total) if total else '?':>9}  {speed:>10}  {st:<11} {os.path.basename(item['file'])}"
+
+
+def cmd_list(as_json):
+    d = load()
+    if as_json:
+        print(json.dumps([{**x, "state": state_of(x)} for x in d["items"]], indent=1))
+        return 0
+    if not d["items"]:
+        print("nothing queued")
+        return 0
+    for x in sorted(d["items"], key=lambda i: i["added"]):
+        print(row(x)[1])
+    return 0
+
+
+def cmd_watch():
+    seen_done = set()
+    prev = {}
+    try:
+        while True:
+            d = load()
+            live = [x for x in d["items"] if state_of(x) in ("downloading", "stalled", "queued")]
+            lines = []
+            for x in sorted(d["items"], key=lambda i: i["added"]):
+                have, line = row(x, prev.get(x["id"]), 2.0)
+                prev[x["id"]] = have
+                lines.append(line)
+                if state_of(x) == "done" and x["id"] not in seen_done:
+                    seen_done.add(x["id"])
+            if sys.stdout.isatty():
+                sys.stdout.write("\033[H\033[2J")
+            print(f"dl · {len(live)} active · {time.strftime('%H:%M:%S')}  (Ctrl-C stops the watch, not the downloads)")
+            print("\n".join(lines) or "nothing queued")
+            sys.stdout.flush()
+            if not live:
+                return 0
+            time.sleep(2)
+    except KeyboardInterrupt:
+        print()
+        return 0
+
+
+def find(d, did):
+    item = next((x for x in d["items"] if x["id"] == did), None)
+    if not item:
+        sys.exit(f"dl: no download {did}; see dl list")
+    return item
+
+
+def cmd_stop(did):
+    d = load()
+    item = find(d, did)
+    item["state"] = "stopped"
+    save(d)
+    if alive(item.get("pid")):
+        try:
+            os.killpg(item["pid"], signal.SIGTERM)
+        except OSError:
+            try:
+                os.kill(item["pid"], signal.SIGTERM)
+            except OSError:
+                pass
+    print(f"stopped {did}; the .part stays. dl resume {did} carries on from {human(os.path.getsize(part_path(item))) if os.path.exists(part_path(item)) else '0 B'}")
+    return 0
+
+
+def cmd_resume(did):
+    d = load()
+    targets = [find(d, did)] if did else [x for x in d["items"] if state_of(x) in ("stopped", "failed", "stalled")]
+    if not targets:
+        print("nothing to resume")
+        return 0
+    for item in targets:
+        if state_of(item) == "downloading":
+            print(f"{item['id']} is already downloading")
+            continue
+        start(d, item)
+        print(f"resumed {item['id']}  {os.path.basename(item['file'])}")
+    return 0
+
+
+def cmd_rm(did, data):
+    d = load()
+    item = find(d, did)
+    if alive(item.get("pid")):
+        try:
+            os.kill(item["pid"], signal.SIGTERM)
+        except OSError:
+            pass
+    for p in ([item["file"], part_path(item)] if data else [part_path(item)] if item.get("state") != "done" else []):
+        if os.path.exists(p):
+            os.unlink(p)
+    d["items"] = [x for x in d["items"] if x["id"] != did]
+    save(d)
+    log = os.path.join(DIR, f"{did}.log")
+    if os.path.exists(log):
+        os.unlink(log)
+    print(f"forgot {did}" + (" and deleted its file" if data else ""))
+    return 0
+
+
+def cmd_done():
+    d = load()
+    done = [x for x in d["items"] if x.get("state") in ("done", "bad-checksum")]
+    for x in sorted(done, key=lambda i: i.get("finished", 0)):
+        extra = f"  checksum {x['checksum']}" if x.get("checksum") else ""
+        print(f"{x['id']}  {human(os.path.getsize(x['file'])) if os.path.exists(x['file']) else '?':>9}  {x['file']}{extra}")
+    if not done:
+        print("nothing finished yet")
+    return 0
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0 if argv else 2
+    if argv[0] == "list":
+        return cmd_list("--json" in argv)
+    if argv[0] == "watch":
+        return cmd_watch()
+    if argv[0] == "stop":
+        return cmd_stop(argv[1]) if len(argv) > 1 else sys.exit("usage: dl stop ID")
+    if argv[0] == "resume":
+        return cmd_resume(argv[1] if len(argv) > 1 else None)
+    if argv[0] == "rm":
+        return cmd_rm(argv[1], "--data" in argv) if len(argv) > 1 else sys.exit("usage: dl rm ID [--data]")
+    if argv[0] == "done":
+        return cmd_done()
+    urls, dest, name, sha = [], DOWNLOADS, None, None
+    it = iter(argv)
+    for a in it:
+        if a == "--dir":
+            dest = os.path.expanduser(next(it, DOWNLOADS))
+        elif a == "--name":
+            name = next(it, None)
+        elif a == "--sha256":
+            sha = next(it, None)
+        else:
+            urls.append(a)
+    if not urls:
+        print(__doc__.strip())
+        return 2
+    return cmd_add(urls, dest, name, sha)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

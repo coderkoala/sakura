@@ -77,6 +77,9 @@ CHECK
 ## Cloud drives
 `drive` is Google Drive, OneDrive, Dropbox and the rest over rclone (`drive remotes`, `ls REMOTE:path`, `put FILE REMOTE:folder`, `get`, `find`, `sync SRC DEST --until WHEN` for a resident sync). "Send X to my Drive folder" → `drive put`. Connecting a new account needs the user (`drive add` opens a browser login); say so.
 
+## Downloads
+`dl URL` is a resumable background download (queue, `dl watch`, `dl stop|resume ID`, `--sha256` verifies). Asked to download a file, use it, not a bare curl: it survives stops and reboots and notifies when done. `fetch_url` stays for reading pages.
+
 ## Torrents
 `torrent add "magnet:..."` (or a .torrent file or URL) downloads over the user's transmission daemon; `torrent list|watch|done|stop|rm`. Given a magnet link, use it; don't fetch magnets from the web yourself.
 

@@ -29,11 +29,12 @@
 #   ?fmt [--check|--lint]   format and lint what you changed, right tool per language
 #   ?gpu   GPU doctor: Xids, heat, throttle, who holds the VRAM, what fits now  (sakura-gpu doctor|free|fit|scale|watch)
 #   ?drive put FILE gdrive:folder  |  drive sync ~/p gdrive:p --until midnight   (Google, OneDrive, Dropbox via rclone)
+#   ?dl URL [--sha256 HEX]  resumable download in the background; dl watch, dl stop/resume ID
 #   torrent add "magnet:..."  |  torrent watch   downloads over transmission, notification when done
 #   sakura-status   one line for tmux's status bar: driver, night queue, offers, guardian
 #   ?go [request]  a session that doesn't stop to ask (sakura-trust on makes every ? like this)
 if command -v sakura-launch >/dev/null 2>&1; then
-    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' '?pr' '?review' '?try' '?hear' '?morning' '?red' '?decide' '?why' '?setup' '?on' '?explain' '?how' '?watch' '?fmt' '?gpu' '?drive' 2>/dev/null
+    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' '?pr' '?review' '?try' '?hear' '?morning' '?red' '?decide' '?why' '?setup' '?on' '?explain' '?how' '?watch' '?fmt' '?gpu' '?drive' '?dl' 2>/dev/null
     alias '?'='sakura-launch'
     alias '?fix'='sakura-fix --shell $$'
     alias '?undo'='sakura-undo'
@@ -57,6 +58,7 @@ if command -v sakura-launch >/dev/null 2>&1; then
     alias '?fmt'='fmt'
     alias '?gpu'='sakura-gpu'
     alias '?drive'='drive'
+    alias '?dl'='dl'
     alias '?why'='sakura-decide why'
     alias '?morning'='sakura-morning'
     __sakura_hear() { local t; t="$(hear "$@")" || return 1; printf 'heard: %s\n' "$t"; sakura-launch "$t"; }
