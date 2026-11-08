@@ -184,6 +184,10 @@ python3 evals/undo.py             # ?undo, graded by file hashes
 python3 evals/tour.py             # ?tour, graded by its citations existing and the real test command
 python3 evals/tonight.py          # the night shift, graded by disk, git, a canary and the report
 python3 evals/teach.py            # ?teach, graded by sakura-tool's gate and running the tool
+python3 evals/abilities.py        # 60 checks: look, ledger, schema, procwatch, dq, offers, cron, drive, docpack, fleet, tbl, logs, worktrees
+python3 evals/gpu.py              # sakura-gpu, 40 deterministic checks
+python3 evals/torrent.py          # torrent, 19 deterministic checks
+evals/in-box.sh fix.py            # any of them inside a throwaway container; the driver stays on the host
 ```
 
 ## Install

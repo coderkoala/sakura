@@ -25,7 +25,8 @@ Measured on one machine with an 8 GB GPU, driver Ornith 1.5 35B-A3B since 0.9.5 
 | `?fix`, `?undo`, `?recap` | `?tonight` on a real night's queue (the eval runs one) |
 | `?tour` (9/9), `?tonight` (11/11) | `?teach` (2/3 at best, 1/3 often: with the guard now sending the turn back until something is kept, the 3B-active model still loses its way in `sakura-tool keep`'s check about half the time) and `?learn` (no eval: nothing but a reader can grade a lesson) |
 | The guardian's checks (deterministic) | The guardian's disk projection, until it has a fortnight of samples |
-| `look` (OCR and the vision model), `ledger`, `schema`, `procwatch`, `dq`, `pa offer`, `docpack`, `fleet`, workers in worktrees (`evals/abilities.py`, 28/28) | `hear`, `say`, `clip`, `?pr`, `?review`, `?red`, `?try`, `?morning`, `pa mail` rules, `?decide`/`?why` (smoke-tested by hand) |
+| `sakura-gpu` (40 checks), `torrent` (19 checks and a live daemon lifecycle) | `fmt`, `?watch`, `drive` against a real Google/Microsoft account (local remote only so far) |
+| `look` (OCR and the vision model), `ledger`, `schema`, `procwatch`, `dq`, `pa offer`, `pa cron`, `docpack`, `fleet`, `drive`, `tbl`, `logs`, workers in worktrees (`evals/abilities.py`, 60 checks) | `hear`, `say`, `clip`, `?pr`, `?review`, `?red`, `?try`, `?morning`, `pa mail` rules, `?decide`/`?why` (smoke-tested by hand) |
 
 ## Next: make what exists trustworthy
 
@@ -90,6 +91,16 @@ Not more harnesses: things it couldn't do before. Built means it runs and was sm
 16. **Mail that acts:** triage rules learned from you; calendar invites accepted or declined.
 17. **Not built yet: lazy skills and per-topic tool reference, a 2b router for classification, so the 9b and the driver wake only for real work.** It changes the prompt, so it waits for a full eval pass.
 18. **Receipts and forms:** OCR into a ledger; tax paperwork in नेपाली and English from templates.
+
+## Memory workflows, next (2026-11-09 brainstorm)
+
+Built: recall on back-references (`hooks/recall_context.py`), project notes (`.sakura.md`). The rest, in build order:
+1. **Reflection passes:** a nightly `pa job` reads `?recap` and proposes `sakura-memory add` lines as offers; yes writes them. The model never writes memory silently.
+2. **`?teach retro`:** mine the last session, not shell history, for a repeatable procedure, through the same `sakura-tool keep` gate.
+3. **A voice profile for mail:** learned locally from sent mail into a style note that drafting reads. The roadmap's "inbox in your voice".
+4. **Consolidation:** when a full store refuses a write, a model pass proposes merges as offers; facts unretrieved for 90 days get flagged.
+5. **Fleet-scoped memory:** a `host:` prefix so facts about one machine don't load on another; the stores already sync through dotfiles.
+Skipped deliberately: temporal knowledge graphs (heavy infra; FTS over sessions and decisions already answers why/when at this scale).
 
 ## Not doing
 
