@@ -131,7 +131,7 @@ def cmd_init(args):
     if len(rest) != 2 or not sources:
         sys.exit("usage: sakura-backup init NAME DEST --source PATH [--source PATH ...]")
     name, dest = check_name(rest[0]), rest[1]
-    if os.path.exists(conf_path(name)) or os.path.exists(pass_path(name)):
+    if os.path.exists(conf_path(name)):
         sys.exit(f"sakura-backup: a backup named {name} already exists ({conf_path(name)}); pick another name")
     sources = [os.path.abspath(os.path.expanduser(s)) for s in sources]
     for s in sources:
@@ -143,14 +143,20 @@ def cmd_init(args):
             sys.exit(f"sakura-backup: the repo {dest} is inside a source; a backup that lives in what it backs up dies with it")
     ensure()
     os.makedirs(DIR, exist_ok=True)
-    password = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32))
-    fd = os.open(pass_path(name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(password + "\n")
+    made_pass = not os.path.exists(pass_path(name))
+    if made_pass:
+        password = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32))
+        fd = os.open(pass_path(name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(password + "\n")
+    else:
+        os.chmod(pass_path(name), 0o600)
+        print(f"reusing the password file an interrupted init left at {pass_path(name)}")
     conf = {"v": 1, "dest": dest, "sources": sources, "excludes": DEFAULT_EXCLUDES}
     r = restic(name, conf, "init")
     if r.returncode:
-        os.unlink(pass_path(name))
+        if made_pass:
+            os.unlink(pass_path(name))
         fail(r, f"creating the repo at {dest}")
     with open(conf_path(name), "w", encoding="utf-8") as f:
         json.dump(conf, f, indent=1)
