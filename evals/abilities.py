@@ -176,8 +176,15 @@ def logs_local(tmp):
     out = run([os.path.join(BIN, "logs"), "--since", "5m"]).stdout
     line = next((l for l in out.splitlines() if marker in l), "")
     raw = run([os.path.join(BIN, "logs"), "--since", "5m", "--raw"]).stdout
+    env = {"SAKURA_HOME": os.path.join(tmp, "home")}
+    run([os.path.join(BIN, "logs"), "mute", marker], env)
+    muted = run([os.path.join(BIN, "logs"), "--since", "5m"], env).stdout
+    unmuted = run([os.path.join(BIN, "logs"), "--no-mute", "--since", "5m"], env).stdout
+    hits = run([os.path.join(BIN, "logs"), "mutes"], env).stdout
     return {"a planted error shows up grouped with its count": line.startswith("3\t"), "the source is the tag": "sakura-eval" in line,
-            "the table has a header": out.startswith("count\tfirst\tlast\tsource\tmessage"), "--raw lists the lines": raw.count(marker) == 3}
+            "the table has a header": out.startswith("count\tfirst\tlast\tsource\tmessage"), "--raw lists the lines": raw.count(marker) == 3,
+            "muting hides it": marker not in muted, "--no-mute shows it": marker in unmuted,
+            "mutes counts what it hid": "hidden" in hits and marker in hits}
 
 
 def decide(tmp):

@@ -7,15 +7,20 @@
   logs starlight --files    also the usual log files: nginx error.log, php-fpm, Laravel storage/logs, mysql, postgres, docker containers
   logs --raw                the lines themselves, newest last, not grouped
   logs starlight --follow   stream new errors as they happen, grouped every few seconds (Ctrl-C stops)
+  logs mute "pattern"       hide lines matching it (regex, against source and message) from every listing; per machine
+  logs mutes | unmute N     what's muted, with hit counts since muting | stop hiding one
+  logs --no-mute            show everything, mutes ignored
   logs --json
 Output: count, first seen, last seen, unit or file, message (digits, hex ids and paths collapsed so repeats group). Pipe
 to `tbl --md` for a report. Sakura uses this for "ssh in and show me the errors": it's the command, not a dig.
 """
 import json
+import os
 import re
 import shlex
 import subprocess
 import sys
+import time
 
 FILES = [
     "/var/log/nginx/error.log", "/var/log/apache2/error.log", "/var/log/php*-fpm.log", "/var/log/php/*.log", "/var/log/mysql/error.log",
@@ -136,7 +141,83 @@ def follow(host, unit):
     return 0
 
 
+MUTES = os.path.join(os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura")), "logs-mutes.json")
+
+
+def load_mutes():
+    try:
+        d = json.load(open(MUTES))
+        return d.get("items", [])
+    except (OSError, ValueError):
+        return []
+
+
+def save_mutes(items):
+    os.makedirs(os.path.dirname(MUTES), exist_ok=True)
+    json.dump({"v": 1, "items": items}, open(MUTES, "w"), indent=1)
+
+
+def apply_mutes(rows, count=True):
+    mutes = load_mutes()
+    if not mutes:
+        return rows
+    keep, hit = [], False
+    rx = [(m, re.compile(m["pattern"])) for m in mutes]
+    for ts, src, msg in rows:
+        m = next((mu for mu, r in rx if r.search(f"{src} {msg}")), None)
+        if m is None:
+            keep.append((ts, src, msg))
+        elif count:
+            m["hits"] = m.get("hits", 0) + 1
+            hit = True
+    if hit:
+        save_mutes(mutes)
+    return keep
+
+
+def cmd_mute(args):
+    if not args:
+        sys.exit('usage: logs mute "pattern"')
+    pattern = " ".join(args)
+    try:
+        re.compile(pattern)
+    except re.error as e:
+        sys.exit(f"logs: not a valid regex: {e}")
+    items = load_mutes()
+    if any(m["pattern"] == pattern for m in items):
+        sys.exit("logs: already muted")
+    items.append({"pattern": pattern, "added": time.strftime("%Y-%m-%d"), "hits": 0})
+    save_mutes(items)
+    print(f"muted ({len(items)} total): {pattern}   (logs mutes to review; logs --no-mute to peek past them)")
+
+
+def cmd_mutes(_):
+    items = load_mutes()
+    if not items:
+        print("nothing muted")
+        return
+    for i, m in enumerate(items, 1):
+        print(f"{i}  {m['added']}  {m.get('hits', 0):>6} hidden  {m['pattern']}")
+
+
+def cmd_unmute(args):
+    items = load_mutes()
+    if not args or not args[0].isdigit() or not 1 <= int(args[0]) <= len(items):
+        sys.exit("usage: logs unmute N   (from: logs mutes)")
+    gone = items.pop(int(args[0]) - 1)
+    save_mutes(items)
+    print(f"unmuted: {gone['pattern']}")
+
+
 def main(argv):
+    if argv[:1] == ["mute"]:
+        return cmd_mute(argv[1:])
+    if argv[:1] == ["mutes"]:
+        return cmd_mutes(argv[1:])
+    if argv[:1] == ["unmute"]:
+        return cmd_unmute(argv[1:])
+    no_mute = "--no-mute" in argv
+    argv = [a for a in argv if a != "--no-mute"]
     host, since, unit, want_files, raw, as_json = None, "1h", None, False, False, False
     if "--follow" in argv:
         argv = [a for a in argv if a != "--follow"]
@@ -163,6 +244,8 @@ def main(argv):
     rows = journal(host, since, unit)
     if want_files:
         rows += files(host, since)
+    if not no_mute:
+        rows = apply_mutes(rows)
     if not rows:
         print(f"no errors on {host or 'this machine'} in the last {since}" + (f" for {unit}" if unit else ""))
         return 0

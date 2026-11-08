@@ -16,6 +16,7 @@ Sakura accumulates state the user would hate to lose. These rules hold from 0.9.
 | night shift | `~/.sakura/tonight/queue.json` | `{at, seq, jobs: [{id, dir, settings, brief, status, …}]}` |
 | guardian | `~/.sakura/guardian/config.json`, `seen.json`, `disk.jsonl` | `{backups: {name: {path, every, restored?}}, certs?}`; seen: text→epoch; disk: one `{t, d}` per line |
 | downloads | `~/.sakura/dl/queue.json` | `{v, items: [{id, url, file, total, state, sha256?, checksum?}]}` |
+| logs mutes | `~/.sakura/logs-mutes.json` | `{v, items: [{pattern, added, hits}]}` |
 | drive syncs | `~/.sakura/drive/syncs.json` | list of `{id, src, dest, until, pid, started}` |
 | torrents | transmission's own config dir | transmission's format, not ours |
 | backups | `~/.sakura/backup/NAME.json` + `NAME.pass` (0600) | `{v, dest, sources, excludes}`; the password file is sacred |
