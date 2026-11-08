@@ -168,7 +168,8 @@ def tbl(tmp):
 
 
 def logs_local(tmp):
-    marker = f"sakura-abilities-{os.getpid()}"
+    import random, string
+    marker = "sakura-abilities-" + "".join(random.choices(string.ascii_lowercase, k=8))  # letters: digits are collapsed when grouping
     for _ in range(3):
         subprocess.run(["logger", "-p", "user.err", "-t", "sakura-eval", f"{marker} failed: code {os.getpid()}"], check=False)
     time.sleep(1.5)
