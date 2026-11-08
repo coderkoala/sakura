@@ -220,7 +220,55 @@ def watch(tmp):
             "it counts the changes in the header": any("change" in l and "every 1s" in l for l in lines)}
 
 
-CASES = {"tbl": tbl, "logs": logs_local, "decide": decide, "clip": clip, "status": status, "watch": watch, "look-ocr": look_ocr, "look-vision": look_vision, "ledger": ledger, "schema": schema, "procwatch": procwatch, "dq": dq,
+def drive(tmp):
+    import shutil as sh
+    if not sh.which("rclone"):
+        return {"skipped: rclone not installed": True}
+    src, dst = os.path.join(tmp, "src"), os.path.join(tmp, "dst")
+    os.makedirs(src); os.makedirs(dst)
+    open(os.path.join(src, "a.txt"), "w").write("one")
+    open(os.path.join(src, "b.txt"), "w").write("two")
+    conf = os.path.join(tmp, "rclone.conf")
+    env = {"RCLONE_CONFIG": conf, "SAKURA_HOME": os.path.join(tmp, "home")}
+    subprocess.run(["rclone", "--config", conf, "config", "create", "loc", "local"], capture_output=True)
+    put = run([os.path.join(BIN, "drive"), "put", os.path.join(src, "a.txt"), f"loc:{dst}"], env, timeout=60)
+    ls = run([os.path.join(BIN, "drive"), "ls", f"loc:{src}"], env, timeout=60).stdout
+    dry = run([os.path.join(BIN, "drive"), "sync", src, f"loc:{dst}", "--dry-run"], env, timeout=60)
+    before = set(os.listdir(dst))
+    run([os.path.join(BIN, "drive"), "sync", src, f"loc:{dst}"], env, timeout=60)
+    after = set(os.listdir(dst))
+    return {"put uploads one file": os.path.exists(os.path.join(dst, "a.txt")) and put.returncode == 0,
+            "ls lists the folder": "a.txt" in ls and "b.txt" in ls,
+            "dry-run moves nothing": before == {"a.txt"} and "--dry-run" not in dry.stderr,
+            "sync makes dest match src": after == {"a.txt", "b.txt"}}
+
+
+def cron(tmp):
+    env = {"SAKURA_PA_DIR": os.path.join(tmp, "pa"), "SAKURA_PA_NO_TIMER": "1", "SAKURA_PA_NOTIFY": "/bin/true"}
+    pa = os.path.join(BIN, "pa")
+    marker = os.path.join(tmp, "fired")
+    run([pa, "cron", "dec 26 00:00", "--", "true"], env, cwd=tmp)
+    run([pa, "cron", "every day 02:00", "--", f"echo hi > {marker}"], env, cwd=tmp)
+    lst = run([pa, "cron", "list"], env, cwd=tmp).stdout
+    import glob, json as J
+    sched = J.load(open(glob.glob(os.path.join(tmp, "pa", "schedule.json"))[0]))
+    cid = next((i["id"] for i in sched if i["kind"] == "command" and marker in i["command"]), None)
+    test = run([pa, "test", cid], env, cwd=tmp).stdout if cid else ""
+    # force it due and tick
+    for i in sched:
+        if i["id"] == cid:
+            import datetime
+            i["at"] = (datetime.datetime.now() - datetime.timedelta(minutes=1)).isoformat()
+    J.dump(sched, open(glob.glob(os.path.join(tmp, "pa", "schedule.json"))[0], "w"))
+    run([pa, "tick"], env, cwd=tmp)
+    time.sleep(0.5)
+    return {"a dated cron item is stored": "12-26" in lst or "2026-12-26" in lst,
+            "a repeating one shows its schedule": "every day at 02:00" in lst,
+            "test shows the command and a shell check": "shell check: ok" in test,
+            "tick runs the due command": os.path.exists(marker)}
+
+
+CASES = {"tbl": tbl, "logs": logs_local, "decide": decide, "clip": clip, "status": status, "watch": watch, "drive": drive, "cron": cron, "look-ocr": look_ocr, "look-vision": look_vision, "ledger": ledger, "schema": schema, "procwatch": procwatch, "dq": dq,
          "offer": offer, "docpack": docpack, "fleet": fleet, "worktree": worktree}
 
 

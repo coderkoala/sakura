@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""drive — your Google Drive, OneDrive, Dropbox and the rest, from the terminal. Over rclone, nothing hosted by me. The `?drive` key.
+
+  drive remotes                       the cloud accounts rclone knows (set one up with: drive add)
+  drive add                           connect an account (opens rclone's browser login; Google, OneDrive, Dropbox, S3, …)
+  drive ls REMOTE:[path]              list a folder               drive ls gdrive:Invoices
+  drive put FILE... REMOTE:folder     upload                      drive put report.pdf gdrive:Work/2026
+  drive get REMOTE:path [DEST]        download
+  drive find REMOTE: "name"           search by name across the remote
+  drive sync SRC DEST [--until WHEN]  keep DEST matching SRC, now and then every minute until WHEN (a resident sync).
+                                      "sync ~/project gdrive:project --until midnight" copies changes till 00:00, then stops.
+  drive sync-list / drive sync-stop ID
+Each account logs in once, in rclone's own browser window; its token stays on this machine. `--dry-run` on put/get/sync
+shows what would move without moving it. Mail a file to a folder someone shares with you is `drive put` to that remote.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+STATE = os.path.join(os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura")), "drive")
+SYNCS = os.path.join(STATE, "syncs.json")
+
+
+def ensure_rclone():
+    if shutil.which("rclone"):
+        return "rclone"
+    local = os.path.expanduser("~/.local/bin/rclone")
+    if os.path.exists(local):
+        return local
+    sys.stderr.write("drive: rclone isn't installed. Install it with:\n  sudo -A apt-get install -y rclone\n"
+                     "  or the upstream build: curl -fsSL https://rclone.org/install.sh | sudo -A bash\n")
+    sys.exit(1)
+
+
+def rclone(*args, capture=True, timeout=None):
+    cmd = [ensure_rclone(), *args]
+    if capture:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return subprocess.run(cmd, timeout=timeout)
+
+
+def load_syncs():
+    try:
+        return json.load(open(SYNCS))
+    except (OSError, ValueError):
+        return []
+
+
+def save_syncs(d):
+    os.makedirs(STATE, exist_ok=True)
+    json.dump(d, open(SYNCS, "w"), indent=1)
+
+
+def until_ts(when):
+    """Unix time for a 'WHEN', via pa's own time parser so 'midnight', 'friday 3pm', ISO all work."""
+    try:
+        import importlib.machinery
+        pa = importlib.machinery.SourceFileLoader("pa", os.path.join(os.path.dirname(os.path.realpath(__file__)), "pa")).load_module()
+        at = pa.when_from(when) or (pa.now().replace(hour=0, minute=0, second=0) if when == "midnight" else None)
+        if at:
+            import datetime
+            if at <= pa.now():
+                at += datetime.timedelta(days=1)
+            return at.timestamp()
+    except Exception:
+        pass
+    return None
+
+
+def cmd_remotes(_):
+    out = rclone("listremotes").stdout.strip()
+    if not out:
+        print("no cloud accounts yet. Connect one with: drive add")
+        return 0
+    print("connected:")
+    for r in out.splitlines():
+        kind = rclone("config", "dump").stdout
+        try:
+            t = json.loads(kind).get(r.rstrip(":"), {}).get("type", "")
+        except ValueError:
+            t = ""
+        print(f"  {r:<20} {t}")
+    return 0
+
+
+def cmd_add(_):
+    print("Opening rclone's setup. Pick 'n' for a new remote, name it (e.g. gdrive), choose the provider, and log in in the browser.")
+    return rclone("config", capture=False).returncode
+
+
+def cmd_ls(args):
+    if not args:
+        sys.exit("usage: drive ls REMOTE:[path]")
+    r = rclone("lsf", "--max-depth", "1", args[0])
+    if r.returncode:
+        sys.exit(f"drive: {r.stderr.strip()[-200:]}")
+    sys.stdout.write(r.stdout)
+    return 0
+
+
+def cmd_put(args):
+    dry = "--dry-run" in args
+    args = [a for a in args if a != "--dry-run"]
+    if len(args) < 2:
+        sys.exit("usage: drive put FILE... REMOTE:folder")
+    *files, dest = args
+    if ":" not in dest:
+        sys.exit("drive: the last argument must be a remote, like gdrive:Work")
+    rc = 0
+    for f in files:
+        if not os.path.exists(f):
+            print(f"drive: no such file: {f}")
+            rc = 1
+            continue
+        r = rclone("copy", "-P", *(["--dry-run"] if dry else []), f, dest, capture=False)
+        rc = rc or r.returncode
+        if r.returncode == 0:
+            print(f"{'would upload' if dry else 'uploaded'} {f} → {dest}")
+    return rc
+
+
+def cmd_get(args):
+    dry = "--dry-run" in args
+    args = [a for a in args if a != "--dry-run"]
+    if not args:
+        sys.exit("usage: drive get REMOTE:path [DEST]")
+    src = args[0]
+    dest = args[1] if len(args) > 1 else "."
+    r = rclone("copy", "-P", *(["--dry-run"] if dry else []), src, dest, capture=False)
+    if r.returncode == 0:
+        print(f"{'would download' if dry else 'downloaded'} {src} → {dest}")
+    return r.returncode
+
+
+def cmd_find(args):
+    if len(args) < 2:
+        sys.exit('usage: drive find REMOTE: "name"')
+    r = rclone("lsf", "-R", "--include", f"*{args[1]}*", args[0])
+    sys.stdout.write(r.stdout or "(nothing found)\n")
+    return 0
+
+
+def do_sync(src, dest, dry):
+    return rclone("sync", "-P", *(["--dry-run"] if dry else []), src, dest, capture=False).returncode
+
+
+def cmd_sync(args):
+    dry = "--dry-run" in args
+    args = [a for a in args if a != "--dry-run"]
+    until = None
+    if "--until" in args:
+        i = args.index("--until")
+        until = until_ts(args[i + 1]) if i + 1 < len(args) else None
+        if args[i + 1:i + 2] and until is None:
+            sys.exit(f"drive: couldn't read the time: {args[i + 1]}")
+        del args[i:i + 2]
+    if len(args) != 2:
+        sys.exit('usage: drive sync SRC DEST [--until WHEN]')
+    src, dest = args
+    if ":" not in src + dest:
+        sys.exit("drive: one side must be a remote, like gdrive:project")
+    print(f"syncing {src} → {dest}")
+    rc = do_sync(src, dest, dry)
+    if until is None or dry:
+        return rc
+    # Resident sync: a detached loop that re-syncs every minute until the deadline, logging to the drive state dir.
+    pid = os.fork()
+    if pid:
+        syncs = load_syncs()
+        sid = format(int(time.time()) % 100000, "05d")
+        syncs.append({"id": sid, "src": src, "dest": dest, "until": until, "pid": pid, "started": time.time()})
+        save_syncs(syncs)
+        import datetime
+        print(f"resident sync {sid} running until {datetime.datetime.fromtimestamp(until):%H:%M} (every minute). drive sync-list, drive sync-stop {sid}")
+        return 0
+    os.setsid()
+    devnull = os.open(os.devnull, os.O_RDWR)
+    os.dup2(devnull, 0)
+    log = open(os.path.join(STATE, "sync.log"), "a")
+    os.dup2(log.fileno(), 1)
+    os.dup2(log.fileno(), 2)
+    while time.time() < until:
+        time.sleep(60)
+        if time.time() >= until:
+            break
+        print(f"[{time.strftime('%H:%M')}] re-sync {src} -> {dest}", flush=True)
+        do_sync(src, dest, False)
+    print(f"[{time.strftime('%H:%M')}] sync window closed", flush=True)
+    syncs = [x for x in load_syncs() if x["pid"] != os.getpid()]
+    save_syncs(syncs)
+    os._exit(0)
+
+
+def cmd_sync_list(_):
+    now = time.time()
+    live = []
+    for x in load_syncs():
+        try:
+            os.kill(x["pid"], 0)
+            alive = x["until"] > now
+        except (ProcessLookupError, PermissionError):
+            alive = False
+        if alive:
+            import datetime
+            print(f"{x['id']}  {x['src']} → {x['dest']}  until {datetime.datetime.fromtimestamp(x['until']):%H:%M}")
+            live.append(x)
+    save_syncs(live)
+    if not live:
+        print("no resident syncs")
+    return 0
+
+
+def cmd_sync_stop(args):
+    if not args:
+        sys.exit("usage: drive sync-stop ID")
+    syncs = load_syncs()
+    for x in syncs:
+        if x["id"] == args[0]:
+            try:
+                os.kill(x["pid"], 15)
+            except OSError:
+                pass
+            save_syncs([y for y in syncs if y["id"] != args[0]])
+            print(f"stopped sync {args[0]}")
+            return 0
+    sys.exit(f"drive: no sync {args[0]}")
+
+
+def main(argv):
+    cmds = {"remotes": cmd_remotes, "add": cmd_add, "ls": cmd_ls, "put": cmd_put, "get": cmd_get, "find": cmd_find,
+            "sync": cmd_sync, "sync-list": cmd_sync_list, "sync-stop": cmd_sync_stop}
+    if not argv or argv[0] in ("-h", "--help") or argv[0] not in cmds:
+        print(__doc__.strip())
+        return 0 if argv[:1] in (["-h"], ["--help"]) else 2
+    return cmds[argv[0]](argv[1:])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
