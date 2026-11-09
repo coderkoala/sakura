@@ -519,7 +519,7 @@ index edddb2546..f530c5322 100644
  
      // Count either the full active context or only the tokens added after the initial prefix.
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index b6efe1d68..9b78c7fe2 100644
+index 6eb52a7bb..0d34bbe79 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -365,8 +365,6 @@ use codex_protocol::protocol::DeprecationNoticeEvent;
@@ -551,7 +551,7 @@ index b6efe1d68..9b78c7fe2 100644
      pub(crate) async fn get_total_token_usage(&self) -> i64 {
          let state = self.state.lock().await;
          state.get_total_token_usage(state.server_reasoning_included())
-@@ -3920,28 +3920,13 @@ impl Session {
+@@ -3931,28 +3931,13 @@ impl Session {
  
          warn!("server reported model {server_model} while requested model was {requested_model}");
  
@@ -623,10 +623,10 @@ index aa0c7b163..0c1d0b18a 100644
  }
  #[cfg(test)]
 diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
-index 105783518..2b8e097ec 100644
+index ee4429e8a..115a67081 100644
 --- a/codex-rs/core/src/unified_exec/process_manager.rs
 +++ b/codex-rs/core/src/unified_exec/process_manager.rs
-@@ -89,6 +89,8 @@ use codex_tools::ToolName;
+@@ -91,6 +91,8 @@ use codex_tools::ToolName;
  use codex_utils_output_truncation::approx_tokens_from_byte_count;
  use codex_utils_path_uri::PathUri;
  
@@ -635,7 +635,7 @@ index 105783518..2b8e097ec 100644
  const UNIFIED_EXEC_ENV: [(&str, &str); 10] = [
      ("NO_COLOR", "1"),
      ("TERM", "dumb"),
-@@ -630,7 +632,13 @@ impl UnifiedExecProcessManager {
+@@ -632,7 +634,13 @@ impl UnifiedExecProcessManager {
              }
          };
  
