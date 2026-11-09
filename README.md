@@ -161,7 +161,7 @@ it. A higher score isn't a better Sakura until the model calls tools in the qwen
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md): where it stands, what comes next, and what it's aiming for.
+See [ROADMAP.md](ROADMAP.md): where it stands, what comes next, and what it's aiming for. [docs/everything.md](docs/everything.md) is the map behind it: every want, the open-source tool and the 8 GB model that serve it, and what Sakura does about it today and next.
 
 ## Layout
 

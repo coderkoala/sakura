@@ -155,6 +155,15 @@ for web pages** through the shared browser. Each needs a deterministic eval befo
 checks: **`vid watch URL`** (what's new on a channel since the last look; exit 1 when there is, so `pa job every sunday 9am: vid watch …`
 nags), **`conv extract`** (zip, tar, 7z, rar into their own folder; entries pointing outside it, and links, refused), **`conv URL --to pdf|png|md`** (the local headless browser prints the page), **`dupes`** (the same file by content across drives, kept once by hard link or deleted, dry run first), **`shelve`** (photos and videos into `YEAR/YEAR-MM` by the day taken, sidecars along), and **`sakura-doctor`** (is the install whole; it found twenty commands that didn't answer `--help`, now fixed, so the README's promise is checked, not assumed).
 
+## Everything (2026-11-09 research)
+
+Three research passes — open-source tools by everyday use, open-weight models by want on 8 GB, and what the other local
+agents of 2026 offer — are mapped in [docs/everything.md](docs/everything.md): for each want, the tool the web services run
+underneath, the model that fits, what Sakura does today, and what's next. The build order it ends with, each needing an eval
+first: `conv subs|denoise|stems` → `restore` (Real-ESRGAN, RIFE, SeedVR2) → `faces` (InsightFace + SigLIP 2, local only) →
+`conv redact|fill|sign` and the Nepal paperwork templates → `translate` (Argos/NLLB) and Nepali/Hindi embeddings for `rag` →
+`money` (hledger) → kept procedures, a repo map and a tool-call shim → a messaging gateway with pairing, last and default-closed.
+
 ## Not doing
 
 - Bypassing CAPTCHAs or bot detection, or anything that hides automation from a site.
