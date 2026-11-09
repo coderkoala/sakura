@@ -981,6 +981,142 @@ def doctor(tmp):
     }
 
 
+def pdfops(tmp):
+    from pypdf import PdfReader
+    from reportlab.pdfgen import canvas
+
+    c = os.path.join(BIN, "conv")
+    cv = canvas.Canvas(os.path.join(tmp, "secret.pdf"))
+    cv.drawString(
+        72,
+        700,
+        "Patient: Ram Bahadur. Citizenship no 12-34-56-78901. Visit on 2026-03-09.",
+    )
+    cv.drawString(72, 680, "Nothing else of note. Phone 9841-000000.")
+    cv.showPage()
+    cv.save()
+    cv = canvas.Canvas(os.path.join(tmp, "form.pdf"))
+    f = cv.acroForm
+    f.textfield(name="name", x=130, y=710, width=200, height=20)
+    f.textfield(name="amount", x=130, y=670, width=100, height=20)
+    f.checkbox(name="agree", x=130, y=635, size=16)
+    cv.showPage()
+    cv.save()
+    open(os.path.join(tmp, "data.json"), "w").write(
+        '{"name": "Kai Dahal", "amount": "4,200", "agree": "/Yes", "nothing": "x"}'
+    )
+    env = {"SAKURA_HOME": os.path.join(tmp, "home")}
+    red = run([c, "redact", "secret.pdf", "12-34-56-78901", "-o", "red.pdf"], cwd=tmp)
+    rx = run(
+        [c, "redact", "secret.pdf", r"\d{4}-\d{6}", "--regex", "-o", "rx.pdf"], cwd=tmp
+    )
+    text = lambda f: (
+        subprocess.run(
+            ["pdftotext", os.path.join(tmp, f), "-"], capture_output=True, text=True
+        ).stdout
+    )  # noqa: E731
+    raw = lambda f: open(os.path.join(tmp, f), "rb").read()  # noqa: E731
+    fields_out = run([c, "fields", "form.pdf", "--json"], cwd=tmp)
+    fill = run([c, "fill", "form.pdf", "data.json", "-o", "filled.pdf"], cwd=tmp)
+    filled = (
+        {
+            k: v.get("/V")
+            for k, v in PdfReader(os.path.join(tmp, "filled.pdf")).get_fields().items()
+        }
+        if os.path.exists(os.path.join(tmp, "filled.pdf"))
+        else {}
+    )
+    sign = run(
+        [c, "sign", "secret.pdf", "--self-signed", "Kai Dahal", "-o", "signed.pdf"],
+        env,
+        cwd=tmp,
+    )
+    ver = run([c, "verify", "signed.pdf"], env, cwd=tmp)
+    other = run(
+        [c, "verify", "signed.pdf"],
+        {"SAKURA_HOME": os.path.join(tmp, "nobody")},
+        cwd=tmp,
+    )
+    with open(os.path.join(tmp, "signed.pdf"), "ab") as f:
+        f.write(b"x")
+    tampered = run([c, "verify", "signed.pdf"], env, cwd=tmp)
+    key = os.path.join(tmp, "home", "sign", "key.pem")
+    return {
+        "redact removes the text from the file, not just the view": red.returncode == 0
+        and "12-34-56-78901" not in text("red.pdf")
+        and b"78901" not in raw("red.pdf")
+        and "Ram Bahadur" in text("red.pdf"),
+        "redact --regex takes only what matches": rx.returncode == 0
+        and "9841-000000" not in text("rx.pdf")
+        and "12-34-56-78901" in text("rx.pdf"),
+        "fields lists the form": set(json.loads(fields_out.stdout))
+        == {"name", "amount", "agree"},
+        "fill sets them, names the unknown key, never touches the input": filled
+        == {"name": "Kai Dahal", "amount": "4,200", "agree": "/Yes"}
+        and "nothing" in fill.stdout
+        and (
+            PdfReader(os.path.join(tmp, "form.pdf")).get_fields()["name"].get("/V")
+            in (None, "")
+        ),
+        "sign makes a 0600 key once and a verifiable signature": sign.returncode == 0
+        and os.path.exists(key)
+        and oct(os.stat(key).st_mode)[-3:] == "600"
+        and ver.returncode == 0
+        and "intact" in ver.stdout
+        and "trusted" in ver.stdout
+        and "whole document" in ver.stdout,
+        "a signer nobody trusts is said so": other.returncode == 1
+        and "not trusted" in other.stdout,
+        "a change after signing fails verification": tampered.returncode == 1
+        and "changed after signing" in tampered.stdout,
+    }
+
+
+def money(tmp):
+    m = os.path.join(BIN, "money")
+    env = {"SAKURA_MONEY_DIR": os.path.join(tmp, "money")}
+    open(os.path.join(tmp, "nabil-2026-03.csv"), "w").write(
+        "Date,Description,Amount,Balance\n2026-03-01,SALARY ACME LTD,120000.00,150000.00\n2026-03-03,BHATBHATENI SUPERMARKET,-4200.00,145800.00\n2026-03-05,KFC DURBARMARG,-1350.00,144450.00\n"
+    )
+    first = run([m, "import", os.path.join(tmp, "nabil-2026-03.csv")], env)
+    again = run([m, "import", os.path.join(tmp, "nabil-2026-03.csv")], env)
+    rule = run([m, "rule", "BHATBHATENI|KFC", "expenses:food"], env)
+    open(os.path.join(tmp, "nabil-2026-04.csv"), "w").write(
+        "Date,Description,Amount,Balance\n2026-04-02,KFC DURBARMARG,-990.00,141360.00\n"
+    )
+    run([m, "import", os.path.join(tmp, "nabil-2026-04.csv")], env)
+    march = run([m, "month", "2026-03"], env).stdout
+    april = run([m, "month", "2026-04"], env).stdout
+    open(os.path.join(tmp, "everest.csv"), "w").write(
+        "Txn Date;Particulars;Debit;Credit;Balance\n05/03/2026;ATM WITHDRAWAL;5000.00;;100000.00\n06/03/2026;INTEREST;;120.50;100120.50\n"
+    )
+    ev = run([m, "import", os.path.join(tmp, "everest.csv")], env)
+    bal = run([m, "bal"], env).stdout
+    journal = open(os.path.join(tmp, "money", "journal.ledger")).read()
+    return {
+        "the first import writes rules from the header and imports every line": first.returncode
+        == 0
+        and "imported 3 new" in first.stdout
+        and os.path.exists(os.path.join(tmp, "money", "rules", "nabil.rules")),
+        "importing the same statement again adds nothing": "no new transactions"
+        in again.stdout
+        and journal.count("SALARY ACME") == 1,
+        "salary is income, groceries an expense": "income:unknown" in march
+        and "120000.00" in march
+        and "expenses:unknown" in march
+        and "5550.00" in march,
+        "a rule categorises later imports": rule.returncode == 0
+        and "expenses:food" in april
+        and "990.00" in april,
+        "a debit/credit statement with ; and dd/mm/yyyy dates imports": ev.returncode
+        == 0
+        and "imported 2 new" in ev.stdout
+        and "2026-03-05 ATM WITHDRAWAL" in journal,
+        "the running balance column is not asserted": "=" not in journal
+        and "everest" in bal,
+    }
+
+
 CASES = {
     "ports": ports,
     "space": space,
@@ -996,6 +1132,8 @@ CASES = {
     "shelve": shelve,
     "convurl": convurl,
     "doctor": doctor,
+    "pdfops": pdfops,
+    "money": money,
 }
 
 

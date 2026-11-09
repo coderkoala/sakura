@@ -13,22 +13,22 @@
 
 Measured on one machine with an 8 GB GPU, driver Ornith 1.5 35B-A3B since 0.9.5 (run 30/30, wall 27/28; Qwen3.6 before it: 30/31, 27/28). Results vary between runs, so treat them as rates, not guarantees.
 
-| Works, with an eval | Built, not proven enough |
-|---|---|
-| Multi-step work over ssh, with honest failure | Email with a real provider (tested on a local server only) |
-| Live facts from primary sources | CAPTCHA hand-off on a real site (tested on a local page) |
-| Disposable workers and a coordinator | Guards on the main agent (pattern matching, not a sandbox) |
-| Long tasks that used to crash a 32k context | Tools it grows itself (a weak check can pass a weak tool) |
-| Local document search, office files, the shared browser | Anything on a second machine, or on real 6 GB hardware |
-| Reminders, briefs, watches, auto-reply | Workers with `network: yes` (keys, agents and sockets hidden unless the job names them) |
-| A sandbox around workers: no network, writes only where the job allows | |
-| `?fix`, `?undo`, `?recap` | `?tonight` on a real night's queue (the eval runs one) |
-| `?tour` (9/9), `?tonight` (11/11) | `?teach` (2/3 at best, 1/3 often: with the guard now sending the turn back until something is kept, the 3B-active model still loses its way in `sakura-tool keep`'s check about half the time) and `?learn` (no eval: nothing but a reader can grade a lesson) |
-| The guardian's checks (deterministic) | The guardian's disk projection, until it has a fortnight of samples |
-| `sakura-gpu` (40 checks), `torrent` (19 checks and a live daemon lifecycle), `dl` (12 checks, byte-range resume proven), `sakura-backup` (27 checks, a real restore each run) | `fmt`, `?watch`, `drive` against a real Google/Microsoft account (local remote only so far) |
-| `look` (OCR and the vision model), `ledger`, `schema`, `procwatch`, `dq`, `pa offer`, `pa cron`, `docpack`, `fleet`, `drive`, `tbl`, `logs`, workers in worktrees (`evals/abilities.py`, 60 checks) | `hear`, `say`, `clip`, `?pr`, `?review`, `?red`, `?try`, `?morning`, `pa mail` rules, `?decide`/`?why` (smoke-tested by hand) |
-| A trust boundary: fetched content scanned for injection and bannered as data, smuggling characters stripped, data-egress to un-named hosts gated for approval, the answer checked for exfil sinks (`evals/injection.py`, 25 checks) | Dual-LLM / quarantine split — one model still holds untrusted content and the tools; the egress gate is the compensating control |
-| The machine room: `ports`, `space`, `drift`, `when`, `sakura-notes`, `host:` memory, `sakura-doctor`; `conv`, `vid`, `dupes`, `shelve` (`evals/machineroom.py`, 85 checks; `vid` and `conv URL` against a local server) | `vid` against a real site with a browser login; `conv ocr` (ocrmypdf wasn't on the eval machine); LibreOffice conversions beyond txt→pdf |
+| Works, with an eval                                                                                                                                                                                                                                         | Built, not proven enough                                                                                                                                                                                                                                       |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Multi-step work over ssh, with honest failure                                                                                                                                                                                                               | Email with a real provider (tested on a local server only)                                                                                                                                                                                                     |
+| Live facts from primary sources                                                                                                                                                                                                                             | CAPTCHA hand-off on a real site (tested on a local page)                                                                                                                                                                                                       |
+| Disposable workers and a coordinator                                                                                                                                                                                                                        | Guards on the main agent (pattern matching, not a sandbox)                                                                                                                                                                                                     |
+| Long tasks that used to crash a 32k context                                                                                                                                                                                                                 | Tools it grows itself (a weak check can pass a weak tool)                                                                                                                                                                                                      |
+| Local document search, office files, the shared browser                                                                                                                                                                                                     | Anything on a second machine, or on real 6 GB hardware                                                                                                                                                                                                         |
+| Reminders, briefs, watches, auto-reply                                                                                                                                                                                                                      | Workers with `network: yes` (keys, agents and sockets hidden unless the job names them)                                                                                                                                                                        |
+| A sandbox around workers: no network, writes only where the job allows                                                                                                                                                                                      |                                                                                                                                                                                                                                                                |
+| `?fix`, `?undo`, `?recap`                                                                                                                                                                                                                                   | `?tonight` on a real night's queue (the eval runs one)                                                                                                                                                                                                         |
+| `?tour` (9/9), `?tonight` (11/11)                                                                                                                                                                                                                           | `?teach` (2/3 at best, 1/3 often: with the guard now sending the turn back until something is kept, the 3B-active model still loses its way in `sakura-tool keep`'s check about half the time) and `?learn` (no eval: nothing but a reader can grade a lesson) |
+| The guardian's checks (deterministic)                                                                                                                                                                                                                       | The guardian's disk projection, until it has a fortnight of samples                                                                                                                                                                                            |
+| `sakura-gpu` (40 checks), `torrent` (19 checks and a live daemon lifecycle), `dl` (12 checks, byte-range resume proven), `sakura-backup` (27 checks, a real restore each run)                                                                               | `fmt`, `?watch`, `drive` against a real Google/Microsoft account (local remote only so far)                                                                                                                                                                    |
+| `look` (OCR and the vision model), `ledger`, `schema`, `procwatch`, `dq`, `pa offer`, `pa cron`, `docpack`, `fleet`, `drive`, `tbl`, `logs`, workers in worktrees (`evals/abilities.py`, 60 checks)                                                         | `hear`, `say`, `clip`, `?pr`, `?review`, `?red`, `?try`, `?morning`, `pa mail` rules, `?decide`/`?why` (smoke-tested by hand)                                                                                                                                  |
+| A trust boundary: fetched content scanned for injection and bannered as data, smuggling characters stripped, data-egress to un-named hosts gated for approval, the answer checked for exfil sinks (`evals/injection.py`, 25 checks)                         | Dual-LLM / quarantine split — one model still holds untrusted content and the tools; the egress gate is the compensating control                                                                                                                               |
+| The machine room: `ports`, `space`, `drift`, `when`, `sakura-notes`, `host:` memory, `sakura-doctor`; `conv` (incl. redact, fill, sign), `vid`, `dupes`, `shelve`, `money` (`evals/machineroom.py`, 98 checks; `vid` and `conv URL` against a local server) | `vid` against a real site with a browser login; `conv ocr` (ocrmypdf wasn't on the eval machine); LibreOffice conversions beyond txt→pdf                                                                                                                       |
 
 ## Next: make what exists trustworthy
 
@@ -75,6 +75,7 @@ Partly shipped (`ledger` for receipts and records; forms and letters not yet): *
 ## Abilities (2026-11-08 brainstorm). Built the same day unless marked.
 
 Not more harnesses: things it couldn't do before. Built means it runs and was smoke-tested by hand; only `?tour`, `?tonight` and the worker wall have evals. The rest need evals before the table above can claim them.
+
 1. **Hardware economy in `sakura-model`:** keep the system prompt's KV cache warm between turns; unload the driver after 20 idle minutes and reload on the next `?`; refuse a long eval or night job when the GPU is hot or has thrown an Xid this boot.
 2. **Eyes:** `look FILE` with a local vision model that fits 8 GB: screenshots, error dialogs, scans, receipts, whiteboards.
 3. **`?pr` and `?review`:** a PR from the branch with a body from the diff and commits; findings on a PR's diff. All through `gh`.
@@ -97,12 +98,13 @@ Not more harnesses: things it couldn't do before. Built means it runs and was sm
 ## Memory workflows, next (2026-11-09 brainstorm)
 
 Built: recall on back-references (`hooks/recall_context.py`), project notes (`.sakura.md`). The rest, in build order:
+
 1. **Reflection passes:** a nightly `pa job` reads `?recap` and proposes `sakura-memory add` lines as offers; yes writes them. The model never writes memory silently.
 2. **`?teach retro`:** mine the last session, not shell history, for a repeatable procedure, through the same `sakura-tool keep` gate.
 3. **A voice profile for mail:** learned locally from sent mail into a style note that drafting reads. The roadmap's "inbox in your voice".
 4. **Consolidation:** when a full store refuses a write, a model pass proposes merges as offers; facts unretrieved for 90 days get flagged.
 5. **Fleet-scoped memory:** a `host:` prefix so facts about one machine don't load on another; the stores already sync through dotfiles.
-Skipped deliberately: temporal knowledge graphs (heavy infra; FTS over sessions and decisions already answers why/when at this scale).
+   Skipped deliberately: temporal knowledge graphs (heavy infra; FTS over sessions and decisions already answers why/when at this scale).
 
 ## Trust boundary (2026-11-09 — V1 goal shipped)
 
@@ -116,10 +118,10 @@ model's say-so. Full write-up and threat model: [docs/trust-boundary.md](docs/tr
    `live research` and the grounding hook too), `web_search`/`curated_search`/`wikipedia`, the browser's
    `open`/`read`, and `rag search` passages. It strips invisible/bidi/Unicode-tag smuggling characters
    (decoding the tag block first, so an order hidden in "blank" text is caught), and fences any content
-   that tries to give the model orders or beacon data out with a *this is data* banner. Measured at 0
+   that tries to give the model orders or beacon data out with a _this is data_ banner. Measured at 0
    false positives on the repo's own prose and on ordinary API docs. `sakura-scan` runs it on demand.
 2. **Data out stops for approval.** `hooks/egress_guard.py` gates every shell command and the final
-   answer: a request that *sends data* (a body, a substitution, a `?data=` beacon) to a host the user
+   answer: a request that _sends data_ (a body, a substitution, a `?data=` beacon) to a host the user
    never named asks for approval via the `q`/`w` overlay even when `sakura-trust` is on; reading is never
    gated; the allowlist (`rules/egress-allow.txt`) and any host the user named are trusted, so a host
    that first appeared in a fetched page isn't. The answer is blocked if it hides an exfiltration sink.
@@ -135,6 +137,7 @@ privileged model that never sees raw untrusted text); egress accounting across n
 
 Two threads. First, the questions a senior colleague answers in one line that still took a chain of `ss`, `du`, `diff` and
 crontab-reading: all built the same day, model-free, 85 checks.
+
 1. **`ports`:** what's listening, who holds it (pid, user, unit, container), from `/proc` so it works everywhere; over ssh too.
 2. **`space`:** what's eating the disk by category with a verdict, and a `clean --go` that only ever touches what rebuilds itself. The guardian's disk finding now points here.
 3. **`drift`:** a file, the packages, the enabled units or the authorized keys across the fleet, only the differences.
@@ -144,9 +147,7 @@ crontab-reading: all built the same day, model-free, 85 checks.
 
 Second, the rule: **nothing of yours is uploaded to be converted.** The web is full of sites that take a PDF, a photo or a video
 to merge, compress, OCR, strip or convert it, and keep a copy. Every one of them runs ffmpeg, pandoc, qpdf, ghostscript,
-ImageMagick, LibreOffice or tesseract underneath. So:
-7. **`conv`:** those tools behind one command that picks the right one, never overwrites an input, asks for a PDF password on the terminal and passes it over a pipe, and strips EXIF/GPS/author before a file is shared. The agent is told never to suggest a website for any of it.
-8. **`vid`:** yt-dlp the way an archivist uses it — metadata, thumbnail, subtitles and the info.json kept, a download archive so a channel or playlist resumes and fetches only what's new, a browser's own login for private videos and never a password. For keeping your own past videos, and the people in them.
+ImageMagick, LibreOffice or tesseract underneath. So: 7. **`conv`:** those tools behind one command that picks the right one, never overwrites an input, asks for a PDF password on the terminal and passes it over a pipe, and strips EXIF/GPS/author before a file is shared. The agent is told never to suggest a website for any of it. 8. **`vid`:** yt-dlp the way an archivist uses it — metadata, thumbnail, subtitles and the info.json kept, a download archive so a channel or playlist resumes and fetches only what's new, a browser's own login for private videos and never a password. For keeping your own past videos, and the people in them.
 
 Next along the same line, not built: **`conv subs VIDEO`** (subtitles from `hear`, burned in or as .srt, in the language spoken);
 **faces and places in your photo library**, locally (who's in this picture, every photo of her), with the embeddings never leaving;
@@ -160,9 +161,9 @@ nags), **`conv extract`** (zip, tar, 7z, rar into their own folder; entries poin
 Three research passes — open-source tools by everyday use, open-weight models by want on 8 GB, and what the other local
 agents of 2026 offer — are mapped in [docs/everything.md](docs/everything.md): for each want, the tool the web services run
 underneath, the model that fits, what Sakura does today, and what's next. The build order it ends with, each needing an eval
-first: `conv subs|denoise|stems` → `restore` (Real-ESRGAN, RIFE, SeedVR2) → `faces` (InsightFace + SigLIP 2, local only) →
-`conv redact|fill|sign` and the Nepal paperwork templates → `translate` (Argos/NLLB) and Nepali/Hindi embeddings for `rag` →
-`money` (hledger) → kept procedures, a repo map and a tool-call shim → a messaging gateway with pairing, last and default-closed.
+first (done the same day, with checks: `conv redact|fields|fill|sign|verify` and `money` on hledger): `conv subs|denoise|stems` →
+`restore` (Real-ESRGAN, RIFE, SeedVR2) → `faces` (InsightFace + SigLIP 2, local only) → the Nepal paperwork templates on `conv fill` →
+`translate` (Argos/NLLB) and Nepali/Hindi embeddings for `rag` → kept procedures, a repo map and a tool-call shim → a messaging gateway with pairing, last and default-closed.
 
 ## Not doing
 

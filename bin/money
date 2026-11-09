@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""money — your bank statements as plain-text accounting (hledger), imported with rules you can read. No model, no bank login.
+
+  money import bank.csv [bank.csv...]    import statements; the first time a bank is seen, rules are written from its header and shown.
+                                         hledger remembers what it has imported, so running it again adds only new lines
+  money rules bank.csv                   show (or make) the rules for that statement's shape; edit the file it names
+  money rule "KFC|Bhatbhateni" expenses:food     categorise matching lines, now and in future imports
+  money month [YYYY-MM]                  income and expenses by category for the month (default: this one)
+  money bal | money reg ["pattern"]      balances; the register, optionally filtered
+  money where "pattern"                  every line matching, with running total (what did I spend at X)
+  money journal                          the journal's path (edit it; it's text)
+Files: ~/.sakura/money/journal.ledger and RULES in ~/.sakura/money/rules/ (SAKURA_MONEY_DIR). A statement's bank is named
+from the file (bank-2026-03.csv → "bank") or --bank NAME. Amounts and dates come from headers it recognises (date, description,
+amount, or debit/credit, balance); when it can't tell, it writes a rules file for you to finish and says which fields.
+"""
+import csv
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+DIR = os.path.expanduser(os.environ.get("SAKURA_MONEY_DIR") or "~/.sakura/money")
+JOURNAL = os.path.join(DIR, "journal.ledger")
+RULES = os.path.join(DIR, "rules")
+DATE_FORMATS = {r"^\d{4}-\d{2}-\d{2}": "%Y-%m-%d", r"^\d{2}/\d{2}/\d{4}": "%d/%m/%Y", r"^\d{2}-\d{2}-\d{4}": "%d-%m-%Y", r"^\d{2}\.\d{2}\.\d{4}": "%d.%m.%Y", r"^\d{4}/\d{2}/\d{2}": "%Y/%m/%d"}
+
+
+def hledger():
+    h = shutil.which("hledger") or os.path.expanduser("~/.local/bin/hledger")
+    if not os.path.exists(h):
+        print("money: hledger isn't installed: sudo -A apt-get install -y hledger  (or the binary from hledger.org)", file=sys.stderr)
+        sys.exit(3)
+    return h
+
+
+def run(args, **kw):
+    os.makedirs(DIR, exist_ok=True)
+    if not os.path.exists(JOURNAL):
+        open(JOURNAL, "w").write("; money — hledger journal. Edit freely; imports append below.\n\n")
+    return subprocess.run([hledger(), "-f", JOURNAL, *args], text=True, **kw)
+
+
+def bank_of(path, override):
+    if override:
+        return re.sub(r"[^\w-]", "_", override.lower())
+    base = os.path.splitext(os.path.basename(path))[0].lower()
+    base = re.sub(r"[\s_-]*\d{4}[-_]?\d{0,2}[-_]?\d{0,2}.*$", "", base)  # strip a date suffix
+    return re.sub(r"[^\w-]", "_", base) or "bank"
+
+
+def sniff(path):
+    with open(path, newline="", encoding="utf-8-sig", errors="replace") as f:
+        sample = f.read(8192)
+        f.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        except csv.Error:
+            dialect = csv.excel
+        rows = list(csv.reader(f, dialect))
+    return dialect, rows
+
+
+def guess_rules(path, bank):
+    dialect, rows = sniff(path)
+    if not rows:
+        return None, "the file is empty"
+    header = [h.strip().lower() for h in rows[0]]
+    first = rows[1] if len(rows) > 1 else []
+    fields = []
+    unknown = []
+    for h in header:
+        if re.search(r"\b(date|posted|booking|value date|transaction date)\b", h) and "date" not in fields:
+            fields.append("date")
+        elif re.search(r"desc|narr|detail|memo|particular|payee|text|reference|remark", h) and "description" not in fields:
+            fields.append("description")
+        elif re.search(r"^(amount|amt|sum|value)$|\bamount\b", h) and "amount" not in fields and not re.search(r"debit|credit|withdraw|deposit", h):
+            fields.append("amount")
+        elif re.search(r"debit|withdraw|dr\b|money out|paid out", h):
+            fields.append("amount-out")
+        elif re.search(r"credit|deposit|cr\b|money in|paid in", h):
+            fields.append("amount-in")
+        elif re.search(r"balance|bal\b", h):
+            fields.append("running_balance")  # kept as a column, not hledger's `balance` (that asserts, and fails without an opening balance)
+        elif re.search(r"currency|ccy", h):
+            fields.append("currency")
+        else:
+            name = re.sub(r"\W+", "_", h) or f"col{len(fields) + 1}"
+            fields.append(name)
+            unknown.append(name)
+    date_fmt = "%Y-%m-%d"
+    if "date" in fields and first:
+        v = first[fields.index("date")].strip()
+        for rx, fmt in DATE_FORMATS.items():
+            if re.match(rx, v):
+                date_fmt = fmt
+                break
+    missing = [x for x in ("date", "description") if x not in fields]
+    if "amount" not in fields and not ("amount-out" in fields or "amount-in" in fields):
+        missing.append("amount (or debit/credit)")
+    sep = {",": ",", ";": ";", "\t": "TAB", "|": "|"}.get(dialect.delimiter, ",")
+    text = f"""# hledger CSV rules for {bank}, written by `money` from the statement's header. Edit freely.
+# Docs: https://hledger.org/csv.html  — `if` blocks below categorise by description; `money rule` appends more.
+skip 1
+separator {sep}
+fields {",".join(fields)}
+date-format {date_fmt}
+currency {os.environ.get("SAKURA_MONEY_CURRENCY", "")}
+account1 assets:bank:{bank}
+account2 expenses:unknown
+"""
+    if "amount-in" in fields and "amount" not in fields:
+        text += "\n# money coming in is income, not a refund\nif %amount-in [1-9]\n account2 income:unknown\n"
+    elif "amount" in fields:
+        text += "\n# a positive amount is money coming in\nif %amount ^[0-9]\n account2 income:unknown\n"
+    text += "\n# categories\n"
+    return text, ("; ".join([f"couldn't place: {', '.join(missing)}"] * bool(missing) + [f"unused columns: {', '.join(unknown)}"] * bool(unknown)) or "")
+
+
+def rules_path(bank):
+    return os.path.join(RULES, bank + ".rules")
+
+
+def ensure_rules(path, bank, show):
+    rp = rules_path(bank)
+    os.makedirs(RULES, exist_ok=True)
+    if not os.path.exists(rp):
+        text, note = guess_rules(path, bank)
+        if text is None:
+            print(f"money: {note}", file=sys.stderr)
+            return None, False
+        open(rp, "w").write(text)
+        print(f"new bank “{bank}”: rules written to {rp}" + (f"\n  {note}" if note else ""))
+        if "couldn't place" in note:
+            print("  finish the `fields` line, then run the import again")
+            return rp, False
+        show = True
+    if show:
+        sys.stdout.write(open(rp).read())
+    return rp, True
+
+
+def cmd_import(files, bank_override, dry):
+    ok = True
+    for path in files:
+        if not os.path.exists(path):
+            print(f"money: no such file {path}", file=sys.stderr)
+            ok = False
+            continue
+        bank = bank_of(path, bank_override)
+        rp, ready = ensure_rules(path, bank, show=False)
+        if not ready:
+            ok = False
+            continue
+        # hledger reads FILE.rules next to the csv, or --rules-file
+        before = run(["stats"], capture_output=True).stdout
+        r = run(["import", "--rules-file", rp, *(["--dry-run"] if dry else []), path], capture_output=True)
+        if r.returncode:
+            print(f"money: hledger couldn't import {path}:\n{r.stderr.strip()[-600:]}", file=sys.stderr)
+            ok = False
+            continue
+        out = (r.stdout + r.stderr).strip()
+        m = re.search(r"imported (\d+) new transactions", out)
+        n = int(m.group(1)) if m else out.count("\n20") if dry else 0
+        if dry:
+            print(out or "nothing new")
+        else:
+            print(f"{os.path.basename(path)} → {bank}: {m.group(0) if m else (out.splitlines()[-1] if out else 'nothing new')}")
+    return ok
+
+
+def cmd_rule(pattern, account, bank):
+    banks = [bank] if bank else [f[:-6] for f in os.listdir(RULES) if f.endswith(".rules")] if os.path.isdir(RULES) else []
+    if not banks:
+        print("money: no banks yet; import a statement first", file=sys.stderr)
+        return False
+    for b in banks:
+        with open(rules_path(b), "a") as f:
+            f.write(f"\nif {pattern}\n account2 {account}\n")
+    print(f"rule added to {', '.join(banks)}: {pattern} → {account} (future imports). To apply it to what's already imported, edit the journal or re-import after deleting those lines.")
+    return True
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0 if a else 2
+    bank, dry = None, False
+    if "--bank" in a:
+        i = a.index("--bank")
+        bank = a[i + 1]
+        del a[i:i + 2]
+    if "--dry" in a:
+        dry = True
+        a.remove("--dry")
+    cmd, args = a[0], a[1:]
+    if cmd == "import":
+        return 0 if args and cmd_import(args, bank, dry) else 1
+    if cmd == "rules":
+        if not args:
+            print("money rules bank.csv", file=sys.stderr)
+            return 2
+        rp, _ = ensure_rules(args[0], bank_of(args[0], bank), show=True)
+        return 0 if rp else 1
+    if cmd == "rule":
+        return 0 if len(args) == 2 and cmd_rule(args[0], args[1], bank) else 2
+    if cmd == "journal":
+        print(JOURNAL)
+        return 0
+    if cmd == "month":
+        import datetime as dt
+        period = args[0] if args else dt.date.today().strftime("%Y-%m")
+        return run(["is", "-p", period, "--tree", "--depth", "3"]).returncode
+    if cmd == "bal":
+        return run(["bal", "--tree", *args]).returncode
+    if cmd == "reg":
+        return run(["reg", *args]).returncode
+    if cmd == "where":
+        return run(["reg", "desc:" + " ".join(args) if args else ""]).returncode
+    print(__doc__)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
