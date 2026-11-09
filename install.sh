@@ -53,8 +53,9 @@ if [ -L "$SAKURA_HOME/AGENTS.md" ]; then rm -f "$SAKURA_HOME/AGENTS.md"; fi
 } > "$SAKURA_HOME/AGENTS.md"
 link "$ROOT/rules" "$SAKURA_HOME/rules"
 link "$ROOT/skills" "$HOME/.agents/skills"
-for tool in web_search wikipedia fetch_url curated_search consult sakura-model sakura-guard-install sakura-launch sakura-worker sakura-memory sakura-recall sakura-tool sakura-browser sakura-web-setup live view_file edit_file rag sakura-mail-setup pa sakura-fix sakura-undo sakura-recap sakura-tour sakura-tonight sakura-teach sakura-learn sakura-guardian sakura-trust look sakura-pr sakura-review clip dq procwatch fleet sakura-try sakura-morning schema hear say docpack ledger sakura-red sakura-decide sakura-setup tbl logs sakura-on sakura-explain sakura-how sakura-status sakura-watch sakura-tmux-setup fmt sakura-gpu drive torrent dl sakura-backup sakura-release sakura-scan ports space drift when conv vid sakura-notes; do
-    ln -sf "$ROOT/bin/$tool" "$HOME/.local/bin/$tool"
+# every command in bin/ (a hand-kept list here drifted twice; sakura-doctor reports anything that ends up unlinked)
+for path in "$ROOT"/bin/*; do
+    [ -f "$path" ] && [ -x "$path" ] && ln -sf "$path" "$HOME/.local/bin/$(basename "$path")"
 done
 
 # The engine, from this version's release, so a machine doesn't need 20 GB of RAM and half an hour to compile it. A failure
