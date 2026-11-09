@@ -740,6 +740,9 @@ def url_convert(url, to, o, outdir):
     name = urllib.parse.urlparse(url).netloc.replace(":", "_") + (urllib.parse.urlparse(url).path.rstrip("/").replace("/", "_") or "")
     name = (name or "page")[:80]
     fake = os.path.join(outdir or os.getcwd(), name + ".x")
+    if to not in ("pdf", "png", "html", "md", "txt"):
+        print(f"conv: a page can become pdf, png, html, md or txt, not .{to}", file=sys.stderr)
+        return False
     out = o or out_path(fake, to, None, outdir)
     if to in ("pdf", "png"):
         b = chromium()

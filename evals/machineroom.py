@@ -914,7 +914,7 @@ def convurl(tmp):
         png = run(
             [c, url, "--to", "png", "-o", os.path.join(out, "page.png")], timeout=120
         )
-        bad = run([c, url, "--to", "mp3"], timeout=60)
+        bad = run([c, url, "--to", "mp3"], cwd=out, timeout=60)
     finally:
         srv.shutdown()
     text = (
