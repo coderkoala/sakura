@@ -1295,6 +1295,78 @@ def vault(tmp):
     }
 
 
+def complete(tmp):
+    c = os.path.join(BIN, "sakura-complete")
+    script = run([c]).stdout
+    open(os.path.join(tmp, "c.bash"), "w").write(script)
+    valid = subprocess.run(["bash", "-n", os.path.join(tmp, "c.bash")], capture_output=True).returncode == 0
+    probe = subprocess.run(["bash", "-c", f'source {os.path.join(tmp, "c.bash")}; COMP_WORDS=(conv me); COMP_CWORD=1; __sakura_c; echo "${{COMPREPLY[*]}}"; '
+                            f'COMP_WORDS=(vault --sh); COMP_CWORD=1; __sakura_c; echo "${{COMPREPLY[*]}}"; COMP_WORDS=(money ""); COMP_CWORD=1; __sakura_c; echo "${{COMPREPLY[*]}}"'],
+                           capture_output=True, text=True).stdout.splitlines()
+    table = json.loads(run([c, "--json"]).stdout)
+    return {"the generated script is valid bash and covers every command": valid and all(n in script for n in ("conv", "vault", "money", "dupes", "shelve", "faces")),
+            "conv me<Tab> → merge; vault --sh<Tab> → --show; money <Tab> lists its subcommands": len(probe) == 3 and probe[0] == "merge" and probe[1] == "--show" and {"import", "month", "where"} <= set(probe[2].split()),
+            "no English words leak in as subcommands": not any(w in d["subs"] for d in table.values() for w in ("the", "a", "what", "every")),
+            "pa keeps its hand-written completion": "    pa|" not in script}
+
+
+def last(tmp):
+    home = os.path.join(tmp, "home")
+    proj = os.path.join(home, "proj")
+    os.makedirs(proj)
+    d = os.path.join(home, ".sakura", "sessions", time.strftime("%Y"), time.strftime("%m"), time.strftime("%d"))
+    os.makedirs(d)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    ev = [{"type": "session_meta", "timestamp": now, "payload": {"session_id": "s1", "cwd": proj, "originator": "codex_tui"}},
+          {"type": "turn_context", "timestamp": now, "payload": {"turn_id": "t1", "cwd": proj}},
+          {"type": "event_msg", "payload": {"type": "item_completed", "turn_id": "t1", "item": {"type": "UserMessage", "content": [{"type": "text", "text": "rename the config loader"}]}}},
+          {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": json.dumps({"cmd": "git mv config.py loader.py"}), "call_id": "c1"}},
+          {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1", "output": "Process exited with code 0\n"}},
+          {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "t1", "last_agent_message": "Renamed config.py to loader.py; imports updated."}}]
+    open(os.path.join(d, "rollout-a.jsonl"), "w").write("\n".join(json.dumps(e) for e in ev) + "\n")
+    # a turn in /tmp must be skipped
+    ev2 = [dict(e) for e in ev]
+    ev2[0] = {"type": "session_meta", "timestamp": now, "payload": {"session_id": "s2", "cwd": "/tmp/x", "originator": "codex_tui"}}
+    ev2[1] = {"type": "turn_context", "timestamp": now, "payload": {"turn_id": "t2", "cwd": "/tmp/x"}}
+    open(os.path.join(d, "rollout-b.jsonl"), "w").write("\n".join(json.dumps(e) for e in ev2) + "\n")
+    env = {"SAKURA_HOME": os.path.join(home, ".sakura"), "HOME": home}
+    os.makedirs(os.path.join(tmp, "elsewhere"))
+    l = os.path.join(BIN, "sakura-last")
+    out = run([l, "--all"], env).stdout
+    cd = run([l, "--cd", "--all"], env).stdout.strip()
+    here = run([l, "--here", "--all"], env, cwd=proj).stdout
+    elsewhere = run([l, "--here", "--all"], env, cwd=os.path.join(tmp, "elsewhere"))
+    plain = run([l], env).stdout
+    return {"the last turn: directory, ask, what ran, answer": "proj" in out and "rename the config loader" in out and "git mv" in out and "Renamed config.py" in out,
+            "--cd prints its directory for the ?last key": cd == proj,
+            "--here finds the turn in this directory, and nothing elsewhere": "rename the config loader" in here and elsewhere.returncode == 1,
+            "sessions in /tmp are skipped unless --all": "/tmp/x" not in out and "nothing on record" in plain}
+
+
+def vaultcsv(tmp):
+    if not (shutil.which("pass") and shutil.which("gpg") and shutil.which("oathtool")):
+        return {"vaultcsv (pass, gpg or oathtool missing)": False}
+    env = {"GNUPGHOME": os.path.join(tmp, "gnupg"), "PASSWORD_STORE_DIR": os.path.join(tmp, "store"), "DISPLAY": "", "WAYLAND_DISPLAY": ""}
+    os.makedirs(env["GNUPGHOME"], mode=0o700)
+    subprocess.run(["gpg", "--batch", "--quiet", "--pinentry-mode", "loopback", "--passphrase", "", "--quick-generate-key", "Eval <eval@test>", "rsa2048", "sign,encr", "0"],
+                   env={**os.environ, **env}, capture_output=True, check=True)
+    key = [l.split(":")[4] for l in subprocess.run(["gpg", "--list-secret-keys", "--with-colons"], env={**os.environ, **env}, capture_output=True, text=True).stdout.splitlines() if l.startswith("sec")][0]
+    v = os.path.join(BIN, "vault")
+    run([v, "init", key], env)
+    open(os.path.join(tmp, "kp.csv"), "w").write('Group,Title,Username,Password,URL,Notes,TOTP\n"Root/Email","Proton","kai@pm.me","pm-Pass-9","https://proton.me","main","otpauth://totp/Proton:kai?secret=JBSWY3DPEHPK3PXP&issuer=Proton"\n"Root","Bank","kai","b4nk!","","",""\n')
+    open(os.path.join(tmp, "op.csv"), "w").write('Title,Url,Username,Password,OTPAuth,Favorite,Archived,Tags,Notes\n"AWS","https://aws.amazon.com","root","aws-PW-1","otpauth://totp/AWS:root?secret=GEZDGNBVGY3TQOJQ","","","Work","prod"\n')
+    kp = run([v, "import", "keepassxc", os.path.join(tmp, "kp.csv")], env)
+    op = run([v, "import", "1password", os.path.join(tmp, "op.csv")], env)
+    pw = run([v, "get", "keepassxc/Email/Proton", "--show"], env).stdout.strip()
+    bank = run([v, "get", "keepassxc/Bank", "--show"], env).stdout.strip()
+    code = run([v, "otp", "keepassxc/Email/Proton"], env).stdout.strip()
+    expect = subprocess.run(["oathtool", "--totp", "-b", "JBSWY3DPEHPK3PXP"], capture_output=True, text=True).stdout.strip()
+    aws = run([v, "get", "1password/Work/AWS", "--field", "login", "--show"], env).stdout.strip()
+    return {"KeePassXC: groups become folders, Root dropped, 2FA carried": kp.returncode == 0 and "2 logins (1 with 2FA)" in kp.stdout and pw == "pm-Pass-9" and bank == "b4nk!" and code == expect,
+            "1Password: tags become the folder, OTPAuth carried": op.returncode == 0 and aws == "root" and run([v, "otp", "1password/Work/AWS"], env).stdout.strip().isdigit(),
+            "no secret in either import's output": all(x not in kp.stdout + op.stdout for x in ("pm-Pass-9", "b4nk!", "aws-PW-1", "JBSWY3DP", "GEZDGNBV"))}
+
+
 CASES = {
     "ports": ports,
     "space": space,
@@ -1314,6 +1386,9 @@ CASES = {
     "money": money,
     "what": what,
     "vault": vault,
+    "complete": complete,
+    "last": last,
+    "vaultcsv": vaultcsv,
 }
 
 

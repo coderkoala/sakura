@@ -4,7 +4,7 @@ How to work is in Sakura's base instructions. This file is the reference for thi
 
 ## Finding the command
 
-`sakura-what "merge two pdfs"` names the command for any ask from the manuals, with no model; `sakura-what` alone is everything by situation. Asked "can you…" or "how do I…", run it before answering from memory. Users forget commands; this is how they don't have to.
+`sakura-what "merge two pdfs"` names the command for any ask from the manuals, with no model; `sakura-what` alone is everything by situation. Asked "can you…" or "how do I…", run it before answering from memory. Users forget commands; this is how they don't have to. `sakura-last` is what they were doing last (directory, ask, answer), from the record — "where was I" means run it.
 
 ## Web knowledge (shell commands; they never need approval)
 
@@ -131,7 +131,7 @@ CHECK
 
 ## Passwords and 2FA
 
-`vault otp NAME` prints the current 2FA code; `vault get NAME` puts a password on the clipboard (nothing printed; `--show` only when the user asks to see it); `vault list|find`; `vault import bitwarden export.json`. Never ask the user to type a secret into the chat: point them at `vault add NAME` (they type it at pass's own prompt). Never print, log or remember a password or seed; a 6-digit code is fine.
+`vault otp NAME` prints the current 2FA code; `vault get NAME` puts a password on the clipboard (nothing printed; `--show` only when the user asks to see it); `vault list|find`; `vault import bitwarden|keepassxc|1password EXPORT`. Never ask the user to type a secret into the chat: point them at `vault add NAME` (they type it at pass's own prompt). Never print, log or remember a password or seed; a 6-digit code is fine.
 
 ## Files and video stay here
 

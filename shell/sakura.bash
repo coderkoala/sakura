@@ -42,13 +42,15 @@
 #   money import bank.csv | month | where "KFC" | rule "KFC" expenses:food   statements into plain-text accounting (hledger)
 #   dupes DIR... [--link|--rm --go]  the same file by content, across drives;  shelve DIR --into LIB [--go]  photos/videos into YEAR/YEAR-MM by date taken
 #   sakura-doctor [--fix]  is this install whole: every command, hook and config checked, what's missing
+#   ?last [N] | ?last --here   what was I doing: the last turn's directory, ask and answer, from the record (cd's there)
+#   Tab completes every command's subcommands and flags (sakura-complete, generated from the manuals)
 #   ?what [words]   which command does this? (no model; alone: everything, by situation);  ?docs <question>  your docs packs and documents
 #   ?otp NAME   a 2FA code from pass;  vault get NAME  the password onto the clipboard;  vault import bitwarden export.json
 #   sakura-notes [TAG]  release notes from the commits since the last tag (for sakura-release)
 #   sakura-status   one line for tmux's status bar: driver, night queue, offers, guardian
 #   ?go [request]  a session that doesn't stop to ask (sakura-trust on makes every ? like this)
 if command -v sakura-launch >/dev/null 2>&1; then
-    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' '?pr' '?review' '?try' '?hear' '?morning' '?red' '?decide' '?why' '?setup' '?on' '?explain' '?how' '?what' '?docs' '?otp' '?watch' '?fmt' '?gpu' '?drive' '?dl' '?backup' 2>/dev/null
+    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' '?pr' '?review' '?try' '?hear' '?morning' '?red' '?decide' '?why' '?setup' '?on' '?explain' '?how' '?what' '?docs' '?otp' '?last' '?watch' '?fmt' '?gpu' '?drive' '?dl' '?backup' 2>/dev/null
     alias '?'='sakura-launch'
     alias '?fix'='sakura-fix --shell $$'
     alias '?undo'='sakura-undo'
@@ -68,6 +70,8 @@ if command -v sakura-launch >/dev/null 2>&1; then
     alias '?on'='sakura-on'
     alias '?explain'='sakura-explain'
     alias '?how'='sakura-how'
+    __sakura_last() { case "${1:-}" in ""|[0-9]*) local d; d="$(sakura-last --cd 2>/dev/null)" && [ -d "$d" ] && cd "$d"; sakura-last "$@" ;; *) sakura-last "$@" ;; esac; }
+    alias '?last'='__sakura_last'
     alias '?what'='sakura-what'
     alias '?docs'='rag search'
     alias '?otp'='vault otp'
@@ -114,6 +118,8 @@ if command -v sakura-launch >/dev/null 2>&1; then
         complete -W 'list cancel at report run' '?tonight' sakura-tonight 2>/dev/null
         complete -W 'on off tick backup restored forget --all --json' '?guard' sakura-guardian 2>/dev/null
         complete -W 'remind list cancel brief standup roles todo clock log watch job autoreply mail offer yes no listen pending' pa 2>/dev/null
+        # every other command: subcommands and flags learned from the manuals (hosts and the keys included)
+        command -v sakura-complete >/dev/null 2>&1 && eval "$(sakura-complete 2>/dev/null)"
         # Whatever came due while no notification could reach you.
         command -v pa >/dev/null 2>&1 && pa pending 2>/dev/null
         # The day on one screen, once a day, when the first shell of the day opens.

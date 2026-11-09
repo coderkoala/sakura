@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""sakura-last — what was I doing? The last thing Sakura did, from the record: where, what you asked, what it answered. The `?last` key.
+
+  sakura-last              the last turn: when, the directory, what you asked, what changed, the answer
+  sakura-last 3            the last three
+  sakura-last --cd         just the directory of the last turn (the `?last` key cd's there and shows the turn)
+  sakura-last --here       the last turn that happened in this directory (or under it)
+  sakura-last --json       --all includes sessions in /tmp and the evals (skipped otherwise, like ?recap)
+Read from the session transcripts, like ?recap, so nothing in it is made up. Sessions in /tmp and the evals are skipped.
+"""
+import datetime as dt
+import glob
+import importlib.machinery
+import json
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.realpath(__file__))
+recap = importlib.machinery.SourceFileLoader("sakura_recap", os.path.join(ROOT, "sakura-recap")).load_module()
+
+
+def turns(days_back=14, include_tmp=False):
+    out = []
+    today = dt.date.today()
+    for i in range(days_back + 1):
+        day = today - dt.timedelta(days=i)
+        for path in glob.glob(os.path.join(recap.SESSIONS, f"{day:%Y}", f"{day:%m}", f"{day:%d}", "*.jsonl")):
+            for t in recap.parse(path):
+                cwd = t.get("cwd") or ""
+                if (not include_tmp and (cwd.startswith("/tmp/") or "/.sakura/eval/" in cwd)) or not (t.get("asked") or t.get("answer")):
+                    continue
+                out.append(t)
+        if len(out) >= 50:
+            break
+    out.sort(key=lambda t: t.get("start") or "", reverse=True)
+    return out
+
+
+def main():
+    a = sys.argv[1:]
+    if a and a[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    as_json, cd_only, here, include_tmp = "--json" in a, "--cd" in a, "--here" in a, "--all" in a
+    n = next((int(x) for x in a if x.isdigit()), 1)
+    ts = turns(include_tmp=include_tmp)
+    if here:
+        cwd = os.getcwd()
+        ts = [t for t in ts if (t.get("cwd") or "").startswith(cwd)]
+    ts = ts[:n]
+    if not ts:
+        if cd_only:
+            print(os.getcwd())
+            return 1
+        print("nothing on record" + (" for this directory" if here else "") + " in the last two weeks")
+        return 1
+    if cd_only:
+        print(ts[0].get("cwd") or os.getcwd())
+        return 0
+    if as_json:
+        for t in ts:
+            print(json.dumps({k: t.get(k) for k in ("start", "cwd", "asked", "answer")} | {"commands": len(t.get("commands") or []),
+                             "changed": [c["cmd"] for c in t.get("commands") or [] if not c.get("refused") and not recap.u.read_only(c["cmd"])]}))
+        return 0
+    for t in ts:
+        when = recap.local(t["start"]) if t.get("start") else None
+        ago = ""
+        if when:
+            delta = dt.datetime.now(when.tzinfo) - when
+            ago = f"{int(delta.total_seconds() // 60)} min ago" if delta < dt.timedelta(hours=2) else f"{delta.total_seconds() / 3600:.0f} h ago" if delta < dt.timedelta(days=2) else f"{delta.days} days ago"
+        changed = [c["cmd"] for c in t.get("commands") or [] if not c.get("refused") and not recap.u.read_only(c["cmd"])]
+        print(f"{when:%a %H:%M} ({ago})  in {recap.short(t.get('cwd') or '?')}" if when else f"in {recap.short(t.get('cwd') or '?')}")
+        if t.get("asked"):
+            print(f"  you asked  {recap.one_line(t['asked'], 160)}")
+        for c in changed[-3:]:
+            print(f"  it ran     {recap.one_line(c, 120)}")
+        if t.get("answer"):
+            print(f"  it said    {recap.one_line(t['answer'], 400)}")
+        print()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

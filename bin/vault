@@ -10,6 +10,8 @@
   vault import bitwarden export.json [--prefix bitwarden] [--dry]
                                     every login into pass as PREFIX/Folder/Name (password first line; login:, url:, notes: after),
                                     TOTP seeds into pass-otp alongside; secure notes as notes. Counts only are printed. Delete the export after.
+  vault import keepassxc export.csv | vault import 1password export.csv      the same from a KeePassXC CSV (Group/Title/Username/
+                                    Password/URL/Notes/TOTP) or a 1Password CSV (Title/Url/Username/Password/OTPAuth/Notes/Tags)
   vault init [KEYID]                set up the store with your gpg key (made for you if there's none);   vault status
 Needs pass, pass-otp and gpg. The store is ~/.password-store (PASSWORD_STORE_DIR). `clip` does the clipboard; with no display,
 get says so and you use --show. The agent is told: never ask the user to type a secret into the chat; point them at `vault add`.
@@ -202,6 +204,70 @@ def cmd_import_bitwarden(path, prefix, dry):
     return 0
 
 
+def cmd_import_csv(kind, path, prefix, dry):
+    import csv
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+    except (OSError, csv.Error) as e:
+        print(f"vault: can't read {path}: {e}", file=sys.stderr)
+        return 1
+    if not rows:
+        print("vault: the export is empty", file=sys.stderr)
+        return 1
+    cols = {c.lower().strip(): c for c in rows[0].keys() if c}
+
+    def col(*names):
+        for n in names:
+            if n in cols:
+                return cols[n]
+        return None
+    c_title, c_user, c_pw = col("title", "name", "account"), col("username", "login", "user name", "login name"), col("password", "pass")
+    c_url, c_notes, c_group = col("url", "login_uri", "website"), col("notes", "note", "comments"), col("group", "folder", "tags", "vault")
+    c_totp = col("totp", "otpauth", "otp", "one-time password", "login_totp")
+    if not (c_title and c_pw):
+        print(f"vault: this doesn't look like a {kind} export (columns: {', '.join(cols)}); expected Title and Password", file=sys.stderr)
+        return 1
+    counts = {"logins": 0, "otp": 0, "skipped": 0}
+    for row in rows:
+        title, pw = safe_name(row.get(c_title)), (row.get(c_pw) or "").strip()
+        user = (row.get(c_user) or "").strip() if c_user else ""
+        totp = (row.get(c_totp) or "").strip() if c_totp else ""
+        if not (pw or totp or user):
+            counts["skipped"] += 1
+            continue
+        group = (row.get(c_group) or "").strip() if c_group else ""
+        group = "/".join(safe_name(g) for g in re.split(r"[/\\]", group) if g and g.lower() not in ("root", "passwords", "database"))
+        entry_name = "/".join(p for p in (prefix, group, title) if p)
+        lines = [pw]
+        if user:
+            lines.append(f"login: {user}")
+        url = (row.get(c_url) or "").strip() if c_url else ""
+        if url:
+            lines.append(f"url: {url}")
+        notes = (row.get(c_notes) or "").strip() if c_notes else ""
+        if notes:
+            lines.append("notes: " + notes.replace("\n", "\n  "))
+        uri = otpauth_from(totp, title, user or None)
+        if dry:
+            print(f"  would add {entry_name}" + (" (+otp)" if uri else ""))
+            counts["otp"] += bool(uri)
+        else:
+            r = pass_(["insert", "--multiline", "--force", entry_name], stdin="\n".join(lines) + "\n")
+            if r.returncode:
+                counts["skipped"] += 1
+                print(f"  failed: {entry_name}: {r.stderr.strip()[:120]}", file=sys.stderr)
+                continue
+            if uri:
+                r2 = pass_(["otp", "append", "--force", entry_name], stdin=uri + "\n")
+                counts["otp"] += r2.returncode == 0
+        counts["logins"] += 1
+    print(f"{'would import' if dry else 'imported'} {counts['logins']} logins ({counts['otp']} with 2FA) from {kind} into {STORE} under “{prefix}”; {counts['skipped']} skipped (empty rows)")
+    if not dry:
+        print(f"now: shred -u {path}   (the export is plain text)")
+    return 0
+
+
 def gpg_keys():
     r = subprocess.run(["gpg", "--list-secret-keys", "--with-colons"], capture_output=True, text=True)
     return [l.split(":")[4] for l in r.stdout.splitlines() if l.startswith("sec")]
@@ -268,6 +334,9 @@ def main():
         return pass_(["otp", "append" if os.path.exists(os.path.join(STORE, args[0] + ".gpg")) else "insert", args[0]], capture=False).returncode
     if cmd == "import" and len(args) == 2 and args[0] == "bitwarden":
         return cmd_import_bitwarden(args[1], prefix, dry)
+    if cmd == "import" and len(args) == 2 and args[0] in ("keepassxc", "keepass", "1password", "onepassword"):
+        kind = "keepassxc" if args[0].startswith("keepass") else "1password"
+        return cmd_import_csv(kind, args[1], prefix if prefix != "bitwarden" else kind, dry)
     if cmd == "init":
         return cmd_init(args[0] if args else None)
     if cmd == "status":
