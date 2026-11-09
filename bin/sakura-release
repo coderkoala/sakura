@@ -3,6 +3,8 @@
 #
 #   sakura-release 0.9.7 notes.md            everything below, stopping before anything irreversible to show what it will do
 #   sakura-release 0.9.7 notes.md --go       actually do it
+#   sakura-release 1.0.0-rc.1 notes.md --go  a release candidate: published as a GitHub pre-release, and the dotfiles aren't
+#                                            pinned to it (every machine would follow) unless SAKURA_RELEASE_PIN=1
 # Steps: 1 clean tree check · 2 staged-secrets scan · 3 VERSION + commit + tag v· · 4 push with tags ·
 # 5 engine assets fetched from the last release that has them (sha256 verified; after an engine rebuild, put the new tar.gz and .sha256 in
 # ~/.cache/sakura/release-assets first, as for v0.9.9, or the old engine ships) ·
@@ -15,7 +17,8 @@ dot="$(dirname "$here")"
 ver="${1:?usage: sakura-release VERSION NOTES_FILE [--go]}"
 notes="${2:?usage: sakura-release VERSION NOTES_FILE [--go]}"
 go=0; [ "${3:-}" = --go ] && go=1
-[[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "release: '$ver' isn't X.Y.Z" >&2; exit 2; }
+[[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || { echo "release: '$ver' isn't X.Y.Z or X.Y.Z-rc.N" >&2; exit 2; }
+pre=(); rc=0; case "$ver" in *-rc.*) pre=(--prerelease); rc=1 ;; esac
 [ -r "$notes" ] || { echo "release: can't read $notes" >&2; exit 2; }
 cd "$here"
 say() { printf '%s\n' "$*"; }
@@ -51,13 +54,15 @@ if [ $go = 1 ]; then (cd "$assets" && sha256sum -c sakura-linux-x86_64.tar.gz.sh
 
 say "== 6/7 publish"
 say "  run this as its own command (a compound trips the permission classifier):"
-say "  gh release create v$ver $assets/sakura-linux-x86_64.tar.gz $assets/sakura-linux-x86_64.tar.gz.sha256 --title \"Sakura $ver\" --notes-file $notes"
+say "  gh release create v$ver $assets/sakura-linux-x86_64.tar.gz $assets/sakura-linux-x86_64.tar.gz.sha256 --title \"Sakura $ver\" --notes-file $notes ${pre[*]}"
 if [ $go = 1 ] && [ "${SAKURA_RELEASE_PUBLISH:-0}" = 1 ]; then
-    gh release create "v$ver" "$assets/sakura-linux-x86_64.tar.gz" "$assets/sakura-linux-x86_64.tar.gz.sha256" --title "Sakura $ver" --notes-file "$notes"
+    gh release create "v$ver" "$assets/sakura-linux-x86_64.tar.gz" "$assets/sakura-linux-x86_64.tar.gz.sha256" --title "Sakura $ver" --notes-file "$notes" "${pre[@]}"
 fi
 
 say "== 7/7 the dotfiles pin"
-if [ -e "$dot/HANDOFF-sakura.md" ]; then
+if [ $rc = 1 ] && [ "${SAKURA_RELEASE_PIN:-0}" != 1 ]; then
+    say "  skipped for a release candidate: every machine would follow it (SAKURA_RELEASE_PIN=1 pins it anyway)"
+elif [ -e "$dot/HANDOFF-sakura.md" ]; then
     run bash -c "systemctl --user stop dotfiles-autosync.timer 2>/dev/null; cd '$dot' && git add sakura && git commit -qm 'sakura: pin v$ver' && git push -q origin main; systemctl --user start dotfiles-autosync.timer 2>/dev/null"
 else
     say "  (not inside the dotfiles layout; move the pin wherever this repo is embedded)"
