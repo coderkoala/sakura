@@ -1299,36 +1299,124 @@ def complete(tmp):
     c = os.path.join(BIN, "sakura-complete")
     script = run([c]).stdout
     open(os.path.join(tmp, "c.bash"), "w").write(script)
-    valid = subprocess.run(["bash", "-n", os.path.join(tmp, "c.bash")], capture_output=True).returncode == 0
-    probe = subprocess.run(["bash", "-c", f'source {os.path.join(tmp, "c.bash")}; COMP_WORDS=(conv me); COMP_CWORD=1; __sakura_c; echo "${{COMPREPLY[*]}}"; '
-                            f'COMP_WORDS=(vault --sh); COMP_CWORD=1; __sakura_c; echo "${{COMPREPLY[*]}}"; COMP_WORDS=(money ""); COMP_CWORD=1; __sakura_c; echo "${{COMPREPLY[*]}}"'],
-                           capture_output=True, text=True).stdout.splitlines()
+    valid = (
+        subprocess.run(
+            ["bash", "-n", os.path.join(tmp, "c.bash")], capture_output=True
+        ).returncode
+        == 0
+    )
+    probe = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'source {os.path.join(tmp, "c.bash")}; COMP_WORDS=(conv me); COMP_CWORD=1; __sakura_c; echo "${{COMPREPLY[*]}}"; '
+            f'COMP_WORDS=(vault --sh); COMP_CWORD=1; __sakura_c; echo "${{COMPREPLY[*]}}"; COMP_WORDS=(money ""); COMP_CWORD=1; __sakura_c; echo "${{COMPREPLY[*]}}"',
+        ],
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
     table = json.loads(run([c, "--json"]).stdout)
-    return {"the generated script is valid bash and covers every command": valid and all(n in script for n in ("conv", "vault", "money", "dupes", "shelve", "faces")),
-            "conv me<Tab> → merge; vault --sh<Tab> → --show; money <Tab> lists its subcommands": len(probe) == 3 and probe[0] == "merge" and probe[1] == "--show" and {"import", "month", "where"} <= set(probe[2].split()),
-            "no English words leak in as subcommands": not any(w in d["subs"] for d in table.values() for w in ("the", "a", "what", "every")),
-            "pa keeps its hand-written completion": "    pa|" not in script}
+    return {
+        "the generated script is valid bash and covers every command": valid
+        and all(
+            n in script for n in ("conv", "vault", "money", "dupes", "shelve", "faces")
+        ),
+        "conv me<Tab> → merge; vault --sh<Tab> → --show; money <Tab> lists its subcommands": len(
+            probe
+        )
+        == 3
+        and probe[0] == "merge"
+        and probe[1] == "--show"
+        and {"import", "month", "where"} <= set(probe[2].split()),
+        "no English words leak in as subcommands": not any(
+            w in d["subs"]
+            for d in table.values()
+            for w in ("the", "a", "what", "every")
+        ),
+        "pa keeps its hand-written completion": "    pa|" not in script,
+    }
 
 
 def last(tmp):
     home = os.path.join(tmp, "home")
     proj = os.path.join(home, "proj")
     os.makedirs(proj)
-    d = os.path.join(home, ".sakura", "sessions", time.strftime("%Y"), time.strftime("%m"), time.strftime("%d"))
+    d = os.path.join(
+        home,
+        ".sakura",
+        "sessions",
+        time.strftime("%Y"),
+        time.strftime("%m"),
+        time.strftime("%d"),
+    )
     os.makedirs(d)
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    ev = [{"type": "session_meta", "timestamp": now, "payload": {"session_id": "s1", "cwd": proj, "originator": "codex_tui"}},
-          {"type": "turn_context", "timestamp": now, "payload": {"turn_id": "t1", "cwd": proj}},
-          {"type": "event_msg", "payload": {"type": "item_completed", "turn_id": "t1", "item": {"type": "UserMessage", "content": [{"type": "text", "text": "rename the config loader"}]}}},
-          {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": json.dumps({"cmd": "git mv config.py loader.py"}), "call_id": "c1"}},
-          {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1", "output": "Process exited with code 0\n"}},
-          {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "t1", "last_agent_message": "Renamed config.py to loader.py; imports updated."}}]
-    open(os.path.join(d, "rollout-a.jsonl"), "w").write("\n".join(json.dumps(e) for e in ev) + "\n")
+    ev = [
+        {
+            "type": "session_meta",
+            "timestamp": now,
+            "payload": {"session_id": "s1", "cwd": proj, "originator": "codex_tui"},
+        },
+        {
+            "type": "turn_context",
+            "timestamp": now,
+            "payload": {"turn_id": "t1", "cwd": proj},
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "turn_id": "t1",
+                "item": {
+                    "type": "UserMessage",
+                    "content": [{"type": "text", "text": "rename the config loader"}],
+                },
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": "git mv config.py loader.py"}),
+                "call_id": "c1",
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": "Process exited with code 0\n",
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "t1",
+                "last_agent_message": "Renamed config.py to loader.py; imports updated.",
+            },
+        },
+    ]
+    open(os.path.join(d, "rollout-a.jsonl"), "w").write(
+        "\n".join(json.dumps(e) for e in ev) + "\n"
+    )
     # a turn in /tmp must be skipped
     ev2 = [dict(e) for e in ev]
-    ev2[0] = {"type": "session_meta", "timestamp": now, "payload": {"session_id": "s2", "cwd": "/tmp/x", "originator": "codex_tui"}}
-    ev2[1] = {"type": "turn_context", "timestamp": now, "payload": {"turn_id": "t2", "cwd": "/tmp/x"}}
-    open(os.path.join(d, "rollout-b.jsonl"), "w").write("\n".join(json.dumps(e) for e in ev2) + "\n")
+    ev2[0] = {
+        "type": "session_meta",
+        "timestamp": now,
+        "payload": {"session_id": "s2", "cwd": "/tmp/x", "originator": "codex_tui"},
+    }
+    ev2[1] = {
+        "type": "turn_context",
+        "timestamp": now,
+        "payload": {"turn_id": "t2", "cwd": "/tmp/x"},
+    }
+    open(os.path.join(d, "rollout-b.jsonl"), "w").write(
+        "\n".join(json.dumps(e) for e in ev2) + "\n"
+    )
     env = {"SAKURA_HOME": os.path.join(home, ".sakura"), "HOME": home}
     os.makedirs(os.path.join(tmp, "elsewhere"))
     l = os.path.join(BIN, "sakura-last")
@@ -1337,34 +1425,313 @@ def last(tmp):
     here = run([l, "--here", "--all"], env, cwd=proj).stdout
     elsewhere = run([l, "--here", "--all"], env, cwd=os.path.join(tmp, "elsewhere"))
     plain = run([l], env).stdout
-    return {"the last turn: directory, ask, what ran, answer": "proj" in out and "rename the config loader" in out and "git mv" in out and "Renamed config.py" in out,
-            "--cd prints its directory for the ?last key": cd == proj,
-            "--here finds the turn in this directory, and nothing elsewhere": "rename the config loader" in here and elsewhere.returncode == 1,
-            "sessions in /tmp are skipped unless --all": "/tmp/x" not in out and "nothing on record" in plain}
+    return {
+        "the last turn: directory, ask, what ran, answer": "proj" in out
+        and "rename the config loader" in out
+        and "git mv" in out
+        and "Renamed config.py" in out,
+        "--cd prints its directory for the ?last key": cd == proj,
+        "--here finds the turn in this directory, and nothing elsewhere": "rename the config loader"
+        in here
+        and elsewhere.returncode == 1,
+        "sessions in /tmp are skipped unless --all": "/tmp/x" not in out
+        and "nothing on record" in plain,
+    }
 
 
 def vaultcsv(tmp):
     if not (shutil.which("pass") and shutil.which("gpg") and shutil.which("oathtool")):
         return {"vaultcsv (pass, gpg or oathtool missing)": False}
-    env = {"GNUPGHOME": os.path.join(tmp, "gnupg"), "PASSWORD_STORE_DIR": os.path.join(tmp, "store"), "DISPLAY": "", "WAYLAND_DISPLAY": ""}
+    env = {
+        "GNUPGHOME": os.path.join(tmp, "gnupg"),
+        "PASSWORD_STORE_DIR": os.path.join(tmp, "store"),
+        "DISPLAY": "",
+        "WAYLAND_DISPLAY": "",
+    }
     os.makedirs(env["GNUPGHOME"], mode=0o700)
-    subprocess.run(["gpg", "--batch", "--quiet", "--pinentry-mode", "loopback", "--passphrase", "", "--quick-generate-key", "Eval <eval@test>", "rsa2048", "sign,encr", "0"],
-                   env={**os.environ, **env}, capture_output=True, check=True)
-    key = [l.split(":")[4] for l in subprocess.run(["gpg", "--list-secret-keys", "--with-colons"], env={**os.environ, **env}, capture_output=True, text=True).stdout.splitlines() if l.startswith("sec")][0]
+    subprocess.run(
+        [
+            "gpg",
+            "--batch",
+            "--quiet",
+            "--pinentry-mode",
+            "loopback",
+            "--passphrase",
+            "",
+            "--quick-generate-key",
+            "Eval <eval@test>",
+            "rsa2048",
+            "sign,encr",
+            "0",
+        ],
+        env={**os.environ, **env},
+        capture_output=True,
+        check=True,
+    )
+    key = [
+        l.split(":")[4]
+        for l in subprocess.run(
+            ["gpg", "--list-secret-keys", "--with-colons"],
+            env={**os.environ, **env},
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        if l.startswith("sec")
+    ][0]
     v = os.path.join(BIN, "vault")
     run([v, "init", key], env)
-    open(os.path.join(tmp, "kp.csv"), "w").write('Group,Title,Username,Password,URL,Notes,TOTP\n"Root/Email","Proton","kai@pm.me","pm-Pass-9","https://proton.me","main","otpauth://totp/Proton:kai?secret=JBSWY3DPEHPK3PXP&issuer=Proton"\n"Root","Bank","kai","b4nk!","","",""\n')
-    open(os.path.join(tmp, "op.csv"), "w").write('Title,Url,Username,Password,OTPAuth,Favorite,Archived,Tags,Notes\n"AWS","https://aws.amazon.com","root","aws-PW-1","otpauth://totp/AWS:root?secret=GEZDGNBVGY3TQOJQ","","","Work","prod"\n')
+    open(os.path.join(tmp, "kp.csv"), "w").write(
+        'Group,Title,Username,Password,URL,Notes,TOTP\n"Root/Email","Proton","kai@pm.me","pm-Pass-9","https://proton.me","main","otpauth://totp/Proton:kai?secret=JBSWY3DPEHPK3PXP&issuer=Proton"\n"Root","Bank","kai","b4nk!","","",""\n'
+    )
+    open(os.path.join(tmp, "op.csv"), "w").write(
+        'Title,Url,Username,Password,OTPAuth,Favorite,Archived,Tags,Notes\n"AWS","https://aws.amazon.com","root","aws-PW-1","otpauth://totp/AWS:root?secret=GEZDGNBVGY3TQOJQ","","","Work","prod"\n'
+    )
     kp = run([v, "import", "keepassxc", os.path.join(tmp, "kp.csv")], env)
     op = run([v, "import", "1password", os.path.join(tmp, "op.csv")], env)
     pw = run([v, "get", "keepassxc/Email/Proton", "--show"], env).stdout.strip()
     bank = run([v, "get", "keepassxc/Bank", "--show"], env).stdout.strip()
     code = run([v, "otp", "keepassxc/Email/Proton"], env).stdout.strip()
-    expect = subprocess.run(["oathtool", "--totp", "-b", "JBSWY3DPEHPK3PXP"], capture_output=True, text=True).stdout.strip()
-    aws = run([v, "get", "1password/Work/AWS", "--field", "login", "--show"], env).stdout.strip()
-    return {"KeePassXC: groups become folders, Root dropped, 2FA carried": kp.returncode == 0 and "2 logins (1 with 2FA)" in kp.stdout and pw == "pm-Pass-9" and bank == "b4nk!" and code == expect,
-            "1Password: tags become the folder, OTPAuth carried": op.returncode == 0 and aws == "root" and run([v, "otp", "1password/Work/AWS"], env).stdout.strip().isdigit(),
-            "no secret in either import's output": all(x not in kp.stdout + op.stdout for x in ("pm-Pass-9", "b4nk!", "aws-PW-1", "JBSWY3DP", "GEZDGNBV"))}
+    expect = subprocess.run(
+        ["oathtool", "--totp", "-b", "JBSWY3DPEHPK3PXP"], capture_output=True, text=True
+    ).stdout.strip()
+    aws = run(
+        [v, "get", "1password/Work/AWS", "--field", "login", "--show"], env
+    ).stdout.strip()
+    return {
+        "KeePassXC: groups become folders, Root dropped, 2FA carried": kp.returncode
+        == 0
+        and "2 logins (1 with 2FA)" in kp.stdout
+        and pw == "pm-Pass-9"
+        and bank == "b4nk!"
+        and code == expect,
+        "1Password: tags become the folder, OTPAuth carried": op.returncode == 0
+        and aws == "root"
+        and run([v, "otp", "1password/Work/AWS"], env).stdout.strip().isdigit(),
+        "no secret in either import's output": all(
+            x not in kp.stdout + op.stdout
+            for x in ("pm-Pass-9", "b4nk!", "aws-PW-1", "JBSWY3DP", "GEZDGNBV")
+        ),
+    }
+
+
+def models(tmp):
+    """sakura-model pick: the choices every tool reads, the menu with whatmodel.sh, Hugging Face for a name, a pinned custom driver."""
+    import http.server
+    import socketserver
+    import threading
+    import urllib.parse
+
+    seen = {"whatmodel": [], "hf": []}
+    gguf = os.urandom(300_000)
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            u = urllib.parse.urlparse(self.path)
+            if u.path == "/wm/":
+                seen["whatmodel"].append(u.query)
+                body = json.dumps(
+                    {
+                        "models": [
+                            {
+                                "rank": 1,
+                                "name": "Gemma 4 26B-A4B",
+                                "score": 70.1,
+                                "need_gb": 17,
+                                "speed": {"value": 31},
+                            },
+                            {
+                                "rank": 2,
+                                "name": "Qwen3-VL 8B",
+                                "score": 66.0,
+                                "need_gb": 6,
+                                "ollama": "qwen3-vl:8b",
+                            },
+                        ]
+                    }
+                ).encode()
+            elif u.path == "/api/models":
+                seen["hf"].append(urllib.parse.parse_qs(u.query).get("search", [""])[0])
+                body = json.dumps([{"id": "unsloth/gemma-4-26b-a4b-it-GGUF"}]).encode()
+            elif u.path == "/api/tags":
+                body = json.dumps(
+                    {
+                        "models": [
+                            {"name": "huihui_ai/qwen3.5-abliterated:9b"},
+                            {"name": "llama3.2:latest"},
+                        ]
+                    }
+                ).encode()
+            elif u.path.endswith("/resolve/main/mine.gguf"):
+                body = gguf
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    fakebin = os.path.join(tmp, "fakebin")
+    os.makedirs(fakebin)
+    pulls = os.path.join(tmp, "pulls")
+    open(os.path.join(fakebin, "ollama"), "w").write(
+        f'#!/bin/sh\necho "$@" >> {pulls}\n'
+    )
+    open(os.path.join(fakebin, "systemctl"), "w").write("#!/bin/sh\nexit 0\n")
+    for f in ("ollama", "systemctl"):
+        os.chmod(os.path.join(fakebin, f), 0o755)
+    home = os.path.join(tmp, "home")
+    env = {
+        "SAKURA_HOME": home,
+        "SAKURA_WHATMODEL_URL": base + "/wm/",
+        "SAKURA_HF_BASE": base,
+        "OLLAMA_API_BASE": base,
+        "SAKURA_MODEL_DIR": os.path.join(tmp, "models"),
+        "PATH": fakebin + ":" + os.environ["PATH"],
+    }
+    for k in (
+        "SAKURA_BIG_MODEL",
+        "SAKURA_FAST_MODEL",
+        "SAKURA_VISION_MODEL",
+        "SAKURA_RAG_MODEL",
+        "SAKURA_DRIVER",
+    ):
+        env[k] = ""
+    m = os.path.join(BIN, "sakura-model")
+    try:
+        table = run([m, "pick"], env).stdout
+        import re as _re
+
+        def index_of(out, marker):
+            for line in out.splitlines():
+                mm = _re.match(r"\s*(\d+)\s+.*" + _re.escape(marker), line)
+                if mm:
+                    return mm.group(1)
+            return "0"
+
+        # look at the menu first (Enter keeps the choice), then pick by the number it showed
+        peek = run([m, "pick", "coder"], env, stdin="y\n\n")
+        kept = run([m, "get", "coder"], env).stdout.strip()
+        # say yes to whatmodel.sh, take the entry that names an Ollama tag, and download it
+        menu = run(
+            [m, "pick", "coder"],
+            env,
+            stdin="y\n" + index_of(peek.stdout, "whatmodel.sh 66.0") + "\ny\n",
+        )
+        got_vision = run([m, "get", "coder"], env).stdout.strip()
+        # a whatmodel.sh entry with no tag: looked up on Hugging Face, confirmed
+        peek2 = run([m, "pick", "reason", "--whatmodel"], env, stdin="\n")
+        menu2 = run(
+            [m, "pick", "reason", "--whatmodel"],
+            env,
+            stdin=index_of(peek2.stdout, "whatmodel.sh 70.1") + "\ny\nn\n",
+        )
+        got_reason = run([m, "get", "reason"], env).stdout.strip()
+        # every consumer reads the pick; the environment still wins
+        code = (
+            "import importlib.machinery as im, os\nB=%r\n"
+            % BIN
+            + "c=im.SourceFileLoader('c',B+'/consult').load_module(); l=im.SourceFileLoader('l',B+'/look').load_module(); r=im.SourceFileLoader('r',B+'/rag').load_module()\n"
+            "print(c.ROLES['reason'], l.KNOWN[0], r.MODEL)"
+        )
+        run([m, "pick", "vision", "qwen3-vl:8b"], env)
+        seen_by = run([sys.executable, "-c", code], env).stdout.split()
+        run([m, "pick", "embed", "bge-m3"], env)
+        env_wins = run(
+            [m, "get", "embed"], {**env, "SAKURA_RAG_MODEL": "nomic-embed-text"}
+        ).stdout.strip()
+        # a chat pick gets an entry in the catalog the launcher passes, so it runs with Sakura's prompt
+        run([m, "pick", "agent", "qwen3.6:35b-a3b"], env)
+        cat = json.load(
+            open(
+                subprocess.run(
+                    [
+                        sys.executable,
+                        os.path.join(os.path.dirname(BIN), "lib", "sakura_choices.py"),
+                        "catalog",
+                    ],
+                    env={**os.environ, **env},
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+            )
+        )
+        entry = next((x for x in cat["models"] if x["slug"] == "qwen3.6:35b-a3b"), {})
+        reset = run([m, "pick", "agent", "--default"], env)
+        after_reset = run([m, "get", "agent"], env).stdout.strip()
+        # a GGUF of your own as the driver: pinned on first download, held to it after
+        drv = run([m, "pick", "driver", "hf.co/me/my-model-GGUF:mine.gguf"], env)
+        first = run([m, "pull"], env, timeout=120)
+        pinned = json.load(open(os.path.join(home, "models.json")))["drivers"].get(
+            "mine", {}
+        )
+        again = run([m, "pull"], env, timeout=120)
+        with open(os.path.join(tmp, "models", "mine.gguf"), "r+b") as f:
+            f.write(b"tampered")
+        bad = run([m, "pull"], env, timeout=120)
+        listed = run([m, "driver"], env).stdout
+    finally:
+        srv.shutdown()
+    import hashlib
+
+    return {
+        "pick lists every role, its model and where it came from": all(
+            r in table
+            for r in ("agent", "fast", "vision", "embed", "coder", "reason", "driver")
+        )
+        and "default" in table,
+        "Enter in the menu changes nothing": kept
+        == "huihui_ai/qwen2.5-coder-abliterate:14b"
+        and "unchanged" in peek.stdout,
+        "the menu offers whatmodel.sh's ranking only after asking, sending RAM and VRAM and nothing else": "whatmodel.sh"
+        in menu.stdout
+        and len(seen["whatmodel"]) >= 1
+        and set(urllib.parse.parse_qs(seen["whatmodel"][0]))
+        == {"ram", "vram", "n", "format"},
+        "a whatmodel.sh entry with an Ollama tag is chosen and pulled": got_vision
+        == "qwen3-vl:8b"
+        and os.path.exists(pulls)
+        and "pull qwen3-vl:8b" in open(pulls).read(),
+        "an entry without a tag is found on Hugging Face as a GGUF": got_reason
+        == "hf.co/unsloth/gemma-4-26b-a4b-it-GGUF:Q4_K_M"
+        and seen["hf"] == ["Gemma-4-26B-A4B"],
+        "consult, look and rag all use the picks": seen_by
+        == [
+            "hf.co/unsloth/gemma-4-26b-a4b-it-GGUF:Q4_K_M",
+            "qwen3-vl:8b",
+            "qwen3-embedding:0.6b",
+        ],
+        "an environment variable still wins for one run": env_wins
+        == "nomic-embed-text",
+        "a picked agent model is in the launcher's catalog with Sakura's prompt": bool(
+            entry
+        )
+        and entry.get("base_instructions", "").startswith("# Sakura")
+        and entry.get("context_window") == 32768,
+        "--default puts it back": reset.returncode == 0
+        and after_reset == "huihui_ai/qwen3.5-abliterated:9b",
+        "a stock pick is warned about, not refused": "may refuse" in menu2.stdout
+        or "may refuse" in run([m, "pick", "prose", "llama3.2"], env).stdout,
+        "a custom driver: chosen, downloaded, its checksum pinned on first download": drv.returncode
+        == 0
+        and first.returncode == 0
+        and pinned.get("sha256") == hashlib.sha256(gguf).hexdigest()
+        and pinned.get("size") == len(gguf),
+        "then held to it: the same file passes, a changed one is refused": again.returncode
+        == 0
+        and "checksum OK" in again.stdout
+        and bad.returncode == 1
+        and "MISMATCH" in bad.stderr,
+        "the driver list shows it as yours": "mine" in listed and "yours" in listed,
+    }
 
 
 CASES = {
@@ -1389,6 +1756,7 @@ CASES = {
     "complete": complete,
     "last": last,
     "vaultcsv": vaultcsv,
+    "models": models,
 }
 
 

@@ -28,13 +28,10 @@ import subprocess
 import sys
 import urllib.request
 
-ROLES = {
-    "coder": "huihui_ai/qwen2.5-coder-abliterate:14b",
-    "coder-fast": "huihui_ai/qwen2.5-coder-abliterate:3b",
-    "reason": "huihui_ai/qwen2.5-abliterate:14b",
-    "security": "WhiteRabbitNeo/Llama-3.1-WhiteRabbitNeo-2-8B:latest",
-    "prose": "thomboe/dolphin3.0-llama3.1-8b-abliterated:latest",
-}
+import importlib.machinery as _im
+_choices = _im.SourceFileLoader("sakura_choices", os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "lib", "sakura_choices.py")).load_module()
+# The model behind each role: your pick (sakura-model pick coder …), else Sakura's default.
+ROLES = {r: _choices.get(r) for r in ("coder", "coder-fast", "reason", "security", "prose")}
 BASE = os.environ.get("OLLAMA_API_BASE", "http://127.0.0.1:11434")
 DRIVER = os.environ.get("SAKURA_DRIVER_URL", "http://127.0.0.1:8091")
 

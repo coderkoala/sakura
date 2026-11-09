@@ -18,6 +18,12 @@ doesn't qualify keeps the 9b on Ollama; `up` failing is not an error for the cal
   sakura-model gpu      temperature, Xid errors this boot, who holds the VRAM. --check exits 1 when a long job shouldn't start
   sakura-model driver [NAME]   which driver file runs (ornith15, the default; qwen36, faster, one eval miss). Switching stops the server
   sakura-model advise   what whatmodel.sh rates for this RAM and VRAM beside Sakura's line. Sends only those two numbers, only when you run it
+  sakura-model pick     which model does each job (agent, fast, vision, embed, the consult roles, the driver), yours or Sakura's default
+  sakura-model pick ROLE        choose from a menu: what's been tried with Sakura, what Ollama already has, and whatmodel.sh's ranking for
+                                this machine (asked first: it sends RAM and VRAM, nothing else). Any Ollama tag or hf.co/… works too
+  sakura-model pick ROLE TAG [--pull]   the same without the menu;  sakura-model pick ROLE --default   back to Sakura's
+  sakura-model pick driver hf.co/OWNER/REPO:FILE.gguf   a GGUF of your own for the GPU driver (checksum pinned on first download)
+  sakura-model get ROLE  the model that role uses now
   sakura-model pull     download the model (15.6 GB), resumable, checksum verified
   sakura-model models   every model that suits this machine, and which are missing
   sakura-model pull-all download the missing ones, most needed first, while the disk allows
@@ -25,11 +31,13 @@ doesn't qualify keeps the 9b on Ollama; `up` failing is not an error for the cal
 """
 import hashlib
 import json
+import re
 import os
 import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 PORT = 8091
@@ -47,6 +55,13 @@ DRIVERS = {
                  "sha256": "cae4302e05b2395a57869a88fb4885b54767392f69919b891b2be2ef753e5d45",
                  "about": "Ornith 1.5 35B-A3B, the default: run 30/30, wall 27/28; 63 tok/s warm, 26 after a 26K prompt (whatmodel.sh 69)"},
 }
+import importlib.machinery as _im
+CHOICES = _im.SourceFileLoader("sakura_choices", os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "lib", "sakura_choices.py")).load_module()
+# Drivers you added (sakura-model pick driver hf.co/…): same fields; size and sha256 are learned on the first download.
+for _n, _d in CHOICES.load().get("drivers", {}).items():
+    DRIVERS.setdefault(_n, {**_d, "about": _d.get("about") or f"yours: {_d['repo']}/{_d['file']} (untested here; the VRAM budget was measured on 35B-A3B MoE)", "user": True})
+HF = os.environ.get("SAKURA_HF_BASE", "https://huggingface.co")
+WHATMODEL = os.environ.get("SAKURA_WHATMODEL_URL", "https://whatmodel.sh/")
 MODEL_DIR = os.environ.get("SAKURA_MODEL_DIR", os.path.expanduser("~/.local/share/sakura/models"))
 DRIVER_FILE = os.path.join(os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura")), "driver")
 
@@ -63,7 +78,7 @@ def driver_name():
 
 DRIVER = DRIVERS[driver_name()]
 SLUG = "qwen36-q3"  # the alias the launcher and evals address; kept stable across drivers so nothing else changes
-REPO, REVISION, FILENAME, SIZE, SHA256 = DRIVER["repo"], DRIVER["revision"], DRIVER["file"], DRIVER["size"], DRIVER["sha256"]
+REPO, REVISION, FILENAME, SIZE, SHA256 = DRIVER["repo"], DRIVER.get("revision") or "main", DRIVER["file"], DRIVER.get("size"), DRIVER.get("sha256")
 MODEL = os.path.join(MODEL_DIR, FILENAME)
 ENGINE_DIR = os.environ.get("SAKURA_ENGINE_DIR", "/usr/local/lib/ollama")
 ENGINE = os.path.join(ENGINE_DIR, "llama-server")
@@ -133,7 +148,7 @@ def plan():
     if budget < MIN_BUDGET_MIB:
         return False, f"VRAM budget {budget} MiB of {total} (others hold {used} MiB), needs {MIN_BUDGET_MIB}", 0
     cache = min(budget - DENSE_MIB, MAX_CACHE_MIB)
-    if not (os.path.isfile(MODEL) and os.path.getsize(MODEL) == SIZE):
+    if not (os.path.isfile(MODEL) and (SIZE is None or os.path.getsize(MODEL) == SIZE)):
         return False, f"model not downloaded; this machine qualifies with a {cache} MiB expert cache: sakura-model pull", cache
     return True, f"{total} MiB card, {budget} MiB budget, {cache} MiB expert cache", cache
 
@@ -223,7 +238,8 @@ def driver(args):
     if not args:
         cur = driver_name()
         for name, d in DRIVERS.items():
-            here = os.path.isfile(os.path.join(MODEL_DIR, d["file"])) and os.path.getsize(os.path.join(MODEL_DIR, d["file"])) == d["size"]
+            f = os.path.join(MODEL_DIR, d["file"])
+            here = os.path.isfile(f) and (d.get("size") is None or os.path.getsize(f) == d["size"])
             print(f"{'*' if name == cur else ' '} {name:<9} {'here' if here else 'not downloaded':<14} {d['about']}")
         return 0
     name = args[0]
@@ -257,18 +273,18 @@ def advise():
         tag = next((v for k, v in mine.items() if k.lower() in m["name"].lower()), "")
         print(f"  {m.get('rank', '?'):>4}  {m['name']:<34} {m.get('score', 0):>5.1f}  ~{m.get('need_gb', '?')} GB  {str(sp.get('value', '')) + ' tok/s' if sp else '':<10} {tag}")
     print("A higher score isn't a better Sakura: the driver has to call tools in the qwen-code shape and pass evals/run.py here. "
-          "To try one: download it, `SAKURA_DRIVER=ornith15 sakura-model up`, then evals/run.py --model qwen36-q3 --base-url http://127.0.0.1:8091/v1.")
+          "To use one: `sakura-model pick ROLE` (agent, fast, vision, a consult role or the driver) offers this list in its menu.")
     return 0
 
 
 def pull():
-    if os.path.isfile(MODEL) and os.path.getsize(MODEL) == SIZE:
+    if os.path.isfile(MODEL) and (SIZE is None or os.path.getsize(MODEL) == SIZE):
         print("already downloaded; verifying")
     else:
         os.makedirs(MODEL_DIR, exist_ok=True)
         part = MODEL + ".part"
-        url = f"https://huggingface.co/{REPO}/resolve/{REVISION}/{FILENAME}"
-        print(f"downloading {SIZE / 2**30:.1f} GiB to {MODEL_DIR}")
+        url = f"{HF}/{REPO}/resolve/{REVISION or 'main'}/{FILENAME}"
+        print(f"downloading {SIZE / 2**30:.1f} GiB to {MODEL_DIR}" if SIZE else f"downloading {FILENAME} to {MODEL_DIR}")
         if subprocess.run(["curl", "-fL", "-C", "-", "--retry", "5", "--retry-delay", "5", "-o", part, url]).returncode:
             return 1
         os.replace(part, MODEL)
@@ -276,6 +292,13 @@ def pull():
     with open(MODEL, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 24), b""):
             h.update(chunk)
+    if SHA256 is None:
+        # a driver you added: trust on first download, then hold it to that
+        d = CHOICES.load()
+        d["drivers"][driver_name()].update({"sha256": h.hexdigest(), "size": os.path.getsize(MODEL)})
+        CHOICES.save(d)
+        print(f"checksum pinned: {h.hexdigest()} (every later pull is held to it)")
+        return 0
     if h.hexdigest() != SHA256:
         os.replace(MODEL, MODEL + ".bad")
         print(f"CHECKSUM MISMATCH, not using it (moved to {MODEL}.bad)", file=sys.stderr)
@@ -293,17 +316,15 @@ def ollama_models():
     """Ollama models Sakura uses, most needed first: (name, what for, min RAM GiB, download GiB).
     Names come from where they're used (sakura-launch, consult, rag), so this list can't drift from them."""
     from importlib.machinery import SourceFileLoader
-    roles = SourceFileLoader("consult", os.path.join(BIN, "consult")).load_module().ROLES
-    rag = os.environ.get("SAKURA_RAG_MODEL", "qwen3-embedding:0.6b")
-    big = os.environ.get("SAKURA_BIG_MODEL", "huihui_ai/qwen3.5-abliterated:9b")
-    fast = os.environ.get("SAKURA_FAST_MODEL", "hf.co/FrostWolfAI/Spark-X2.6-4B-abliterated-GGUF:Q8_0")
+    roles = {r: CHOICES.get(r) for r in ("coder", "coder-fast", "reason", "security", "prose")}  # your picks, else the defaults
+    rag, big, fast = CHOICES.get("embed"), CHOICES.get("agent"), CHOICES.get("fast")
     # RAM floors: the model loaded beside a desktop. Sizes: the Q4 downloads, measured 2026-11.
     return [
         (big, "the agent when the driver can't run, and the intent check", 0, 6.6),
         (rag, "rag search", 0, 0.7),
         (fast, "SAKURA_FAST=1: Spark-X2.6 4B, 28/30 on evals/run.py, median 8 s", 0, 4.4),
         (roles["coder-fast"], "consult coder-fast", 0, 1.9),
-        (os.environ.get("SAKURA_VISION_MODEL", "huihui_ai/qwen2.5-vl-abliterated:3b"), "look (images, screenshots, scans)", 0, 3.2),
+        (CHOICES.get("vision"), "look (images, screenshots, scans)", 0, 3.2),
         (roles["security"], "consult security", 16, 4.7),
         (roles["prose"], "consult prose", 16, 4.9),
         (roles["coder"], "consult coder", 24, 9.0),
@@ -343,12 +364,13 @@ def model_plan():
         else:
             rows.append((name, why, size, "missing"))
     ok, reason, cache = plan()
-    if ok or (os.path.isfile(MODEL) and os.path.getsize(MODEL) == SIZE):  # a busy card today doesn't make the file missing
-        rows.append((FILENAME, "the driver, on this machine's GPU", SIZE / 2**30, "have"))
+    gib = (SIZE or 0) / 2**30
+    if ok or (os.path.isfile(MODEL) and (SIZE is None or os.path.getsize(MODEL) == SIZE)):  # a busy card today doesn't make the file missing
+        rows.append((FILENAME, "the driver, on this machine's GPU", gib, "have"))
     elif cache:  # qualifies, only the file is missing
-        rows.append((FILENAME, "the driver, on this machine's GPU", SIZE / 2**30, "missing"))
+        rows.append((FILENAME, "the driver, on this machine's GPU", gib, "missing"))
     else:
-        rows.append((FILENAME, "the driver, on this machine's GPU", SIZE / 2**30, f"skip: {reason}"))
+        rows.append((FILENAME, "the driver, on this machine's GPU", gib, f"skip: {reason}"))
     return rows, have
 
 
@@ -406,6 +428,177 @@ def pull_all(background=False):
     return 1 if failed else 0
 
 
+def whatmodel_list(n=15):
+    """whatmodel.sh's ranking for this RAM and VRAM: [{name, score, need_gb, tok_s, tag}]. Sends those two numbers, nothing else."""
+    ram_kib = int(open("/proc/meminfo").readline().split()[1])
+    v = vram()
+    sep = "&" if "?" in WHATMODEL else "?"
+    url = f"{WHATMODEL}{sep}ram={ram_kib}&vram={v[0] if v else 0}&n={n}&format=json"
+    data = json.load(urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "curl/8"}), timeout=20))
+    out = []
+    for m in data.get("models", []):
+        sp = m.get("speed") or {}
+        tag = m.get("ollama") or m.get("ollama_tag") or m.get("tag")
+        repo = m.get("hf") or m.get("hf_repo") or m.get("repo") or m.get("gguf")
+        if not tag and repo:
+            repo = re.sub(r"^https?://huggingface\.co/", "", repo).strip("/")
+            tag = f"hf.co/{repo}" + ("" if ":" in repo else f":{m.get('quant') or 'Q4_K_M'}")
+        out.append({"name": m.get("name", "?"), "score": m.get("score"), "need_gb": m.get("need_gb"), "tok_s": sp.get("value"), "tag": tag})
+    return out
+
+
+def hf_gguf_for(name):
+    """The most-downloaded GGUF repo on Hugging Face for a model name, as an Ollama hf.co tag; None if there isn't one."""
+    q = re.sub(r"[\s_]+", "-", name.strip())
+    url = f"{HF}/api/models?search={urllib.parse.quote(q)}&filter=gguf&sort=downloads&direction=-1&limit=1"
+    try:
+        hits = json.load(urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "sakura-model"}), timeout=20))
+    except Exception:
+        return None
+    return f"hf.co/{hits[0]['id']}:Q4_K_M" if hits else None
+
+
+def ollama_pull(tag):
+    print(f"pulling {tag} …", flush=True)
+    return subprocess.run(["ollama", "pull", tag]).returncode
+
+
+def note_for(role, tag):
+    """One line of what to expect; nothing is refused."""
+    kind = CHOICES.ROLES[role][3] if role in CHOICES.ROLES else "driver"
+    tested = any(t == tag for t, _ in CHOICES.KNOWN.get(role, []))
+    bits = []
+    if not tested and kind in ("chat", "driver"):
+        bits.append("untested with Sakura's tools here: `evals/run.py --model " + (tag if kind == "chat" else "qwen36-q3") + "` measures it")
+    if "abliterat" not in tag.lower() and "uncensored" not in tag.lower() and kind in ("chat", "consult", "driver"):
+        bits.append("a stock model may refuse some of your requests (Sakura's defaults are abliterated)")
+    if role == "embed":
+        bits.append("rag's index was made with the old one: `rag index` your folders again")
+    return "; ".join(bits)
+
+
+def set_role(role, tag, pull_it):
+    d = CHOICES.load()
+    if tag is None:
+        d["roles"].pop(role, None)
+        CHOICES.save(d)
+        print(f"{role}: back to Sakura's default, {CHOICES.ROLES[role][1]}")
+        return 0
+    d["roles"][role] = tag
+    CHOICES.save(d)
+    env = CHOICES.ROLES[role][0]
+    print(f"{role}: {tag}" + (f"  (${env} is set in this shell and still wins)" if os.environ.get(env) else ""))
+    n = note_for(role, tag)
+    if n:
+        print("  " + n)
+    if CHOICES.ROLES[role][3] == "chat":
+        CHOICES.catalog()  # so the picked model gets Sakura's prompt and context window
+    have = ollama_have()
+    if have is not None and tag not in have:
+        if pull_it:
+            return ollama_pull(tag)
+        print(f"  not downloaded yet: sakura-model pull-all, or ollama pull {tag}")
+    return 0
+
+
+def set_driver(spec):
+    """hf.co/OWNER/REPO:FILE.gguf (or OWNER/REPO:FILE.gguf, or a NAME already known)."""
+    if spec in DRIVERS:
+        return driver([spec])
+    m = re.match(r"^(?:hf\.co/|https?://huggingface\.co/)?([\w.-]+/[\w.-]+)[:/](.+\.gguf)$", spec)
+    if not m:
+        print("sakura-model: a driver is hf.co/OWNER/REPO:FILE.gguf, or one of: " + ", ".join(DRIVERS), file=sys.stderr)
+        return 2
+    repo, file = m.groups()
+    name = re.sub(r"[^\w]+", "-", file.rsplit(".", 1)[0]).strip("-").lower()[:40]
+    d = CHOICES.load()
+    d["drivers"][name] = {"repo": repo, "file": file, "revision": "main", "size": None, "sha256": None}
+    CHOICES.save(d)
+    os.makedirs(os.path.dirname(DRIVER_FILE), exist_ok=True)
+    open(DRIVER_FILE, "w").write(name + "\n")
+    subprocess.run(["systemctl", "--user", "stop", UNIT], capture_output=True)
+    print(f"driver: {name} ({repo}/{file}), yours")
+    print("  " + note_for("driver", file) + "; the VRAM budget was measured on 35B-A3B MoE models, so another shape may need SAKURA_CACHE_MIB")
+    print("  download it: sakura-model pull  (its checksum is pinned on that first download)")
+    return 0
+
+
+def ask(prompt):
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        return ""
+
+
+def pick(args):
+    pull_it = "--pull" in args
+    use_whatmodel = "--whatmodel" in args
+    args = [a for a in args if a not in ("--pull", "--whatmodel")]
+    if not args:
+        rows = [(r, CHOICES.get(r), CHOICES.source(r), why) for r, (_, _, why, _) in CHOICES.ROLES.items()]
+        rows.append(("driver", driver_name(), "yours" if DRIVERS[driver_name()].get("user") or os.path.exists(DRIVER_FILE) else "default", "the GPU driver (llama-server), where the machine qualifies"))
+        w = max(len(r[1]) for r in rows)
+        print(f"{'ROLE':<11} {'MODEL'.ljust(w)}  {'FROM':<8} FOR")
+        for r, tag, src, why in rows:
+            print(f"{r:<11} {tag.ljust(w)}  {src:<8} {why}")
+        print("\nchange one: sakura-model pick ROLE   (a menu, with whatmodel.sh's ranking for this machine)")
+        return 0
+    role = args[0]
+    if role == "driver":
+        if len(args) > 1:
+            return set_driver(args[1])
+        cands = [(n, d["about"]) for n, d in DRIVERS.items()]
+    elif role not in CHOICES.ROLES:
+        print(f"sakura-model: no role {role}; one of: {', '.join(CHOICES.ROLES)}, driver", file=sys.stderr)
+        return 2
+    else:
+        if len(args) > 1:
+            return set_role(role, None if args[1] == "--default" else args[1], pull_it)
+        cands = list(CHOICES.KNOWN.get(role, []))
+        have = ollama_have() or set()
+        known = {t for t, _ in cands}
+        pulled = sorted({t[:-7] if t.endswith(":latest") else t for t in have} - known)
+        cands += [(t, "already in Ollama") for t in pulled][:12]
+    print(f"{role}: now {CHOICES.get(role) if role != 'driver' else driver_name()}\n")
+    for i, (tag, why) in enumerate(cands, 1):
+        print(f"  {i:>2}  {tag:<58} {why}")
+    if role != "driver" and CHOICES.ROLES[role][3] in ("chat", "consult", "vision"):
+        if use_whatmodel or ask("\nadd whatmodel.sh's ranking for this machine? It's sent your RAM and VRAM, nothing else [Y/n] ").lower() in ("", "y", "yes"):
+            try:
+                wm = whatmodel_list()
+            except Exception as e:
+                print(f"  (whatmodel.sh didn't answer: {e})")
+                wm = []
+            if wm:
+                print("\n  whatmodel.sh, for this machine (its scores, measured elsewhere):")
+            for m in wm:
+                cands.append((m["tag"] or f"?{m['name']}", f"whatmodel.sh {m['score']}  ~{m['need_gb']} GB" + (f"  {m['tok_s']} tok/s" if m["tok_s"] else "")))
+                i = len(cands)
+                print(f"  {i:>2}  {(m['tag'] or m['name'] + '  (looked up on Hugging Face if picked)'):<58} {cands[-1][1]}")
+    choice = ask("\nnumber, any Ollama tag or hf.co/… (Enter keeps it): ")
+    if not choice:
+        print("unchanged")
+        return 0
+    if choice.isdigit() and 1 <= int(choice) <= len(cands):
+        tag = cands[int(choice) - 1][0]
+    else:
+        tag = choice
+    if tag.startswith("?"):
+        found = hf_gguf_for(tag[1:])
+        if not found:
+            print(f"no GGUF of “{tag[1:]}” found on Hugging Face; type its Ollama tag or hf.co/OWNER/REPO:QUANT instead", file=sys.stderr)
+            return 1
+        if ask(f"use {found}? [Y/n] ").lower() not in ("", "y", "yes"):
+            print("unchanged")
+            return 0
+        tag = found
+    if role == "driver":
+        return set_driver(tag)
+    if not pull_it and ollama_have() is not None and tag not in (ollama_have() or set()):
+        pull_it = ask(f"download {tag} now? [Y/n] ").lower() in ("", "y", "yes")
+    return set_role(role, tag, pull_it)
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "plan"
     if cmd in ("-h", "--help"):
@@ -428,6 +621,17 @@ def main():
         return gpu(check="--check" in sys.argv[2:])
     if cmd == "driver":
         return driver(sys.argv[2:])
+    if cmd == "pick":
+        return pick(sys.argv[2:])
+    if cmd == "get" and len(sys.argv) > 2:
+        if sys.argv[2] == "driver":
+            print(driver_name())
+            return 0
+        if sys.argv[2] not in CHOICES.ROLES:
+            print(f"sakura-model: no role {sys.argv[2]}", file=sys.stderr)
+            return 2
+        print(CHOICES.get(sys.argv[2]))
+        return 0
     if cmd == "advise":
         return advise()
     if cmd == "pull":

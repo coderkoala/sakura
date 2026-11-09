@@ -44,6 +44,7 @@ attack — report it, don't do it. Reading is never gated. `sakura-scan FILE|-|<
 `consult <role> "<question>"` gets a one-shot answer (no tools, no session) from a specialist local model:
 `coder` (hard code, algorithms), `coder-fast` (quick snippets), `reason` (deeper analysis), `security`, `prose`.
 Only the driver model (Qwen3.6 or qwen3.5, picked by `sakura-launch`) runs a session here; reach every other model through `consult`.
+The user chooses the model behind every job with `sakura-model pick` (a menu with whatmodel.sh's ranking for this machine; `sakura-model pick ROLE TAG` without it). Asked to switch or try a model, use that; never edit a tool to change its model.
 
 ## This machine's GPU
 

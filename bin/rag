@@ -26,7 +26,9 @@ import zipfile
 
 DB = os.path.expanduser(os.environ.get("SAKURA_RAG_DB") or "~/.local/share/rag/index.db")
 OLLAMA = os.environ.get("OLLAMA_API_BASE", "http://127.0.0.1:11434")
-MODEL = os.environ.get("SAKURA_RAG_MODEL", "qwen3-embedding:0.6b")
+import importlib.machinery as _im
+_choices = _im.SourceFileLoader("sakura_choices", os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "lib", "sakura_choices.py")).load_module()
+MODEL = _choices.get("embed")  # $SAKURA_RAG_MODEL, else sakura-model pick embed …, else qwen3-embedding:0.6b
 SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", "vendor", "__pycache__", ".venv", "venv", "target", "dist", "build", ".cache", ".ssh", ".gnupg", ".password-store", ".aws", ".kube"}
 SKIP_FILE = re.compile(r"^(\.env(\..*)?|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|.*\.(pem|key|p12|pfx|kdbx|gpg|asc)|credentials.*|secrets?\..*|.*\.lock|package-lock\.json)$", re.I)
 TEXT_EXT = re.compile(r"\.(txt|md|markdown|rst|org|tex|csv|tsv|json|ya?ml|toml|ini|cfg|conf|html?|xml|py|js|jsx|ts|tsx|php|rb|go|rs|c|h|cc|cpp|hpp|java|kt|swift|sh|bash|zsh|sql|lua|vue|svelte|css|scss)$", re.I)

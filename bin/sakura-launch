@@ -87,9 +87,14 @@ worker_hidden() {
     case "$allow" in *" desktop "*) ;; *) printf '%s\n' "$run/bus" ;; esac
     printf '%s\n' "$h/.config/sakura/sudo.pass" "$h/.secrets.local"
 }
-big="${SAKURA_BIG_MODEL:-huihui_ai/qwen3.5-abliterated:9b}"
-# Spark-X2.6 4B (abliterated, Q8): evals/run.py 28/30 at a median 8 s per case on 2026-11-08, against the 9b's 30/31.
-fast="${SAKURA_FAST_MODEL:-hf.co/FrostWolfAI/Spark-X2.6-4B-abliterated-GGUF:Q8_0}"
+# The agent and fast-tier models: $SAKURA_BIG_MODEL / $SAKURA_FAST_MODEL for one run, else `sakura-model pick`, else the defaults
+# (the 9b; Spark-X2.6 4B, evals/run.py 28/30 at a median 8 s per case on 2026-11-08). lib/sakura_choices.py decides.
+choices="$(dirname "$(dirname "$(readlink -f "$0")")")/lib/sakura_choices.py"
+big="$(python3 "$choices" get agent 2>/dev/null)"; big="${big:-huihui_ai/qwen3.5-abliterated:9b}"
+fast="$(python3 "$choices" get fast 2>/dev/null)"; fast="${fast:-hf.co/FrostWolfAI/Spark-X2.6-4B-abliterated-GGUF:Q8_0}"
+# Sakura's prompt lives in the model catalog; a catalog that also covers the picked models (and the fast tier) keeps it.
+catalog="$(python3 "$choices" catalog 2>/dev/null)"
+[ -n "$catalog" ] && [ -s "$catalog" ] && flags+=(-c "model_catalog_json=\"$catalog\"")
 
 if ! command -v sakura >/dev/null 2>&1; then
     echo "sakura: the binary isn't installed. To build it, see patches/README.md in the Sakura repo." >&2

@@ -22,7 +22,10 @@ import tempfile
 import urllib.request
 
 OLLAMA = os.environ.get("OLLAMA_API_BASE", "http://127.0.0.1:11434")
-KNOWN = ["huihui_ai/qwen2.5-vl-abliterated:3b", "qwen2.5vl:3b", "qwen2.5vl:7b", "minicpm-v", "llava-phi3", "moondream"]
+import importlib.machinery as _im
+_choices = _im.SourceFileLoader("sakura_choices", os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "lib", "sakura_choices.py")).load_module()
+CHOSEN = _choices.get("vision")  # sakura-model pick vision …, else the default
+KNOWN = [CHOSEN] + [m for m in ["huihui_ai/qwen2.5-vl-abliterated:3b", "qwen2.5vl:3b", "qwen2.5vl:7b", "minicpm-v", "llava-phi3", "moondream"] if m != CHOSEN]
 MAX_SIDE = 1600
 
 
@@ -41,7 +44,7 @@ def pick_model(wanted):
     for m in KNOWN:
         if m in have or m + ":latest" in have:
             return m
-    sys.exit("look: no vision model is pulled. Get one with: ollama pull " + KNOWN[0] + "  (3 GB)")
+    sys.exit("look: no vision model is pulled. Get one with: ollama pull " + KNOWN[0] + "  (or choose another: sakura-model pick vision)")
 
 
 def screenshot(path):

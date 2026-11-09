@@ -44,6 +44,7 @@
 #   sakura-doctor [--fix]  is this install whole: every command, hook and config checked, what's missing
 #   ?last [N] | ?last --here   what was I doing: the last turn's directory, ask and answer, from the record (cd's there)
 #   Tab completes every command's subcommands and flags (sakura-complete, generated from the manuals)
+#   sakura-model pick [ROLE]   which model does each job: agent, fast, vision, embed, consult roles, the driver; whatmodel.sh in the menu
 #   ?what [words]   which command does this? (no model; alone: everything, by situation);  ?docs <question>  your docs packs and documents
 #   ?otp NAME   a 2FA code from pass;  vault get NAME  the password onto the clipboard;  vault import bitwarden export.json
 #   sakura-notes [TAG]  release notes from the commits since the last tag (for sakura-release)
