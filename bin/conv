@@ -21,6 +21,8 @@ Nothing leaves the machine; the input is never overwritten; the output lands nex
   conv trim video.mp4 START [END]   cut a piece (00:01:30 or 90), copying the streams, no re-encode
   conv audio video.mp4 [--to mp3]   the sound track (then `hear FILE` can transcribe it)
   conv gif clip.mp4 [--fps 12 --width 480]   a gif;   conv thumbs video.mp4   a contact sheet;   conv shrink video.mp4  = compress
+  conv subs video.mp4 [--lang ne] [--burn] [--model small]   subtitles as an .srt next to it, from the speech (whisper on this machine,
+                               the same model `hear` uses); --burn also writes a copy with them drawn in. `translate x.srt --to en` keeps the timings
   conv URL --to pdf|png|html|md|txt   a web page saved here: printed to pdf or a full-page png by the local headless browser (Chromium,
                                or Playwright's), to html as fetched, to md/txt through pandoc. Only that URL is fetched.
   conv extract ARCHIVE...      zip, tar(.gz/.bz2/.xz/.zst), 7z, rar: into a new folder named after the archive, never into the
@@ -36,6 +38,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # `conv --tools | head` ends quietly
 
@@ -596,6 +599,59 @@ def gif(src, o, outdir, fps, width):
     return run([need("ffmpeg"), "-hide_banner", "-loglevel", "error", "-i", src, "-vf", flt, "-loop", "0", out], "ffmpeg", out)
 
 
+WHISPER_SRT = r'''
+import sys, os
+from faster_whisper import WhisperModel
+path, size, lang, out = sys.argv[1], sys.argv[2], sys.argv[3] or None, sys.argv[4]
+model = WhisperModel(size, device="cpu", compute_type="int8", download_root=os.path.expanduser("~/.cache/sakura/whisper"))
+segments, info = model.transcribe(path, vad_filter=True, beam_size=3, language=lang, word_timestamps=False)
+def ts(t):
+    h, r = divmod(t, 3600); m, s = divmod(r, 60)
+    return "%02d:%02d:%02d,%03d" % (h, m, int(s), int(round((s - int(s)) * 1000)))
+n = 0
+with open(out, "w", encoding="utf-8") as f:
+    for seg in segments:
+        text = seg.text.strip()
+        if not text:
+            continue
+        n += 1
+        f.write(f"{n}\n{ts(seg.start)} --> {ts(seg.end)}\n{text}\n\n")
+print(f"{n} {info.language} {info.language_probability:.2f}")
+'''
+
+
+def subs(src, lang, burn, model, o, outdir):
+    """An .srt from the speech, through faster-whisper under uv (nothing installed system-wide), like `hear`."""
+    ff = need("ffmpeg")
+    uv = shutil.which("uv") or os.path.expanduser("~/.local/bin/uv")
+    if not os.path.exists(uv):
+        print("conv: subtitles need uv (https://astral.sh/uv) so faster-whisper can run in its own environment", file=sys.stderr)
+        return False
+    srt = o if (o and o.endswith(".srt")) else out_path(src, "srt", None, outdir)
+    if DRY:
+        print(f"ffmpeg -> wav; uv run --with faster-whisper python - {src} {model} {lang or 'auto'} {srt}" + (f"; ffmpeg -vf subtitles -> burned copy" if burn else ""))
+        return True
+    with tempfile.TemporaryDirectory() as tmp:
+        wav = os.path.join(tmp, "a.wav")
+        if not run([ff, "-hide_banner", "-loglevel", "error", "-i", src, "-vn", "-ac", "1", "-ar", "16000", wav], "ffmpeg", None):
+            return False
+        code = os.path.join(tmp, "srt.py")
+        open(code, "w").write(WHISPER_SRT)
+        r = subprocess.run([uv, "run", "--quiet", "--with", "faster-whisper", "python", code, wav, model, lang or "", srt], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"conv: whisper failed:\n{(r.stderr or r.stdout).strip()[-800:]}", file=sys.stderr)
+        return False
+    n, detected, prob = (r.stdout.split() + ["?", "?", "?"])[:3]
+    made.append({"out": srt, "tool": "faster-whisper", "segments": int(n) if n.isdigit() else 0, "language": detected})
+    if not AS_JSON:
+        print(f"wrote {srt}  (faster-whisper {model}); {n} lines, language {detected}")
+    if burn:
+        out = out_path(src, "mp4", None, outdir, suffix=" subtitled")
+        esc = srt.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+        return run([ff, "-hide_banner", "-loglevel", "error", "-i", src, "-vf", f"subtitles='{esc}'", "-c:a", "copy", out], "ffmpeg", out)
+    return True
+
+
 def thumbs(src, o, outdir):
     out = o or out_path(src, "jpg", None, outdir, suffix=" sheet")
     probe = subprocess.run([need("ffprobe"), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", src], capture_output=True, text=True).stdout.strip()
@@ -743,7 +799,7 @@ def main():
     if a == ["--tools"]:
         return tools_report()
     opt = {"o": None, "dir": None, "to": None, "every": 1, "pages": None, "fps": 12, "width": 480, "regex": False, "flatten": False,
-           "key": None, "cert": None, "chain": [], "field": None, "reason": None, "self_signed": None}
+           "key": None, "cert": None, "chain": [], "field": None, "reason": None, "self_signed": None, "lang": None, "burn": False, "model": "small"}
     rest = []
     while a:
         x = a.pop(0)
@@ -762,8 +818,10 @@ def main():
             opt["fps"] = int(a.pop(0))
         elif x == "--width":
             opt["width"] = int(a.pop(0))
-        elif x in ("--regex", "--flatten"):
+        elif x in ("--regex", "--flatten", "--burn"):
             opt[x[2:]] = True
+        elif x in ("--lang", "--model"):
+            opt[x[2:]] = a.pop(0)
         elif x in ("--key", "--cert", "--field", "--reason", "--self-signed"):
             opt[x[2:].replace("-", "_")] = a.pop(0)
         elif x == "--chain":
@@ -819,6 +877,8 @@ def main():
         ok = bool(args) and gif(args[0], opt["o"], opt["dir"], opt["fps"], opt["width"])
     elif cmd == "thumbs":
         ok = bool(args) and thumbs(args[0], opt["o"], opt["dir"])
+    elif cmd == "subs":
+        ok = bool(args) and subs(args[0], opt["lang"], opt["burn"], opt["model"], opt["o"], opt["dir"])
     elif cmd == "extract":
         ok = bool(args)
         for f in args:

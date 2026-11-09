@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""translate — between languages on this machine (Argos Translate: open models, offline once fetched). Nothing is sent anywhere.
+
+  translate "text" --to ne [--from en]       print the translation (the source language is guessed when --from is left out)
+  translate FILE --to hi [-o OUT]            a .txt/.md paragraph by paragraph; a .srt keeps its timings and translates only the lines
+  cmd | translate --to en                    stdin
+  translate langs                            what's installed, what can be fetched (en↔ne, en↔hi and ~40 others)
+  translate install en ne                    fetch that pair's package once (from Argos's index, ~100 MB); pairs route through English
+Quality is machine-translation grade: good for the gist of a letter or a subtitle track, not for a contract. For nuance, ask the
+driver model; for a document someone will sign, a person. Packages live in ~/.local/share/argos-translate.
+"""
+import os
+import re
+import sys
+
+
+def argos():
+    try:
+        import argostranslate.package as pkg
+        import argostranslate.translate as tr
+        return pkg, tr
+    except ImportError:
+        print("translate: needs argostranslate: uv tool install argostranslate  (or pip install argostranslate)", file=sys.stderr)
+        sys.exit(3)
+
+
+def installed_pairs(tr):
+    return {(l.code, t.to_lang.code) for l in tr.get_installed_languages() for t in getattr(l, "translations_from", [])}
+
+
+def ensure(pkg, tr, src, dst):
+    if (src, dst) in installed_pairs(tr):
+        return True
+    # maybe via English
+    pairs = installed_pairs(tr)
+    if (src, "en") in pairs and ("en", dst) in pairs:
+        return True
+    print(f"  fetching the {src}→{dst} package from Argos's index…", file=sys.stderr)
+    try:
+        pkg.update_package_index()
+        avail = pkg.get_available_packages()
+    except Exception as e:
+        print(f"translate: couldn't read the package index ({e}). Offline? `translate install {src} {dst}` when online.", file=sys.stderr)
+        return False
+    wanted = [(src, dst)] if any(p.from_code == src and p.to_code == dst for p in avail) else [(src, "en"), ("en", dst)]
+    for a, b in wanted:
+        if (a, b) in pairs or a == b:
+            continue
+        p = next((p for p in avail if p.from_code == a and p.to_code == b), None)
+        if not p:
+            print(f"translate: no package for {a}→{b}; `translate langs` lists what exists", file=sys.stderr)
+            return False
+        try:
+            pkg.install_from_path(p.download())
+        except Exception as e:
+            print(f"translate: download failed ({e})", file=sys.stderr)
+            return False
+    return True
+
+
+def guess(tr, text):
+    try:
+        from argostranslate import translate as _t
+        if hasattr(_t, "detect_language"):
+            return _t.detect_language(text)
+    except Exception:
+        pass
+    if re.search(r"[ऀ-ॿ]", text):
+        return "hi"  # Devanagari: Hindi or Nepali; pass --from ne when it's Nepali
+    return "en"
+
+
+def translate_text(tr, text, src, dst):
+    if not text.strip():
+        return text
+    return tr.translate(text, src, dst)
+
+
+def translate_srt(tr, text, src, dst):
+    out = []
+    for line in text.splitlines():
+        if not line.strip() or line.strip().isdigit() or "-->" in line:
+            out.append(line)
+        else:
+            out.append(translate_text(tr, line, src, dst))
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
+
+
+def translate_doc(tr, text, src, dst):
+    parts = re.split(r"(\n\s*\n)", text)
+    return "".join(p if re.fullmatch(r"\n\s*\n", p) or p.lstrip().startswith(("```", "    ", "|", "<")) else translate_text(tr, p, src, dst) for p in parts)
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0 if a else 2
+    pkg, tr = argos()
+    if a[0] == "langs":
+        inst = sorted(installed_pairs(tr))
+        print("installed: " + (", ".join(f"{s}→{d}" for s, d in inst) or "none"))
+        try:
+            pkg.update_package_index()
+            av = sorted({(p.from_code, p.to_code) for p in pkg.get_available_packages()})
+            print("available: " + ", ".join(f"{s}→{d}" for s, d in av))
+        except Exception as e:
+            print(f"(couldn't read the index: {e})")
+        return 0
+    if a[0] == "install" and len(a) == 3:
+        return 0 if ensure(pkg, tr, a[1], a[2]) else 1
+    src = dst = o = None
+    rest = []
+    while a:
+        x = a.pop(0)
+        if x == "--to":
+            dst = a.pop(0)
+        elif x == "--from":
+            src = a.pop(0)
+        elif x == "-o":
+            o = a.pop(0)
+        else:
+            rest.append(x)
+    if not dst:
+        print("translate … --to LANG", file=sys.stderr)
+        return 2
+    if rest and os.path.isfile(rest[0]):
+        path = rest[0]
+        text = open(path, encoding="utf-8", errors="replace").read()
+        src = src or guess(tr, text[:2000])
+        if not ensure(pkg, tr, src, dst):
+            return 1
+        result = translate_srt(tr, text, src, dst) if path.lower().endswith(".srt") else translate_doc(tr, text, src, dst)
+        stem, ext = os.path.splitext(path)
+        out = o or f"{stem}.{dst}{ext}"
+        open(out, "w", encoding="utf-8").write(result)
+        print(f"wrote {out}  ({src}→{dst}, argos)")
+        return 0
+    text = " ".join(rest) if rest else sys.stdin.read()
+    src = src or guess(tr, text)
+    if not ensure(pkg, tr, src, dst):
+        return 1
+    sys.stdout.write(translate_text(tr, text, src, dst).rstrip("\n") + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

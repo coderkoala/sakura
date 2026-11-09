@@ -22,6 +22,8 @@ Sakura accumulates state the user would hate to lose. These rules hold from 0.9.
 | backups      | `~/.sakura/backup/NAME.json` + `NAME.pass` (0600)           | `{v, dest, sources, excludes}`; the password file is sacred                                                                         |
 | procwatch    | `~/.sakura/procs/NAME.json`                                 | `{pid, command, cwd, started}`                                                                                                      |
 | vid archives | `~/.sakura/vid/NAME.json`, `NAME.archive`, `NAME.log`       | `{v, name, url, dir, runs, started, finished, rc, before, after, new, pid}`; the `.archive` is yt-dlp's own `extractor id` per line |
+| faces index | `~/.sakura/faces/index.json` | `{v, files: {path: "size:mtime"}, faces: [{path, box, score, emb[512], cluster}], names: {cluster: name}}` — the only copy of the signatures |
+| restore binaries | `~/.local/share/sakura/restore/` | a cache of two GitHub release zips, re-fetchable |
 | money        | `~/.sakura/money/journal.ledger`, `rules/BANK.rules`        | hledger's own journal and CSV-rules formats, not ours; edit freely                                                                  |
 | signing key  | `~/.sakura/sign/key.pem` (0600), `cert.pem`                 | PEM from openssl; the key never leaves the machine; back both up                                                                    |
 | vid watches  | `~/.sakura/vid/NAME.seen.json`                              | `{v, url, ids: [], checked}` — the video ids already shown as new                                                                   |

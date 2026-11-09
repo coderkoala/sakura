@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""faces — who is in your photos, found on this machine and kept here. InsightFace on the CPU or GPU; nothing is uploaded.
+
+  faces index DIR [DIR...]      find every face in the photos under DIR (jpg, png, heic via conv, …) and remember its signature;
+                                re-running skips files already seen (by path, size and mtime)
+  faces people                  the people it has found, as clusters: an id, how many photos, where to look (--min 2)
+  faces name ID "Grandma"       give a cluster a name;   faces merge ID ID…   the same person split in two
+  faces find "Grandma" [-n 50]  the photos she's in, best match first;   faces who PHOTO   who's in this one
+  faces status                  photos indexed, faces found, people named;   faces forget PATH   drop a folder from the index
+  --model buffalo_sc|buffalo_l  small (default, fast on CPU) or large (better on side views and South Asian faces, per InsightFace's own tests)
+The index is ~/.sakura/faces/index.json (SAKURA_FACES_DIR): path, box, a 512-number signature per face, cluster ids and names.
+Models come once from InsightFace's GitHub release into ~/.insightface. The licence on those models is research/non-commercial:
+fine for your own library, not for a product. Nothing here ever leaves the machine.
+"""
+import json
+import os
+import sys
+import time
+
+DIR = os.path.expanduser(os.environ.get("SAKURA_FACES_DIR") or os.path.join(os.environ.get("SAKURA_HOME", "~/.sakura"), "faces"))
+INDEX = os.path.join(DIR, "index.json")
+PHOTOS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}
+EPS = float(os.environ.get("SAKURA_FACES_EPS", "0.55"))  # cosine distance; InsightFace's own threshold for "same person" is about here
+MIN_SCORE = 0.5
+
+
+def load():
+    try:
+        d = json.load(open(INDEX))
+        return d if isinstance(d, dict) else {"v": 1, "files": {}, "faces": [], "names": {}}
+    except (OSError, ValueError):
+        return {"v": 1, "files": {}, "faces": [], "names": {}}
+
+
+def save(d):
+    os.makedirs(DIR, exist_ok=True)
+    tmp = INDEX + ".tmp"
+    json.dump(d, open(tmp, "w"))
+    os.replace(tmp, INDEX)
+
+
+_app = None
+
+
+def app(model):
+    global _app
+    if _app is None:
+        try:
+            from insightface.app import FaceAnalysis
+        except ImportError:
+            print("faces: needs insightface and onnxruntime: pip install insightface onnxruntime  (onnxruntime-gpu for the card)", file=sys.stderr)
+            sys.exit(3)
+        import logging
+        logging.getLogger().setLevel(logging.ERROR)
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        _app = FaceAnalysis(name=model, providers=providers, allowed_modules=["detection", "recognition"])
+        _app.prepare(ctx_id=0, det_size=(640, 640))
+    return _app
+
+
+def read_image(path):
+    import cv2
+    im = cv2.imread(path)
+    if im is None:
+        try:
+            from PIL import Image, ImageOps
+            import numpy as np
+            pil = ImageOps.exif_transpose(Image.open(path).convert("RGB"))
+            im = np.asarray(pil)[:, :, ::-1].copy()
+        except Exception:
+            return None
+    h, w = im.shape[:2]
+    if max(h, w) > 2000:
+        s = 2000 / max(h, w)
+        im = cv2.resize(im, (int(w * s), int(h * s)))
+    return im
+
+
+def cmd_index(roots, model):
+    d = load()
+    seen = 0
+    new_faces = 0
+    files = []
+    for root in roots:
+        root = os.path.abspath(root)
+        if os.path.isfile(root):
+            files.append(root)
+            continue
+        for base, dirs, names in os.walk(root):
+            dirs[:] = [x for x in dirs if not x.startswith(".") and x not in ("node_modules", "__pycache__")]
+            for n in names:
+                if os.path.splitext(n)[1].lower() in PHOTOS:
+                    files.append(os.path.join(base, n))
+    todo = []
+    for p in files:
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        key = f"{st.st_size}:{int(st.st_mtime)}"
+        if d["files"].get(p) == key:
+            seen += 1
+            continue
+        todo.append((p, key))
+    if not todo:
+        print(f"nothing new ({seen} photos already indexed)")
+        return 0
+    a = app(model)
+    t0 = time.time()
+    for i, (p, key) in enumerate(todo, 1):
+        im = read_image(p)
+        d["faces"] = [f for f in d["faces"] if f["path"] != p]
+        if im is not None:
+            for f in a.get(im):
+                if f.det_score < MIN_SCORE:
+                    continue
+                emb = f.normed_embedding.tolist()
+                d["faces"].append({"path": p, "box": [int(x) for x in f.bbox], "score": round(float(f.det_score), 3), "emb": [round(x, 5) for x in emb], "cluster": None})
+                new_faces += 1
+        d["files"][p] = key
+        if i % 25 == 0 or i == len(todo):
+            save(d)
+            print(f"  {i}/{len(todo)} photos, {new_faces} faces, {time.time() - t0:.0f}s", file=sys.stderr)
+    cluster(d)
+    save(d)
+    print(f"indexed {len(todo)} new photos ({seen} already known): {new_faces} faces; {len(set(f['cluster'] for f in d['faces'] if f['cluster'] is not None))} people so far. `faces people` lists them")
+    return 0
+
+
+def cluster(d):
+    """DBSCAN on cosine distance, in numpy; keeps existing cluster ids and names where a cluster still holds the same faces."""
+    import numpy as np
+    faces = d["faces"]
+    if not faces:
+        return
+    X = np.array([f["emb"] for f in faces], dtype=np.float32)
+    X /= np.linalg.norm(X, axis=1, keepdims=True) + 1e-9
+    sim = X @ X.T
+    dist = 1.0 - sim
+    n = len(faces)
+    labels = [-1] * n
+    visited = [False] * n
+    cid = 0
+    min_pts = 1
+    for i in range(n):
+        if visited[i]:
+            continue
+        visited[i] = True
+        nb = [j for j in range(n) if dist[i, j] <= EPS]
+        if len(nb) < min_pts:
+            continue
+        labels[i] = cid
+        queue = list(nb)
+        while queue:
+            j = queue.pop()
+            if not visited[j]:
+                visited[j] = True
+                nb2 = [k for k in range(n) if dist[j, k] <= EPS]
+                if len(nb2) >= min_pts:
+                    queue.extend(k for k in nb2 if not visited[k])
+            if labels[j] == -1:
+                labels[j] = cid
+        cid += 1
+    # keep names: map new cluster -> the old cluster id most of its faces had
+    old_by_new = {}
+    for f, lab in zip(faces, labels):
+        if f.get("cluster") is not None:
+            old_by_new.setdefault(lab, {}).setdefault(f["cluster"], 0)
+            old_by_new[lab][f["cluster"]] += 1
+    remap, used = {}, set()
+    next_id = max([int(k) for k in d["names"].keys()] + [f["cluster"] for f in faces if f.get("cluster") is not None] + [-1]) + 1
+    for lab in range(cid):
+        old = old_by_new.get(lab)
+        pick = max(old, key=old.get) if old else None
+        if pick is None or pick in used:
+            pick = next_id
+            next_id += 1
+        used.add(pick)
+        remap[lab] = pick
+    for f, lab in zip(faces, labels):
+        f["cluster"] = remap[lab]
+
+
+def people(d, min_photos):
+    groups = {}
+    for f in d["faces"]:
+        if f["cluster"] is None:
+            continue
+        g = groups.setdefault(f["cluster"], {"id": f["cluster"], "photos": set(), "faces": 0, "best": None})
+        g["photos"].add(f["path"])
+        g["faces"] += 1
+        if g["best"] is None or f["score"] > g["best"][1]:
+            g["best"] = (f["path"], f["score"])
+    out = []
+    for g in groups.values():
+        if len(g["photos"]) >= min_photos:
+            out.append({"id": g["id"], "name": d["names"].get(str(g["id"])), "photos": len(g["photos"]), "faces": g["faces"], "example": g["best"][0]})
+    out.sort(key=lambda g: -g["photos"])
+    return out
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0 if a else 2
+    as_json = "--json" in a
+    a = [x for x in a if x != "--json"]
+    model = "buffalo_sc"
+    if "--model" in a:
+        i = a.index("--model")
+        model = a[i + 1]
+        del a[i:i + 2]
+    n = 50
+    if "-n" in a:
+        i = a.index("-n")
+        n = int(a[i + 1])
+        del a[i:i + 2]
+    min_photos = 1
+    if "--min" in a:
+        i = a.index("--min")
+        min_photos = int(a[i + 1])
+        del a[i:i + 2]
+    cmd, args = a[0], a[1:]
+    d = load()
+    if cmd == "index":
+        return cmd_index(args, model) if args else 2
+    if cmd == "people":
+        ps = people(d, min_photos)
+        if as_json:
+            print(json.dumps(ps, indent=1))
+        elif not ps:
+            print("no people yet: faces index DIR")
+        else:
+            print(f"{'ID':<4} {'PHOTOS':>6} {'FACES':>5}  NAME / EXAMPLE")
+            for p in ps:
+                print(f"{p['id']:<4} {p['photos']:>6} {p['faces']:>5}  {p['name'] or '(unnamed: faces name ' + str(p['id']) + ' \"…\")'}  {p['example']}")
+        return 0
+    if cmd == "name" and len(args) == 2:
+        if not any(f["cluster"] == int(args[0]) for f in d["faces"]):
+            print(f"faces: no person {args[0]}", file=sys.stderr)
+            return 1
+        d["names"][args[0]] = args[1]
+        save(d)
+        print(f"{args[0]} is {args[1]}")
+        return 0
+    if cmd == "merge" and len(args) >= 2:
+        ids = [int(x) for x in args]
+        keep = ids[0]
+        for f in d["faces"]:
+            if f["cluster"] in ids[1:]:
+                f["cluster"] = keep
+        for x in ids[1:]:
+            d["names"].pop(str(x), None)
+        save(d)
+        print(f"merged {ids[1:]} into {keep}")
+        return 0
+    if cmd == "find" and args:
+        who = " ".join(args).lower()
+        ids = {int(k) for k, v in d["names"].items() if v.lower() == who} or ({int(who)} if who.isdigit() else set())
+        if not ids:
+            print(f"faces: nobody called “{who}”; faces people", file=sys.stderr)
+            return 1
+        hits = {}
+        for f in d["faces"]:
+            if f["cluster"] in ids:
+                hits[f["path"]] = max(hits.get(f["path"], 0), f["score"])
+        rows = sorted(hits.items(), key=lambda kv: -kv[1])[:n]
+        if as_json:
+            print(json.dumps([{"path": p, "score": s} for p, s in rows], indent=1))
+        else:
+            for p, s in rows:
+                print(p)
+            print(f"\n{len(hits)} photos", file=sys.stderr)
+        return 0
+    if cmd == "who" and args:
+        p = os.path.abspath(args[0])
+        if p not in d["files"]:
+            cmd_index([p], model)
+            d = load()
+        fs = [f for f in d["faces"] if f["path"] == p]
+        if as_json:
+            print(json.dumps([{"name": d["names"].get(str(f["cluster"])), "cluster": f["cluster"], "box": f["box"], "score": f["score"]} for f in fs], indent=1))
+        elif not fs:
+            print("no faces found")
+        else:
+            for f in fs:
+                print(f"  {d['names'].get(str(f['cluster'])) or 'person ' + str(f['cluster'])}  at {f['box']}  ({f['score']:.2f})")
+        return 0
+    if cmd == "status":
+        ps = people(d, 1)
+        print(f"{len(d['files'])} photos indexed, {len(d['faces'])} faces, {len(ps)} people ({sum(1 for p in ps if p['name'])} named); index at {INDEX}")
+        return 0
+    if cmd == "forget" and args:
+        root = os.path.abspath(args[0])
+        before = len(d["files"])
+        d["files"] = {p: k for p, k in d["files"].items() if not (p == root or p.startswith(root + os.sep))}
+        d["faces"] = [f for f in d["faces"] if not (f["path"] == root or f["path"].startswith(root + os.sep))]
+        save(d)
+        print(f"forgot {before - len(d['files'])} photos")
+        return 0
+    print(__doc__)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

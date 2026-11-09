@@ -36,6 +36,9 @@
 #   drift FILE|packages|units|sshkeys [HOST...]  how the machines differ;  when "0 3 * * 1"  a cron/OnCalendar line in English, next runs
 #   conv FILE --to EXT | merge|split|pages|rotate|compress|ocr|unlock|strip|trim|audio|gif|extract   every conversion, locally, never a website
 #   vid URL | vid archive URL | vid watch URL   your own videos kept with their metadata; a channel or playlist, resumable; what's new
+#   faces index DIR | people | name ID "Grandma" | find "Grandma"   who is in your photos, found and kept here
+#   restore photo.jpg | clip.mp4 [--denoise 0.5] [--smooth]   old photos, scans and video sharpened (Real-ESRGAN, RIFE; restore install once)
+#   conv subs VIDEO [--lang ne] [--burn]  subtitles from the speech;  translate "text"|FILE.srt --to ne|hi|en   offline (Argos)
 #   money import bank.csv | month | where "KFC" | rule "KFC" expenses:food   statements into plain-text accounting (hledger)
 #   dupes DIR... [--link|--rm --go]  the same file by content, across drives;  shelve DIR --into LIB [--go]  photos/videos into YEAR/YEAR-MM by date taken
 #   sakura-doctor [--fix]  is this install whole: every command, hook and config checked, what's missing

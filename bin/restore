@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""restore — old photos, scans and video made sharper and cleaner on this machine (Real-ESRGAN, RIFE). No upload, no model's say-so.
+
+  restore photo.jpg [--scale 2|4] [--denoise 0..1]   a sharper copy next to it (" restored"); scans and old prints: --denoise 0.5
+  restore clip.mp4 [--scale 2] [--smooth]            every frame through Real-ESRGAN, the sound kept; --smooth doubles the frame rate (RIFE)
+  restore DIR                                        every photo under it, into DIR/restored/
+  restore install                                    fetch the two portable binaries (Real-ESRGAN and RIFE, ncnn/Vulkan builds from their
+                                                     GitHub releases, sha256-checked) into ~/.local/share/sakura/restore. Nothing else to install.
+  restore --tools                                    what's installed and whether the GPU's Vulkan driver answers
+  options: -o OUT   --model realesr-general-x4v3 (default; photos and video) | realesrgan-x4plus | realesrgan-x4plus-anime   --dry
+The binaries use the GPU through Vulkan (any card, no CUDA needed); on a machine without one they say so. Inputs are never
+overwritten. Faces are not "beautified": this sharpens what's there, it doesn't invent a face.
+"""
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.request
+import zipfile
+
+HOME = os.path.expanduser(os.environ.get("SAKURA_RESTORE_DIR") or "~/.local/share/sakura/restore")
+ESRGAN = {"url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip",
+          "sha256": "e5aa6eb131234b87c0c51f82b89390f5e3e642b7b70f2b9bbe95b6a285a40c96", "bin": "realesrgan-ncnn-vulkan"}
+RIFE = {"url": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-ubuntu.zip",
+        "sha256": None, "bin": "rife-ncnn-vulkan"}  # sha unknown at authoring time: printed on first install so it can be pinned
+PHOTOS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}
+VIDEOS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm", ".mpg", ".mpeg", ".3gp"}
+DRY = "--dry" in sys.argv
+
+
+def binary(spec):
+    p = os.path.join(HOME, spec["bin"], spec["bin"])
+    return p if os.access(p, os.X_OK) else shutil.which(spec["bin"])
+
+
+def fetch(spec):
+    dest_dir = os.path.join(HOME, spec["bin"])
+    print(f"  fetching {spec['url']}")
+    if DRY:
+        return True
+    os.makedirs(HOME, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        z = os.path.join(tmp, "a.zip")
+        req = urllib.request.Request(spec["url"], headers={"User-Agent": "sakura-restore"})
+        with urllib.request.urlopen(req, timeout=600) as r, open(z, "wb") as f:
+            shutil.copyfileobj(r, f)
+        digest = hashlib.sha256(open(z, "rb").read()).hexdigest()
+        if spec["sha256"] and digest != spec["sha256"]:
+            print(f"restore: {spec['bin']} download doesn't match its pinned sha256 ({digest}); not installed", file=sys.stderr)
+            return False
+        if not spec["sha256"]:
+            print(f"  sha256 {digest} (pin it in bin/restore)")
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        os.makedirs(dest_dir)
+        with zipfile.ZipFile(z) as zf:
+            root_dest = os.path.realpath(dest_dir)
+            for info in zf.infolist():
+                target = os.path.realpath(os.path.join(dest_dir, info.filename))
+                if not target.startswith(root_dest + os.sep):
+                    continue
+                zf.extract(info, dest_dir)
+        # the zip may hold a top-level folder; flatten to dest_dir/<bin>
+        for base, dirs, files in os.walk(dest_dir):
+            if spec["bin"] in files and base != dest_dir:
+                for n in os.listdir(base):
+                    shutil.move(os.path.join(base, n), os.path.join(dest_dir, n))
+                break
+        b = os.path.join(dest_dir, spec["bin"])
+        if os.path.exists(b):
+            os.chmod(b, 0o755)
+    return os.path.exists(os.path.join(dest_dir, spec["bin"]))
+
+
+def vulkan_ok():
+    b = binary(ESRGAN)
+    if not b:
+        return None
+    r = subprocess.run([b, "-h"], capture_output=True, text=True)
+    err = (r.stderr + r.stdout).lower()
+    return "vkcreateinstance" not in err and "vulkan" not in err or "usage" in err
+
+
+def tools():
+    for spec in (ESRGAN, RIFE):
+        b = binary(spec)
+        print(f"  {'ok     ' if b else 'missing'}  {spec['bin']:<24} {b or 'restore install'}")
+    v = vulkan_ok()
+    print(f"  {'ok     ' if v else 'missing' if v is False else '?      '}  {'vulkan':<24} {'the GPU answers' if v else 'no Vulkan driver answered (install the GPU vendor driver / mesa-vulkan-drivers)' if v is False else 'unknown until realesrgan is installed'}")
+    return 0
+
+
+def out_path(src, suffix, ext=None):
+    stem, e = os.path.splitext(src)
+    e = ext or e
+    cand = f"{stem}{suffix}{e}"
+    n = 2
+    while os.path.exists(cand):
+        cand = f"{stem}{suffix} ({n}){e}"
+        n += 1
+    return cand
+
+
+def run(cmd):
+    if DRY:
+        print(" ".join(cmd))
+        return True
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        msg = (r.stderr or r.stdout).strip()
+        if "vkCreateInstance" in msg or "vulkan" in msg.lower():
+            msg += "\n  (no Vulkan: this needs the GPU driver; on a box without a GPU, run it on one that has: ssh $(fleet pick gpu))"
+        print(f"restore: {os.path.basename(cmd[0])} failed:\n  {msg[-600:]}", file=sys.stderr)
+        return False
+    return True
+
+
+def photo(src, scale, denoise, model, o):
+    b = binary(ESRGAN) or (print("restore: Real-ESRGAN isn't installed: restore install", file=sys.stderr) or sys.exit(3))
+    out = o or out_path(src, " restored", ".png" if os.path.splitext(src)[1].lower() in (".tiff", ".tif", ".bmp") else None)
+    cmd = [b, "-i", src, "-o", out, "-n", model, "-s", str(scale)]
+    if denoise is not None and model == "realesr-general-x4v3":
+        cmd += ["-dn", str(denoise)]
+    ok = run(cmd)
+    if ok and not DRY:
+        print(f"wrote {out}")
+    return ok
+
+
+def video(src, scale, denoise, model, smooth, o):
+    b = binary(ESRGAN) or (print("restore: Real-ESRGAN isn't installed: restore install", file=sys.stderr) or sys.exit(3))
+    ff = shutil.which("ffmpeg") or (print("restore: needs ffmpeg", file=sys.stderr) or sys.exit(3))
+    out = o or out_path(src, " restored", ".mp4")
+    probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", src], capture_output=True, text=True).stdout.strip()
+    num, den = (probe.split("/") + ["1"])[:2]
+    fps = float(num) / float(den or 1) if probe else 25.0
+    with tempfile.TemporaryDirectory(dir=os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))) as tmp:
+        frames, up, smooth_dir = os.path.join(tmp, "in"), os.path.join(tmp, "up"), os.path.join(tmp, "smooth")
+        os.makedirs(frames)
+        os.makedirs(up)
+        if not run([ff, "-hide_banner", "-loglevel", "error", "-i", src, "-qscale:v", "1", "-qmin", "1", os.path.join(frames, "f%08d.png")]):
+            return False
+        cmd = [b, "-i", frames, "-o", up, "-n", model, "-s", str(scale), "-f", "png"]
+        if denoise is not None and model == "realesr-general-x4v3":
+            cmd += ["-dn", str(denoise)]
+        if not run(cmd):
+            return False
+        final_frames, final_fps = up, fps
+        if smooth:
+            rb = binary(RIFE)
+            if not rb:
+                print("restore: --smooth needs RIFE: restore install", file=sys.stderr)
+                return False
+            os.makedirs(smooth_dir)
+            if not run([rb, "-i", up, "-o", smooth_dir, "-m", "rife-v4.6"]):
+                return False
+            final_frames, final_fps = smooth_dir, fps * 2
+        pattern = os.path.join(final_frames, "%08d.png") if smooth else os.path.join(final_frames, "f%08d.png")
+        return run([ff, "-hide_banner", "-loglevel", "error", "-framerate", f"{final_fps:.3f}", "-i", pattern, "-i", src, "-map", "0:v", "-map", "1:a?",
+                    "-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "copy", "-shortest", "-movflags", "+faststart", out]) and (DRY or print(f"wrote {out}") is None)
+
+
+def main():
+    a = [x for x in sys.argv[1:] if x != "--dry"]
+    if not a or a[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0 if a else 2
+    if a == ["--tools"]:
+        return tools()
+    if a[0] == "install":
+        ok = fetch(ESRGAN) and fetch(RIFE)
+        if ok and not DRY:
+            tools()
+        return 0 if ok else 1
+    opt = {"scale": None, "denoise": None, "model": "realesr-general-x4v3", "smooth": False, "o": None}
+    files = []
+    while a:
+        x = a.pop(0)
+        if x == "--scale":
+            opt["scale"] = int(a.pop(0))
+        elif x == "--denoise":
+            opt["denoise"] = float(a.pop(0))
+        elif x == "--model":
+            opt["model"] = a.pop(0)
+        elif x == "--smooth":
+            opt["smooth"] = True
+        elif x == "-o":
+            opt["o"] = a.pop(0)
+        else:
+            files.append(x)
+    ok = True
+    for f in files:
+        if os.path.isdir(f):
+            outdir = os.path.join(f, "restored")
+            os.makedirs(outdir, exist_ok=True)
+            for n in sorted(os.listdir(f)):
+                if os.path.splitext(n)[1].lower() in PHOTOS:
+                    ok &= photo(os.path.join(f, n), opt["scale"] or 2, opt["denoise"], opt["model"], os.path.join(outdir, n))
+        elif os.path.splitext(f)[1].lower() in VIDEOS:
+            ok &= video(f, opt["scale"] or 2, opt["denoise"], opt["model"], opt["smooth"], opt["o"] if len(files) == 1 else None)
+        elif os.path.splitext(f)[1].lower() in PHOTOS:
+            ok &= photo(f, opt["scale"] or 4, opt["denoise"], opt["model"], opt["o"] if len(files) == 1 else None)
+        else:
+            print(f"restore: {f} isn't a photo, a video or a folder", file=sys.stderr)
+            ok = False
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
