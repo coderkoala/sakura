@@ -9,6 +9,8 @@
   vid archive URL [--name NAME]  everything in a channel or playlist, detached, resumable: an archive file remembers each video
                                  that landed, so running it again fetches only what's new. A notification when it ends.
   vid status                     archives running or finished;   vid log [NAME]   the log of one
+  vid watch URL [--name NAME]    what's new on a channel or playlist since the last time you looked (titles), and remembers;
+                                 exit 1 when there is something, so `pa job every sunday 9am: vid watch URL` can tell you
   options: --cookies-from-browser firefox|chromium   for your own private or unlisted videos, with the browser's login (no password
            is ever typed or stored);  --fg  run an archive in the foreground;  --dry  print the yt-dlp command instead
 Nothing but the URL you gave goes anywhere, and only to that site. yt-dlp comes from PATH or `uv tool install yt-dlp`.
@@ -189,6 +191,43 @@ def main():
             print("vid archive URL [--name NAME]", file=sys.stderr)
             return 2
         return run_archive(opt["name"] or slug(args[0]), args[0], outdir, opt["cookies"], opt["fg"], opt["dry"])
+    if cmd == "watch":
+        if not args:
+            print("vid watch URL [--name NAME]", file=sys.stderr)
+            return 2
+        name = opt["name"] or slug(args[0])
+        c = [*ytdlp(), "--no-colors", "--flat-playlist", "--print", "%(id)s\t%(upload_date|undated)s\t%(title)s", args[0]]
+        if opt["cookies"]:
+            c += ["--cookies-from-browser", opt["cookies"]]
+        if opt["dry"]:
+            print(" ".join(shlex.quote(x) for x in c))
+            return 0
+        r = subprocess.run(c, capture_output=True, text=True)
+        if r.returncode != 0 and not r.stdout.strip():
+            print(f"vid: the site didn't answer: {r.stderr.strip().splitlines()[-1] if r.stderr.strip() else 'no output'}", file=sys.stderr)
+            return 2
+        entries = [l.split("\t", 2) for l in r.stdout.splitlines() if "\t" in l]
+        path = os.path.join(STATE, name + ".seen.json")
+        try:
+            seen = json.load(open(path))
+        except (OSError, ValueError):
+            seen = {"v": 1, "url": args[0], "ids": [], "checked": 0}
+        first = not seen["ids"] and seen.get("checked", 0) == 0
+        new = [e for e in entries if e[0] not in set(seen["ids"])]
+        seen["ids"] = sorted(set(seen["ids"]) | {e[0] for e in entries})
+        seen["checked"] = int(time.time())
+        os.makedirs(STATE, exist_ok=True)
+        json.dump(seen, open(path, "w"), indent=1)
+        if first:
+            print(f"{name}: {len(entries)} videos there now; I'll say what's new from here on")
+            return 0
+        if not new:
+            print(f"{name}: nothing new ({len(entries)} videos)")
+            return 0
+        print(f"{name}: {len(new)} new")
+        for vid_id, date, title in new:
+            print(f"  {date}  {title}  [{vid_id}]")
+        return 1
     if cmd == "list":
         c = [*ytdlp(), "--no-colors", "--flat-playlist", "--print", "%(upload_date|undated)s  %(duration>%H:%M:%S|?)s  %(title)s  [%(id)s]", *args]
         if opt["cookies"]:

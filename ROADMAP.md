@@ -28,7 +28,7 @@ Measured on one machine with an 8 GB GPU, driver Ornith 1.5 35B-A3B since 0.9.5 
 | `sakura-gpu` (40 checks), `torrent` (19 checks and a live daemon lifecycle), `dl` (12 checks, byte-range resume proven), `sakura-backup` (27 checks, a real restore each run) | `fmt`, `?watch`, `drive` against a real Google/Microsoft account (local remote only so far) |
 | `look` (OCR and the vision model), `ledger`, `schema`, `procwatch`, `dq`, `pa offer`, `pa cron`, `docpack`, `fleet`, `drive`, `tbl`, `logs`, workers in worktrees (`evals/abilities.py`, 60 checks) | `hear`, `say`, `clip`, `?pr`, `?review`, `?red`, `?try`, `?morning`, `pa mail` rules, `?decide`/`?why` (smoke-tested by hand) |
 | A trust boundary: fetched content scanned for injection and bannered as data, smuggling characters stripped, data-egress to un-named hosts gated for approval, the answer checked for exfil sinks (`evals/injection.py`, 25 checks) | Dual-LLM / quarantine split — one model still holds untrusted content and the tools; the egress gate is the compensating control |
-| The machine room: `ports`, `space`, `drift`, `when`, `sakura-notes`, `host:` memory; `conv` and `vid` (`evals/machineroom.py`, 57 checks; `vid` against a local server) | `vid` against a real site with a browser login; `conv ocr` (ocrmypdf wasn't on the eval machine); LibreOffice conversions beyond txt→pdf |
+| The machine room: `ports`, `space`, `drift`, `when`, `sakura-notes`, `host:` memory; `conv` and `vid` (`evals/machineroom.py`, 65 checks; `vid` against a local server) | `vid` against a real site with a browser login; `conv ocr` (ocrmypdf wasn't on the eval machine); LibreOffice conversions beyond txt→pdf |
 
 ## Next: make what exists trustworthy
 
@@ -134,7 +134,7 @@ privileged model that never sees raw untrusted text); egress accounting across n
 ## The machine room, and the no-upload rule (2026-11-09 brainstorm)
 
 Two threads. First, the questions a senior colleague answers in one line that still took a chain of `ss`, `du`, `diff` and
-crontab-reading: all built the same day, model-free, 57 checks.
+crontab-reading: all built the same day, model-free, 65 checks.
 1. **`ports`:** what's listening, who holds it (pid, user, unit, container), from `/proc` so it works everywhere; over ssh too.
 2. **`space`:** what's eating the disk by category with a verdict, and a `clean --go` that only ever touches what rebuilds itself. The guardian's disk finding now points here.
 3. **`drift`:** a file, the packages, the enabled units or the authorized keys across the fleet, only the differences.
@@ -150,10 +150,10 @@ ImageMagick, LibreOffice or tesseract underneath. So:
 
 Next along the same line, not built: **`conv subs VIDEO`** (subtitles from `hear`, burned in or as .srt, in the language spoken);
 **faces and places in your photo library**, locally (who's in this picture, every photo of her), with the embeddings never leaving;
-**upscaling and restoring** old video and scans with a local model; **`vid` on a schedule** (`pa job every sunday: vid archive …`
-already works; a `vid watch` that says when a channel has something new would be the one-liner); **`conv` for archives** (rar, 7z,
-old zips with broken names) and for **ebooks** (epub↔mobi↔pdf for a reader); a **print-to-PDF path for web pages** through the
-shared browser. Each needs a deterministic eval before it can be claimed.
+**upscaling and restoring** old video and scans with a local model; **ebooks** (epub↔mobi↔pdf for a reader); a **print-to-PDF path
+for web pages** through the shared browser. Each needs a deterministic eval before it can be claimed. Built the same evening, with
+checks: **`vid watch URL`** (what's new on a channel since the last look; exit 1 when there is, so `pa job every sunday 9am: vid watch …`
+nags) and **`conv extract`** (zip, tar, 7z, rar into their own folder; entries pointing outside it, and links, refused).
 
 ## Not doing
 

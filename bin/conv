@@ -16,6 +16,8 @@ Nothing leaves the machine; the input is never overwritten; the output lands nex
   conv trim video.mp4 START [END]   cut a piece (00:01:30 or 90), copying the streams, no re-encode
   conv audio video.mp4 [--to mp3]   the sound track (then `hear FILE` can transcribe it)
   conv gif clip.mp4 [--fps 12 --width 480]   a gif;   conv thumbs video.mp4   a contact sheet;   conv shrink video.mp4  = compress
+  conv extract ARCHIVE...      zip, tar(.gz/.bz2/.xz/.zst), 7z, rar: into a new folder named after the archive, never into the
+                               current directory; entries that would land outside it (zip-slip) are refused
   conv --tools                 which converters are here and the install line for each that isn't
   --dry prints each command instead of running it;  --json  one line per output
 """
@@ -415,6 +417,66 @@ def thumbs(src, o, outdir):
     return run([need("ffmpeg"), "-hide_banner", "-loglevel", "error", "-i", src, "-vf", f"fps=1/{dur / n:.3f},scale=320:-1,tile=4x4", "-frames:v", "1", "-q:v", "3", out], "ffmpeg", out)
 
 
+def extract(src, outdir):
+    import tarfile
+    import zipfile
+    low = src.lower()
+    stem = os.path.basename(src)
+    for suf in (".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".tbz2", ".txz", ".tar", ".zip", ".7z", ".rar"):
+        if low.endswith(suf):
+            stem = os.path.basename(src)[:-len(suf)]
+            break
+    dest = os.path.join(outdir or os.path.dirname(os.path.abspath(src)), stem)
+    n = 2
+    while os.path.exists(dest):
+        dest = os.path.join(outdir or os.path.dirname(os.path.abspath(src)), f"{stem} ({n})")
+        n += 1
+    if DRY:
+        print(f"extract {src} -> {dest}/")
+        return True
+    real_dest = os.path.realpath(dest)
+
+    def inside(name):
+        target = os.path.realpath(os.path.join(real_dest, name))
+        return target == real_dest or target.startswith(real_dest + os.sep)
+
+    refused = 0
+    if zipfile.is_zipfile(src):
+        os.makedirs(dest)
+        with zipfile.ZipFile(src) as z:
+            for info in z.infolist():
+                if not inside(info.filename) or os.path.isabs(info.filename):
+                    refused += 1
+                    continue
+                z.extract(info, dest)
+        tool = "zipfile"
+    elif tarfile.is_tarfile(src) and not low.endswith(".zst"):
+        os.makedirs(dest)
+        with tarfile.open(src) as t:
+            members = []
+            for m in t.getmembers():
+                if m.issym() or m.islnk() or not inside(m.name) or os.path.isabs(m.name):
+                    refused += 1  # links can point out of the folder; data files only
+                    continue
+                members.append(m)
+            t.extractall(dest, members=members, filter="data")
+        tool = "tarfile"
+    else:
+        tool = next((t for t in ("7z", "bsdtar", "unrar") if shutil.which(t)), None)
+        if not tool:
+            print("conv: this needs 7z (sudo -A apt-get install -y 7zip) or bsdtar (libarchive-tools)", file=sys.stderr)
+            return False
+        os.makedirs(dest)
+        cmd = {"7z": ["7z", "x", "-y", f"-o{dest}", src], "bsdtar": ["bsdtar", "-xf", src, "-C", dest], "unrar": ["unrar", "x", "-y", src, dest + "/"]}[tool]
+        if not run(cmd, tool, None):
+            return False
+    count = sum(len(f) for _, _, f in os.walk(dest))
+    made.append({"out": dest, "tool": tool, "files": count, "refused": refused})
+    if not AS_JSON:
+        print(f"extracted {count} files into {dest}/  ({tool})" + (f"; refused {refused} entr{'y' if refused == 1 else 'ies'} that pointed outside it" if refused else ""))
+    return True
+
+
 def tools_report():
     for t, how in TOOLS.items():
         p = have(t)
@@ -486,6 +548,10 @@ def main():
         ok = bool(args) and gif(args[0], opt["o"], opt["dir"], opt["fps"], opt["width"])
     elif cmd == "thumbs":
         ok = bool(args) and thumbs(args[0], opt["o"], opt["dir"])
+    elif cmd == "extract":
+        ok = bool(args)
+        for f in args:
+            ok &= extract(f, opt["dir"])
     else:
         files = rest
         if not opt["to"]:

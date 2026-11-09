@@ -22,6 +22,7 @@ Sakura accumulates state the user would hate to lose. These rules hold from 0.9.
 | backups | `~/.sakura/backup/NAME.json` + `NAME.pass` (0600) | `{v, dest, sources, excludes}`; the password file is sacred |
 | procwatch | `~/.sakura/procs/NAME.json` | `{pid, command, cwd, started}` |
 | vid archives | `~/.sakura/vid/NAME.json`, `NAME.archive`, `NAME.log` | `{v, name, url, dir, runs, started, finished, rc, before, after, new, pid}`; the `.archive` is yt-dlp's own `extractor id` per line |
+| vid watches | `~/.sakura/vid/NAME.seen.json` | `{v, url, ids: [], checked}` — the video ids already shown as new |
 | decisions | `~/.sakura/decisions.jsonl` | one `{when, text, dir, repo, branch, commit}` per line, append-only |
 | memory | `~/.sakura/memory/*.md` | plain text, one fact per line, synced through dotfiles |
 | undo store | `~/.sakura/undo/` | managed by the root-owned guard; its format changes only with a guard release |

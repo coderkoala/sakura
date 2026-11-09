@@ -323,7 +323,70 @@ def vid(tmp):
             "--dry shows the download archive and the metadata flags": "--download-archive" in dry.stdout and "--embed-metadata" in dry.stdout and "--write-info-json" in dry.stdout}
 
 
-CASES = {"ports": ports, "space": space, "drift": drift, "when": when, "notes": notes, "memory": memory, "conv": conv, "vid": vid}
+def extract(tmp):
+    import io
+    import tarfile
+    import zipfile
+    src = os.path.join(tmp, "src", "sub")
+    os.makedirs(src)
+    open(os.path.join(tmp, "src", "a.txt"), "w").write("hi\n")
+    open(os.path.join(src, "b.txt"), "w").write("deep\n")
+    with zipfile.ZipFile(os.path.join(tmp, "arc.zip"), "w") as z:
+        z.write(os.path.join(tmp, "src", "a.txt"), "a.txt")
+        z.write(os.path.join(src, "b.txt"), "sub/b.txt")
+        z.writestr("../evil.txt", "pwn")
+    with tarfile.open(os.path.join(tmp, "arc.tar.gz"), "w:gz") as t:
+        t.add(os.path.join(tmp, "src", "a.txt"), "a.txt")
+        ti = tarfile.TarInfo("../evil2.txt")
+        ti.size = 3
+        t.addfile(ti, io.BytesIO(b"pwn"))
+        ln = tarfile.TarInfo("link")
+        ln.type = tarfile.SYMTYPE
+        ln.linkname = "/etc/passwd"
+        t.addfile(ln)
+    c = os.path.join(BIN, "conv")
+    z = run([c, "extract", "arc.zip"], cwd=tmp)
+    t = run([c, "extract", "arc.tar.gz", "--json"], cwd=tmp)
+    rec = json.loads(t.stdout.strip().splitlines()[-1]) if t.stdout.strip() else {}
+    zip_dir = os.path.join(tmp, "arc")
+    return {"a zip lands in its own folder with its tree": os.path.exists(os.path.join(zip_dir, "a.txt")) and os.path.exists(os.path.join(zip_dir, "sub", "b.txt")) and "refused 1 entry" in z.stdout,
+            "zip-slip: nothing lands outside the folder": not os.path.exists(os.path.join(tmp, "evil.txt")) and not os.path.exists(os.path.join(tmp, "evil2.txt")) and not os.path.exists(os.path.join(os.path.dirname(tmp), "evil.txt")),
+            "a tar's escaping entry and its symlink are refused, the file kept": rec.get("refused") == 2 and rec.get("files") == 1 and not os.path.lexists(os.path.join(rec.get("out", tmp), "link")),
+            "the second archive with the same stem gets a new folder": rec.get("out", "").endswith("arc (2)")}
+
+
+def watch(tmp):
+    import http.server
+    import socketserver
+    import threading
+    www = os.path.join(tmp, "www")
+    os.makedirs(www)
+    for v in ("v1", "v2"):
+        clip(os.path.join(www, v + ".mp4"), 1)
+    page = lambda vids: open(os.path.join(www, "index.html"), "w").write("<html><body>" + "".join(f'<video src="{v}.mp4"></video>' for v in vids) + "</body></html>")  # noqa: E731
+    page(["v1", "v2"])
+    handler = type("H", (http.server.SimpleHTTPRequestHandler,), {"log_message": lambda *a: None})
+    srv = socketserver.TCPServer(("127.0.0.1", 0), lambda *a, **k: handler(*a, directory=www, **k))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}/index.html"
+    env = {"SAKURA_VID_DIR": os.path.join(tmp, "state"), "PATH": os.path.expanduser("~/.local/bin") + ":" + os.environ["PATH"]}
+    v = os.path.join(BIN, "vid")
+    try:
+        first = run([v, "watch", url, "--name", "fam"], env, timeout=120)
+        same = run([v, "watch", url, "--name", "fam"], env, timeout=120)
+        clip(os.path.join(www, "v3.mp4"), 1)
+        page(["v1", "v2", "v3"])
+        new = run([v, "watch", url, "--name", "fam"], env, timeout=120)
+        again = run([v, "watch", url, "--name", "fam"], env, timeout=120)
+    finally:
+        srv.shutdown()
+    return {"the first look only takes stock, exit 0": first.returncode == 0 and "2 videos there now" in first.stdout,
+            "nothing new is exit 0": same.returncode == 0 and "nothing new" in same.stdout,
+            "a new entry is reported once, exit 1": new.returncode == 1 and "1 new" in new.stdout and "index-3" in new.stdout,
+            "and is remembered": again.returncode == 0 and "nothing new" in again.stdout}
+
+
+CASES = {"ports": ports, "space": space, "drift": drift, "when": when, "notes": notes, "memory": memory, "conv": conv, "vid": vid, "extract": extract, "watch": watch}
 
 
 def main():
