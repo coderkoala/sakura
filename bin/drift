@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""drift — how your machines have drifted apart: a file, the packages, the enabled units or the ssh keys, side by side. No model.
+
+  drift FILE [HOST...]         the same file on every host: a hash per host, then the diff against the first (--against HOST)
+  drift packages [HOST...]     installed packages (dpkg, pacman or rpm) — only the rows that differ: missing somewhere, or another version
+  drift units [HOST...]        enabled systemd units that aren't enabled everywhere
+  drift sshkeys [HOST...]      ~/.ssh/authorized_keys: which keys are trusted where (fingerprint and comment), and the odd ones out
+  options: --local (this machine is one of the hosts, named "local")  --all (every row, not only the differences)  --no-diff  --json
+Hosts default to everything in ~/.ssh/config (what `fleet` lists). One that doesn't answer in 6 s is left out and named. Every
+remote command is read-only; nothing is written anywhere. Output is a table; FILE diffs are unified diffs.
+"""
+import base64
+import concurrent.futures
+import difflib
+import hashlib
+import importlib.machinery
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+SSH = shlex.split(os.environ.get("SAKURA_SSH") or "ssh")
+PKG_CMD = ("dpkg-query -W -f='${binary:Package} ${Version}\\n' 2>/dev/null || pacman -Q 2>/dev/null || "
+           "rpm -qa --qf '%{NAME} %{VERSION}-%{RELEASE}\\n' 2>/dev/null || apk info -v 2>/dev/null")
+UNITS_CMD = "systemctl list-unit-files --state=enabled --no-legend --no-pager 2>/dev/null | awk '{print $1}'"
+KEYS_CMD = "cat ~/.ssh/authorized_keys 2>/dev/null"
+
+
+def fleet_hosts():
+    try:
+        return importlib.machinery.SourceFileLoader("fleet", os.path.join(ROOT, "bin", "fleet")).load_module().hosts()
+    except Exception:
+        return []
+
+
+def run_on(host, cmd):
+    """(ok, text). Local runs the command here; a host that doesn't answer is (False, why)."""
+    try:
+        if host == "local":
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+        else:
+            r = subprocess.run([*SSH, "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", host, cmd], capture_output=True, text=True, timeout=90)
+    except subprocess.TimeoutExpired:
+        return False, "timed out"
+    except OSError as e:
+        return False, str(e)
+    if host != "local" and r.returncode == 255:
+        return False, (r.stderr.strip().splitlines() or ["ssh failed"])[-1]
+    return True, r.stdout
+
+
+def gather(hosts, cmd):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, max(1, len(hosts)))) as ex:
+        results = dict(zip(hosts, ex.map(lambda h: run_on(h, cmd), hosts)))
+    got = {h: t for h, (ok, t) in results.items() if ok}
+    lost = {h: t for h, (ok, t) in results.items() if not ok}
+    return got, lost
+
+
+def table(header, rows):
+    if not rows:
+        return ""
+    widths = [max(len(str(h)), *(len(str(r[i])) for r in rows)) for i, h in enumerate(header)]
+    out = ["  ".join(str(h).ljust(w) for h, w in zip(header, widths)).rstrip()]
+    out += ["  ".join(str(c).ljust(w) for c, w in zip(r, widths)).rstrip() for r in rows]
+    return "\n".join(out)
+
+
+def matrix(hosts, per_host, show_all, label):
+    """per_host: host -> {key: value}. Rows where values differ (or all), hosts as columns."""
+    keys = sorted(set().union(*(set(d) for d in per_host.values())) if per_host else set())
+    rows = []
+    for k in keys:
+        vals = [per_host.get(h, {}).get(k, "-") for h in hosts]
+        if show_all or len(set(vals)) > 1:
+            rows.append([k, *vals])
+    return [label, *hosts], rows
+
+
+def cmd_file(path, hosts, against, show_diff, show_all, as_json):
+    got, lost = gather(hosts, f"cat -- {shlex.quote(path)} 2>/dev/null || echo __DRIFT_MISSING__")
+    texts = {h: (None if t.strip() == "__DRIFT_MISSING__" else t) for h, t in got.items()}
+    base = against if against in texts else next((h for h in hosts if h in texts), None)
+    rows = []
+    for h in hosts:
+        if h in lost:
+            rows.append([h, "-", "-", f"unreachable: {lost[h]}"])
+            continue
+        t = texts.get(h)
+        if t is None:
+            rows.append([h, "-", "-", "missing"])
+            continue
+        digest = hashlib.sha256(t.encode()).hexdigest()[:10]
+        same = base is not None and texts.get(base) == t
+        rows.append([h, digest, f"{len(t.splitlines())} lines", "baseline" if h == base else ("same" if same else "differs")])
+    if as_json:
+        print(json.dumps({"file": path, "baseline": base, "hosts": [{"host": r[0], "sha256": r[1], "status": r[3]} for r in rows]}, indent=1))
+        return 0
+    print(table(["host", "sha256", "size", path], rows))
+    differs = [h for h in hosts if h in texts and texts[h] is not None and h != base and texts[h] != texts[base]]
+    if show_diff and base is not None:
+        for h in differs:
+            print()
+            sys.stdout.writelines(difflib.unified_diff(texts[base].splitlines(True), texts[h].splitlines(True), f"{base}:{path}", f"{h}:{path}"))
+    return 1 if differs else 0
+
+
+def parse_pairs(text):
+    out = {}
+    for l in text.splitlines():
+        p = l.split()
+        if len(p) >= 2:
+            out[p[0]] = p[1]
+    return out
+
+
+def cmd_packages(hosts, show_all, as_json):
+    got, lost = gather(hosts, PKG_CMD)
+    per = {h: parse_pairs(t) for h, t in got.items()}
+    return finish(hosts, per, lost, show_all, as_json, "package")
+
+
+def cmd_units(hosts, show_all, as_json):
+    got, lost = gather(hosts, UNITS_CMD)
+    per = {h: {l.strip(): "enabled" for l in t.splitlines() if l.strip()} for h, t in got.items()}
+    return finish(hosts, per, lost, show_all, as_json, "unit")
+
+
+def key_id(line):
+    """'SHA256:xxxx comment' for one authorized_keys line, or None for a comment/blank."""
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    parts = line.split()
+    # options may precede the type
+    for i, p in enumerate(parts):
+        if p.startswith(("ssh-", "ecdsa-", "sk-")) and i + 1 < len(parts):
+            try:
+                blob = base64.b64decode(parts[i + 1], validate=True)
+            except (ValueError, base64.binascii.Error):
+                return None
+            fp = base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
+            comment = " ".join(parts[i + 2:]) or "(no comment)"
+            return f"SHA256:{fp[:16]}… {comment}"
+    return None
+
+
+def cmd_sshkeys(hosts, show_all, as_json):
+    got, lost = gather(hosts, KEYS_CMD)
+    per = {}
+    for h, t in got.items():
+        per[h] = {}
+        for l in t.splitlines():
+            k = key_id(l)
+            if k:
+                per[h][k] = "yes"
+    return finish(hosts, per, lost, show_all, as_json, "key")
+
+
+def finish(hosts, per, lost, show_all, as_json, label):
+    live = [h for h in hosts if h in per]
+    header, rows = matrix(live, per, show_all, label)
+    if as_json:
+        print(json.dumps({"hosts": live, "unreachable": lost, "rows": [dict(zip(header, r)) for r in rows]}, indent=1))
+        return 1 if rows else 0
+    for h, why in lost.items():
+        print(f"{h}: unreachable ({why}), left out", file=sys.stderr)
+    if not live:
+        print("drift: no host answered", file=sys.stderr)
+        return 2
+    if not rows:
+        n = len(next(iter(per.values())))
+        print(f"no drift: the same {n} {label}{'s' if n != 1 else ''} on {', '.join(live)}")
+        return 0
+    print(table(header, rows))
+    if not show_all:
+        print(f"\n{len(rows)} {label}{'s differ' if len(rows) != 1 else ' differs'} across {len(live)} hosts")
+    return 1
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0 if a else 2
+    as_json, show_all, show_diff, local = "--json" in a, "--all" in a, "--no-diff" not in a, "--local" in a
+    against = None
+    if "--against" in a:
+        i = a.index("--against")
+        against = a[i + 1] if i + 1 < len(a) else None
+        del a[i:i + 2]
+    a = [x for x in a if x not in ("--json", "--all", "--no-diff", "--local")]
+    subject, hosts = a[0], a[1:]
+    if not hosts:
+        hosts = fleet_hosts()
+        if not hosts and not local:
+            print("drift: no hosts (none in ~/.ssh/config, none given)", file=sys.stderr)
+            return 2
+    if local and "local" not in hosts:
+        hosts = ["local", *hosts]
+    if subject == "packages":
+        return cmd_packages(hosts, show_all, as_json)
+    if subject == "units":
+        return cmd_units(hosts, show_all, as_json)
+    if subject == "sshkeys":
+        return cmd_sshkeys(hosts, show_all, as_json)
+    if not subject.startswith(("/", "~", ".")):
+        print(f"drift: {subject!r} isn't a path, packages, units or sshkeys", file=sys.stderr)
+        return 2
+    return cmd_file(subject, hosts, against, show_diff, show_all, as_json)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

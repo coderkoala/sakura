@@ -1,0 +1,411 @@
+#!/usr/bin/env python3
+"""space — what's eating the disk, by category, and what's safe to clear. No model.
+
+  space                      the report: caches, package stores, trash, journal, apt, Docker, models, old downloads,
+                             build leftovers (node_modules, target, .venv, __pycache__) and the biggest files, each with a size
+                             and a verdict: "clears itself" (safe), "rebuildable" (yours to decide) or "keep"
+  space PATH                 the biggest things under PATH (two levels deep, like du, same filesystem only)
+  space clean                what `clean --go` would remove, with sizes. Removes nothing.
+  space clean --go           remove the safe set: package-manager caches (pip, uv, npm, yarn, pnpm, cargo, go, composer),
+                             thumbnails, __pycache__, the trash, apt's archive and journal over 200M (the last two through sudo -A)
+  space clean --go --all-caches   also empty the rest of ~/.cache (browser caches, Sakura's own rebuildable indexes)
+  space --json
+Never touched, whatever the flags: Downloads, documents, models, Docker (it says the prune command), node_modules, target,
+virtualenvs. Sizes are real byte counts (no symlink is followed, nothing crosses a filesystem). The guardian's disk finding
+points here.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+NOW = time.time()
+SAFE, REBUILD, KEEP = "clears itself", "rebuildable", "keep"
+JOURNAL_KEEP = "200M"
+BUDGET_S = float(os.environ.get("SAKURA_SPACE_BUDGET", "20"))  # seconds for the walks of ~
+
+
+def human(n):
+    for u in ("B", "K", "M", "G", "T"):
+        if n < 1024 or u == "T":
+            return f"{n:.0f}{u}" if u == "B" else f"{n:.1f}{u}"
+        n /= 1024
+
+
+def size_of(path, dev=None):
+    """Bytes under path: files counted once, symlinks not followed, one filesystem."""
+    total = 0
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return 0
+    if not os.path.isdir(path) or os.path.islink(path):
+        return st.st_size
+    dev = dev or st.st_dev
+    seen = set()
+    for root, dirs, files in os.walk(path, onerror=lambda e: None):
+        keep = []
+        for d in dirs:
+            p = os.path.join(root, d)
+            try:
+                s = os.lstat(p)
+            except OSError:
+                continue
+            if not os.path.islink(p) and s.st_dev == dev:
+                keep.append(d)
+        dirs[:] = keep
+        for f in files:
+            try:
+                s = os.lstat(os.path.join(root, f))
+            except OSError:
+                continue
+            if (s.st_dev, s.st_ino) in seen:
+                continue
+            seen.add((s.st_dev, s.st_ino))
+            total += s.st_blocks * 512 if s.st_blocks else s.st_size
+    return total
+
+
+def exists(p):
+    return os.path.lexists(p)
+
+
+def h(*parts):
+    return os.path.join(HOME, *parts)
+
+
+# (label, path, verdict, how to clear). A verdict of SAFE means `clean --go` removes the directory's contents.
+STORES = [
+    ("pip cache", h(".cache", "pip"), SAFE, ""),
+    ("uv cache", h(".cache", "uv"), SAFE, ""),
+    ("npm cache", h(".npm", "_cacache"), SAFE, ""),
+    ("yarn cache", h(".cache", "yarn"), SAFE, ""),
+    ("pnpm store", h(".local", "share", "pnpm", "store"), SAFE, ""),
+    ("cargo registry cache", h(".cargo", "registry", "cache"), SAFE, ""),
+    ("cargo registry sources", h(".cargo", "registry", "src"), SAFE, ""),
+    ("go module cache", h("go", "pkg", "mod", "cache"), SAFE, ""),
+    ("composer cache", h(".cache", "composer"), SAFE, ""),
+    ("thumbnails", h(".cache", "thumbnails"), SAFE, ""),
+    ("trash", h(".local", "share", "Trash"), SAFE, ""),
+    ("Hugging Face hub", h(".cache", "huggingface"), REBUILD, "re-downloads on next use; delete models you're done with"),
+    ("Ollama models", h(".ollama", "models"), KEEP, "sakura-model models says which Sakura needs"),
+    ("Ollama models (system)", "/usr/share/ollama/.ollama/models", KEEP, "sakura-model models says which Sakura needs"),
+    ("Sakura undo store", h(".sakura", "undo"), KEEP, "the ?undo history"),
+    ("Steam library", h(".local", "share", "Steam", "steamapps"), KEEP, ""),
+    ("Flatpak", "/var/lib/flatpak", KEEP, "flatpak uninstall --unused"),
+    ("snaps", "/var/lib/snapd/snaps", KEEP, "old revisions: snap list --all"),
+]
+LEFTOVERS = {"node_modules": (REBUILD, "npm install brings it back"), "target": (REBUILD, "cargo build brings it back"),
+             ".venv": (REBUILD, "the project's venv; recreate with uv or venv"), "venv": (REBUILD, "a venv; recreate it"),
+             "__pycache__": (SAFE, ""), ".pytest_cache": (SAFE, ""), ".mypy_cache": (SAFE, ""), ".ruff_cache": (SAFE, ""),
+             "dist": (REBUILD, "a build output"), "build": (REBUILD, "a build output")}
+SKIP_WALK = {".cache", ".local", ".npm", ".cargo", ".ollama", ".sakura", ".git", ".steam", ".var", "snap", ".mozilla", ".config"}
+
+
+def sh(cmd, timeout=20):
+    try:
+        return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def have_sudo():
+    return os.environ.get("SAKURA_SPACE_NO_SUDO") != "1" and shutil.which("sudo") is not None and (os.geteuid() == 0 or os.environ.get("SUDO_ASKPASS"))
+
+
+def walk_home(findings):
+    """Build leftovers and the biggest files under ~, within a time budget, never through the stores above."""
+    deadline = time.time() + BUDGET_S
+    big = []
+    leftovers = []
+    try:
+        root_dev = os.lstat(HOME).st_dev
+    except OSError:
+        return
+    for root, dirs, files in os.walk(HOME, onerror=lambda e: None):
+        if time.time() > deadline:
+            findings.append(("walk", "the scan of ~ hit its time budget; the leftover and big-file lists are partial", 0, KEEP, "SAKURA_SPACE_BUDGET=60 space"))
+            break
+        rel = os.path.relpath(root, HOME)
+        depth = 0 if rel == "." else rel.count(os.sep) + 1
+        keep = []
+        for d in dirs:
+            p = os.path.join(root, d)
+            if os.path.islink(p):
+                continue
+            try:
+                if os.lstat(p).st_dev != root_dev:
+                    continue
+            except OSError:
+                continue
+            if depth == 0 and d in SKIP_WALK:
+                continue
+            if d in LEFTOVERS:
+                verdict, how = LEFTOVERS[d]
+                leftovers.append((os.path.relpath(p, HOME), size_of(p, root_dev), verdict, how))
+                continue  # don't descend into it twice
+            if depth >= 6:
+                continue
+            keep.append(d)
+        dirs[:] = keep
+        for f in files:
+            p = os.path.join(root, f)
+            try:
+                s = os.lstat(p)
+            except OSError:
+                continue
+            if not os.path.islink(p) and s.st_size >= 500 * 1024 * 1024:
+                big.append((os.path.relpath(p, HOME), s.st_size))
+    for rel, size, verdict, how in sorted(leftovers, key=lambda x: -x[1])[:15]:
+        findings.append(("leftover", rel, size, verdict, how))
+    for rel, size in sorted(big, key=lambda x: -x[1])[:10]:
+        findings.append(("bigfile", rel, size, KEEP, ""))
+
+
+def downloads(findings):
+    d = h("Downloads")
+    if not os.path.isdir(d):
+        return
+    old, parts = 0, 0
+    for root, dirs, files in os.walk(d):
+        for f in files:
+            p = os.path.join(root, f)
+            try:
+                s = os.lstat(p)
+            except OSError:
+                continue
+            if os.path.islink(p):
+                continue
+            if f.endswith(".part") or f.endswith(".crdownload"):
+                parts += s.st_size
+            elif NOW - s.st_mtime > 90 * 86400:
+                old += s.st_size
+    if old:
+        findings.append(("downloads", "Downloads older than 90 days", old, KEEP, "yours to look through: find ~/Downloads -mtime +90 -type f"))
+    if parts:
+        findings.append(("downloads", "unfinished downloads (.part)", parts, KEEP, "dl list says whether they're still queued"))
+
+
+def journal_bytes():
+    import re
+    m = re.search(r"([\d.]+)\s*([KMGT])", sh("journalctl --disk-usage 2>/dev/null"))
+    return float(m.group(1)) * {"K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}[m.group(2)] if m else 0
+
+
+def system(findings):
+    n = journal_bytes()
+    if n:
+        findings.append(("journal", "systemd journal", n, SAFE if n > 300 * 1024 ** 2 else KEEP, f"sudo -A journalctl --vacuum-size={JOURNAL_KEEP}"))
+    apt = "/var/cache/apt/archives"
+    if os.path.isdir(apt):
+        n = size_of(apt)
+        if n > 50 * 1024 ** 2:
+            findings.append(("apt", "apt package archive", n, SAFE, "sudo -A apt-get clean"))
+    if shutil.which("dpkg-query"):
+        running = sh("uname -r")
+        kernels = [l.split()[0] for l in sh("dpkg-query -W -f='${Package} ${Status}\\n' 'linux-image-[0-9]*' 2>/dev/null").splitlines() if "installed" in l]
+        old = [k for k in kernels if running not in k]
+        if len(old) >= 2:
+            findings.append(("kernels", f"{len(old)} old kernels still installed", len(old) * 120 * 1024 ** 2, REBUILD, "sudo -A apt-get autoremove --purge"))
+    if shutil.which("docker"):
+        out = sh("docker system df --format '{{.Type}}\\t{{.Size}}\\t{{.Reclaimable}}' 2>/dev/null", timeout=15)
+        for l in out.splitlines():
+            parts = l.split("\t")
+            if len(parts) == 3 and parts[1] not in ("0B", ""):
+                findings.append(("docker", f"Docker {parts[0].lower()}", to_bytes(parts[1]), KEEP, f"{parts[2]} reclaimable: docker system prune" + (" -a" if parts[0] == "Images" else "")))
+
+
+def to_bytes(s):
+    import re
+    m = re.match(r"([\d.]+)\s*([KMGT]?)i?B?", s)
+    if not m:
+        return 0
+    return float(m.group(1)) * {"": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}[m.group(2)]
+
+
+def report():
+    findings = []
+    for label, path, verdict, how in STORES:
+        if exists(path):
+            n = size_of(path)
+            if n > 1024 * 1024 or verdict == SAFE and n > 0:
+                findings.append(("store", label, n, verdict, how or ("space clean" if verdict == SAFE else "")))
+    rest = h(".cache")
+    if os.path.isdir(rest):
+        known = {p for _, p, v, _ in STORES if p.startswith(rest)}
+        other = sum(size_of(os.path.join(rest, d)) for d in os.listdir(rest) if os.path.join(rest, d) not in known)
+        if other > 50 * 1024 ** 2:
+            findings.append(("store", "the rest of ~/.cache", other, REBUILD, "space clean --go --all-caches"))
+    downloads(findings)
+    walk_home(findings)
+    if have_sudo() or os.geteuid() == 0:
+        system(findings)
+    return findings
+
+
+def clean_plan():
+    plan = []
+    for label, path, verdict, how in STORES:
+        if verdict == SAFE and exists(path):
+            n = size_of(path)
+            if n:
+                plan.append((label, path, n))
+    try:
+        root_dev = os.lstat(HOME).st_dev
+    except OSError:
+        root_dev = None
+    deadline = time.time() + BUDGET_S
+    for root, dirs, files in os.walk(HOME, onerror=lambda e: None):
+        if time.time() > deadline:
+            break
+        rel = os.path.relpath(root, HOME)
+        depth = 0 if rel == "." else rel.count(os.sep) + 1
+        keep = []
+        for d in dirs:
+            p = os.path.join(root, d)
+            if os.path.islink(p) or (depth == 0 and d in SKIP_WALK):
+                continue
+            try:
+                if root_dev is not None and os.lstat(p).st_dev != root_dev:
+                    continue
+            except OSError:
+                continue
+            if d in LEFTOVERS and LEFTOVERS[d][0] == SAFE:
+                n = size_of(p, root_dev)
+                if n:
+                    plan.append((d, p, n))
+            elif d not in LEFTOVERS and depth < 6:
+                keep.append(d)
+        dirs[:] = keep
+    return plan
+
+
+def empty_dir(path):
+    """Remove what's inside path, never following a symlink, never leaving ~."""
+    real = os.path.realpath(path)
+    if not (real + os.sep).startswith(os.path.realpath(HOME) + os.sep):
+        return 0
+    if os.path.islink(path):
+        return 0
+    freed = 0
+    for name in os.listdir(path):
+        p = os.path.join(path, name)
+        try:
+            if os.path.islink(p) or not os.path.isdir(p):
+                freed += os.lstat(p).st_size
+                os.unlink(p)
+            else:
+                freed += size_of(p)
+                shutil.rmtree(p, ignore_errors=True)
+        except OSError:
+            pass
+    return freed
+
+
+def do_clean(go, all_caches, as_json):
+    plan = clean_plan()
+    if all_caches and os.path.isdir(h(".cache")):
+        known = {p for _, p, _, _ in STORES}
+        for d in sorted(os.listdir(h(".cache"))):
+            p = h(".cache", d)
+            if p not in known and os.path.isdir(p) and not os.path.islink(p):
+                n = size_of(p)
+                if n:
+                    plan.append((f"~/.cache/{d}", p, n))
+    sysplan = []
+    if have_sudo():
+        if journal_bytes() > 300 * 1024 ** 2:
+            sysplan.append(("systemd journal, down to " + JOURNAL_KEEP, f"sudo -A journalctl --vacuum-size={JOURNAL_KEEP}"))
+        if os.path.isdir("/var/cache/apt/archives") and size_of("/var/cache/apt/archives") > 50 * 1024 ** 2:
+            sysplan.append(("apt package archive", "sudo -A apt-get clean"))
+    total = sum(n for _, _, n in plan)
+    if as_json:
+        print(json.dumps({"go": go, "items": [{"what": l, "path": p, "bytes": n} for l, p, n in plan], "system": [c for _, c in sysplan], "bytes": total}, indent=1))
+    if not plan and not sysplan:
+        if not as_json:
+            print("nothing in the safe set to clear")
+        return 0
+    freed = 0
+    for label, path, n in plan:
+        if go:
+            freed += empty_dir(path)
+        if not as_json:
+            print(f"  {'cleared' if go else 'would clear'} {human(n):>7}  {label}  ({path.replace(HOME, '~')})")
+    for label, cmd in sysplan:
+        if go:
+            subprocess.run(cmd, shell=True, timeout=120)
+        if not as_json:
+            print(f"  {'ran' if go else 'would run'}  {cmd}  ({label})")
+    if not as_json:
+        print(f"{'freed' if go else 'would free'} about {human(freed if go else total)}" + ("" if go else "; add --go to do it"))
+    return 0
+
+
+def main():
+    a = sys.argv[1:]
+    if a and a[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    as_json = "--json" in a
+    a = [x for x in a if x != "--json"]
+    if a and a[0] == "clean":
+        return do_clean("--go" in a, "--all-caches" in a, as_json)
+    if a:
+        path = os.path.abspath(a[0])
+        if not os.path.isdir(path):
+            print(f"space: {a[0]} isn't a directory", file=sys.stderr)
+            return 2
+        dev = os.lstat(path).st_dev
+        rows = []
+        for root, dirs, files in os.walk(path, onerror=lambda e: None):
+            depth = os.path.relpath(root, path).count(os.sep) + (0 if root == path else 1)
+            for d in list(dirs):
+                p = os.path.join(root, d)
+                if os.path.islink(p) or os.lstat(p).st_dev != dev:
+                    dirs.remove(d)
+                    continue
+                if depth == 1:
+                    rows.append((os.path.relpath(p, path), size_of(p, dev)))
+                    dirs.remove(d)
+            for f in files:
+                p = os.path.join(root, f)
+                try:
+                    if not os.path.islink(p):
+                        rows.append((os.path.relpath(p, path), os.lstat(p).st_blocks * 512))
+                except OSError:
+                    pass
+            if depth >= 1:
+                dirs[:] = []
+        rows.sort(key=lambda r: -r[1])
+        if as_json:
+            print(json.dumps([{"path": r, "bytes": n} for r, n in rows[:25]], indent=1))
+        else:
+            for r, n in rows[:25]:
+                print(f"{human(n):>8}  {r}")
+        return 0
+    findings = report()
+    if as_json:
+        print(json.dumps([{"kind": k, "what": w, "bytes": n, "verdict": v, "how": how} for k, w, n, v, how in findings], indent=1))
+        return 0
+    try:
+        st = os.statvfs(HOME)
+        print(f"{HOME}: {human(st.f_bavail * st.f_frsize)} free of {human(st.f_blocks * st.f_frsize)}")
+    except OSError:
+        pass
+    if not findings:
+        print("nothing big to report")
+        return 0
+    findings.sort(key=lambda f: -f[2])
+    safe = sum(n for k, w, n, v, how in findings if v == SAFE)
+    w1 = max(len(f[1]) for f in findings)
+    for kind, what, n, verdict, how in findings:
+        print(f"{human(n):>8}  {what.ljust(w1)}  {verdict:<13} {how}")
+    print(f"\nsafe to clear now: about {human(safe)} (space clean shows it; space clean --go does it)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

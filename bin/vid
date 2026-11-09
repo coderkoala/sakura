@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""vid — your own videos, downloaded to keep: yt-dlp with the settings an archivist would use, and an archive that resumes.
+
+  vid URL [URL...]               the video (best picture and sound, merged to mp4) with its title, date, description, thumbnail
+                                 and subtitles embedded, plus a .info.json next to it, into ~/Videos/vid (--dir DIR)
+  vid audio URL                  the sound only (m4a; --to mp3)   — then `hear FILE` can transcribe it
+  vid list URL                   what a channel or playlist holds (date, duration, title, id), downloading nothing
+  vid info URL                   one video's title, uploader, date, duration and the formats on offer
+  vid archive URL [--name NAME]  everything in a channel or playlist, detached, resumable: an archive file remembers each video
+                                 that landed, so running it again fetches only what's new. A notification when it ends.
+  vid status                     archives running or finished;   vid log [NAME]   the log of one
+  options: --cookies-from-browser firefox|chromium   for your own private or unlisted videos, with the browser's login (no password
+           is ever typed or stored);  --fg  run an archive in the foreground;  --dry  print the yt-dlp command instead
+Nothing but the URL you gave goes anywhere, and only to that site. yt-dlp comes from PATH or `uv tool install yt-dlp`.
+State: ~/.sakura/vid (SAKURA_VID_DIR): archive files and logs. A site that refuses (login wall, geo-block, rate limit) is reported
+as it said it; vid never retries with another identity.
+"""
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+
+STATE = os.path.expanduser(os.environ.get("SAKURA_VID_DIR") or "~/.sakura/vid")
+VIDEOS = os.path.expanduser(os.environ.get("SAKURA_VID_VIDEOS") or "~/Videos/vid")
+NAME_TMPL = "%(upload_date>%Y-%m-%d|undated)s %(title).120B [%(id)s].%(ext)s"
+KEEP = ["--embed-metadata", "--embed-thumbnail", "--write-info-json", "--write-thumbnail", "--write-subs", "--write-auto-subs",
+        "--sub-langs", "en.*,ne.*,hi.*,-live_chat", "--embed-subs", "--no-overwrites", "--continue", "--retries", "10",
+        "--fragment-retries", "10", "--no-playlist-reverse", "--ignore-errors", "--no-abort-on-error"]
+
+
+def ytdlp():
+    for c in ("yt-dlp", os.path.expanduser("~/.local/bin/yt-dlp")):
+        if shutil.which(c) or os.access(c, os.X_OK):
+            return [c]
+    if shutil.which("uvx"):
+        return ["uvx", "yt-dlp"]
+    print("vid: yt-dlp isn't installed. One of:\n  uv tool install yt-dlp\n  sudo -A apt-get install -y yt-dlp", file=sys.stderr)
+    sys.exit(3)
+
+
+def base_args(cookies, extra=()):
+    a = [*ytdlp(), "--no-colors", "--newline", *KEEP, *extra]
+    if cookies:
+        a += ["--cookies-from-browser", cookies]
+    return a
+
+
+def slug(s):
+    s = re.sub(r"^https?://(www\.)?", "", s)
+    return re.sub(r"[^\w.-]+", "_", s).strip("_")[:80] or "archive"
+
+
+def notify(text):
+    for cmd in (["notify", text], ["notify-send", "vid", text]):
+        if shutil.which(cmd[0]):
+            subprocess.run(cmd, check=False)
+            return
+
+
+def archive_meta(name):
+    try:
+        return json.load(open(os.path.join(STATE, name + ".json")))
+    except (OSError, ValueError):
+        return None
+
+
+def save_meta(name, meta):
+    os.makedirs(STATE, exist_ok=True)
+    tmp = os.path.join(STATE, name + ".json.tmp")
+    json.dump(meta, open(tmp, "w"), indent=1)
+    os.replace(tmp, os.path.join(STATE, name + ".json"))
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, TypeError):
+        return False
+    except PermissionError:
+        return True
+
+
+def run_archive(name, url, outdir, cookies, fg, dry):
+    os.makedirs(STATE, exist_ok=True)
+    os.makedirs(outdir, exist_ok=True)
+    arch = os.path.join(STATE, name + ".archive")
+    log = os.path.join(STATE, name + ".log")
+    cmd = base_args(cookies, ["--download-archive", arch, "-f", "bv*+ba/b", "--merge-output-format", "mp4",
+                              "-o", os.path.join(outdir, "%(playlist_title,uploader,channel|)s", NAME_TMPL).replace("//", "/"), url])
+    if dry:
+        print(" ".join(shlex.quote(c) for c in cmd))
+        return 0
+    meta = archive_meta(name) or {"v": 1, "name": name, "url": url, "dir": outdir, "runs": 0}
+    if meta.get("pid") and alive(meta["pid"]):
+        print(f"vid: {name} is already running (pid {meta['pid']}); vid log {name}")
+        return 1
+    before = sum(1 for _ in open(arch)) if os.path.exists(arch) else 0
+    meta.update({"runs": meta.get("runs", 0) + 1, "started": int(time.time()), "finished": None, "before": before, "cookies": cookies or ""})
+    if fg:
+        meta["pid"] = os.getpid()
+        save_meta(name, meta)
+        with open(log, "a") as lf:
+            lf.write(f"\n== run {meta['runs']} {time.strftime('%Y-%m-%d %H:%M')}\n")
+            rc = subprocess.call(cmd, stdout=lf, stderr=subprocess.STDOUT)
+        finish(name, rc)
+        print_status(name)
+        return 0 if rc == 0 else 1
+    # detached: this process re-runs itself with --fg under setsid, so the shell comes back at once
+    child = subprocess.Popen([sys.executable, os.path.realpath(__file__), "archive", url, "--name", name, "--dir", outdir, "--fg"] +
+                             (["--cookies-from-browser", cookies] if cookies else []),
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    meta["pid"] = child.pid
+    save_meta(name, meta)
+    print(f"{name}: archiving {url}\n  into {outdir}; {before} already kept. vid status / vid log {name}")
+    return 0
+
+
+def finish(name, rc):
+    meta = archive_meta(name) or {}
+    arch = os.path.join(STATE, name + ".archive")
+    after = sum(1 for _ in open(arch)) if os.path.exists(arch) else 0
+    new = after - meta.get("before", 0)
+    meta.update({"finished": int(time.time()), "rc": rc, "after": after, "new": new, "pid": None})
+    save_meta(name, meta)
+    notify(f"{name}: {new} new video{'s' if new != 1 else ''} kept ({after} in all)" + ("" if rc == 0 else f"; yt-dlp exited {rc}, see vid log {name}"))
+
+
+def print_status(name=None):
+    names = [name] if name else sorted(f[:-5] for f in os.listdir(STATE) if f.endswith(".json")) if os.path.isdir(STATE) else []
+    if not names:
+        print("no archives yet: vid archive URL")
+        return
+    rows = []
+    for n in names:
+        m = archive_meta(n) or {}
+        state = "running" if m.get("pid") and alive(m["pid"]) else ("ok" if m.get("rc") == 0 else f"exit {m.get('rc')}" if m.get("rc") is not None else "?")
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(m.get("finished") or m.get("started") or 0))
+        rows.append((n, state, str(m.get("after", m.get("before", 0))), str(m.get("new", "")), when, m.get("dir", "")))
+    head = ("ARCHIVE", "STATE", "KEPT", "NEW", "WHEN", "DIR")
+    w = [max(len(r[i]) for r in [head, *rows]) for i in range(6)]
+    for r in [head, *rows]:
+        print("  ".join(c.ljust(x) for c, x in zip(r, w)).rstrip())
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0 if a else 2
+    opt = {"dir": None, "name": None, "cookies": None, "fg": False, "dry": False, "to": None}
+    rest = []
+    while a:
+        x = a.pop(0)
+        if x == "--dir":
+            opt["dir"] = os.path.abspath(os.path.expanduser(a.pop(0)))
+        elif x == "--name":
+            opt["name"] = slug(a.pop(0))
+        elif x == "--cookies-from-browser":
+            opt["cookies"] = a.pop(0)
+        elif x == "--to":
+            opt["to"] = a.pop(0)
+        elif x in ("--fg", "--dry"):
+            opt[x[2:]] = True
+        else:
+            rest.append(x)
+    if not rest:
+        print(__doc__)
+        return 2
+    cmd, args = rest[0], rest[1:]
+    outdir = opt["dir"] or VIDEOS
+    if cmd == "status":
+        print_status(args[0] if args else None)
+        return 0
+    if cmd == "log":
+        name = args[0] if args else (sorted(f[:-4] for f in os.listdir(STATE) if f.endswith(".log")) or [""])[-1]
+        p = os.path.join(STATE, name + ".log")
+        if not name or not os.path.exists(p):
+            print("vid: no such log", file=sys.stderr)
+            return 1
+        sys.stdout.write("".join(open(p, errors="replace").readlines()[-60:]))
+        return 0
+    if cmd == "archive":
+        if not args:
+            print("vid archive URL [--name NAME]", file=sys.stderr)
+            return 2
+        return run_archive(opt["name"] or slug(args[0]), args[0], outdir, opt["cookies"], opt["fg"], opt["dry"])
+    if cmd == "list":
+        c = [*ytdlp(), "--no-colors", "--flat-playlist", "--print", "%(upload_date|undated)s  %(duration>%H:%M:%S|?)s  %(title)s  [%(id)s]", *args]
+        if opt["cookies"]:
+            c += ["--cookies-from-browser", opt["cookies"]]
+        return subprocess.call(c) if not opt["dry"] else print(" ".join(shlex.quote(x) for x in c)) or 0
+    if cmd == "info":
+        c = [*ytdlp(), "--no-colors", "--print", "%(title)s\n  by %(uploader|?)s, %(upload_date>%Y-%m-%d|undated)s, %(duration>%H:%M:%S|?)s, %(view_count|?)s views\n  %(webpage_url)s", "--list-formats", *args]
+        return subprocess.call(c) if not opt["dry"] else print(" ".join(shlex.quote(x) for x in c)) or 0
+    urls = args if cmd == "audio" else rest
+    if not urls:
+        print("vid URL", file=sys.stderr)
+        return 2
+    os.makedirs(outdir, exist_ok=True)
+    if cmd == "audio":
+        fmt = ["-f", "ba/b", "-x", "--audio-format", opt["to"] or "m4a", "--audio-quality", "0"]
+    else:
+        fmt = ["-f", "bv*+ba/b", "--merge-output-format", "mp4"]
+    c = base_args(opt["cookies"], [*fmt, "-o", os.path.join(outdir, NAME_TMPL), *urls])
+    if opt["dry"]:
+        print(" ".join(shlex.quote(x) for x in c))
+        return 0
+    rc = subprocess.call(c)
+    if rc == 0:
+        print(f"kept in {outdir}")
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

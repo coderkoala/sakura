@@ -1,0 +1,503 @@
+#!/usr/bin/env python3
+"""conv — every conversion people paste into a website, done here with the open-source tools the websites run anyway.
+Nothing leaves the machine; the input is never overwritten; the output lands next to it (or -o FILE / --dir DIR).
+
+  conv FILE... --to EXT        documents  md html docx odt rtf epub tex rst txt ↔ (pandoc); docx xlsx pptx odt → pdf (LibreOffice);
+                               pdf → txt (pdftotext), pdf → png|jpg (pdftoppm, one per page), pdf → docx (LibreOffice)
+                               images     png jpg webp gif tiff bmp heic avif svg ↔ (ImageMagick, or Pillow)
+                               sound/video mp4 mkv webm mov avi mp3 m4a wav flac ogg opus ↔ (ffmpeg); video → gif
+  conv merge a.pdf b.pdf…      one pdf (qpdf; pdfunite or pypdf if it's missing)   -o out.pdf
+  conv split x.pdf [--every N] one file per page (or per N pages)
+  conv pages x.pdf 1-3,7       those pages;   conv rotate x.pdf 90|180|270 [--pages 2]
+  conv compress FILE           pdf (ghostscript /ebook), jpg|png|webp (quality 82, longest side 2000), video (h264 crf 26)
+  conv ocr scan.pdf|image      a searchable pdf (ocrmypdf, else tesseract)
+  conv unlock x.pdf            remove a pdf's password: asked for on the terminal, never stored, never in the command line
+  conv strip FILE...           remove metadata — EXIF, GPS, author, software — before a file leaves you (exiftool, else magick/ffmpeg/qpdf)
+  conv trim video.mp4 START [END]   cut a piece (00:01:30 or 90), copying the streams, no re-encode
+  conv audio video.mp4 [--to mp3]   the sound track (then `hear FILE` can transcribe it)
+  conv gif clip.mp4 [--fps 12 --width 480]   a gif;   conv thumbs video.mp4   a contact sheet;   conv shrink video.mp4  = compress
+  conv --tools                 which converters are here and the install line for each that isn't
+  --dry prints each command instead of running it;  --json  one line per output
+"""
+import getpass
+import json
+import os
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # `conv --tools | head` ends quietly
+
+DOCS = {"md", "markdown", "html", "htm", "docx", "odt", "rtf", "epub", "tex", "rst", "txt", "org", "adoc", "ipynb", "pptx", "xlsx", "ods", "odp", "doc", "xls", "ppt"}
+IMAGES = {"png", "jpg", "jpeg", "webp", "gif", "tiff", "tif", "bmp", "heic", "heif", "avif", "svg", "ico", "pnm", "ppm"}
+AUDIO = {"mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "wma", "aiff"}
+VIDEO = {"mp4", "mkv", "webm", "mov", "avi", "m4v", "mpg", "mpeg", "ts", "3gp", "wmv", "flv"}
+OFFICE = {"docx", "doc", "odt", "rtf", "pptx", "ppt", "odp", "xlsx", "xls", "ods"}
+TOOLS = {  # name: (how to install)
+    "pandoc": "sudo -A apt-get install -y pandoc", "libreoffice": "sudo -A apt-get install -y libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress",
+    "pdftotext": "sudo -A apt-get install -y poppler-utils", "pdftoppm": "sudo -A apt-get install -y poppler-utils", "pdfunite": "sudo -A apt-get install -y poppler-utils",
+    "qpdf": "sudo -A apt-get install -y qpdf", "gs": "sudo -A apt-get install -y ghostscript", "magick": "sudo -A apt-get install -y imagemagick",
+    "ffmpeg": "sudo -A apt-get install -y ffmpeg", "ocrmypdf": "uv tool install ocrmypdf  (and sudo -A apt-get install -y tesseract-ocr)",
+    "tesseract": "sudo -A apt-get install -y tesseract-ocr", "exiftool": "sudo -A apt-get install -y libimage-exiftool-perl",
+}
+DRY = "--dry" in sys.argv
+AS_JSON = "--json" in sys.argv
+made = []
+
+
+def have(tool):
+    if tool == "magick":
+        return shutil.which("magick") or shutil.which("convert")
+    if tool == "libreoffice":
+        return shutil.which("libreoffice") or shutil.which("soffice")
+    return shutil.which(tool)
+
+
+def need(tool):
+    p = have(tool)
+    if not p:
+        print(f"conv: this needs {tool}, which isn't installed:\n  {TOOLS.get(tool, tool)}", file=sys.stderr)
+        sys.exit(3)
+    return p
+
+
+def ext(path):
+    return os.path.splitext(path)[1].lower().lstrip(".")
+
+
+def out_path(src, new_ext, o=None, outdir=None, suffix=""):
+    if o:
+        return o
+    base = os.path.splitext(os.path.basename(src))[0] + suffix
+    d = outdir or os.path.dirname(os.path.abspath(src))
+    cand = os.path.join(d, f"{base}.{new_ext}")
+    n = 2
+    while os.path.exists(cand) or os.path.abspath(cand) == os.path.abspath(src):
+        cand = os.path.join(d, f"{base} ({n}).{new_ext}")
+        n += 1
+    return cand
+
+
+def run(cmd, tool, out, quiet=True, env=None):
+    if DRY:
+        print(" ".join(shlex.quote(c) for c in cmd))
+        return True
+    r = subprocess.run(cmd, capture_output=quiet, text=True, env=env)
+    if r.returncode != 0:
+        print(f"conv: {tool} failed on {cmd[-1] if not out else out}:\n{(r.stderr or r.stdout or '').strip()[-800:]}", file=sys.stderr)
+        return False
+    if out:
+        made.append({"out": out, "tool": tool})
+        if not AS_JSON:
+            print(f"wrote {out}  ({tool})")
+    return True
+
+
+def convert_one(src, to, o, outdir):
+    if not os.path.exists(src):
+        print(f"conv: no such file {src}", file=sys.stderr)
+        return False
+    s, t = ext(src), to.lower().lstrip(".")
+    t = {"jpeg": "jpg", "markdown": "md", "htm": "html", "tif": "tiff"}.get(t, t)
+    if s == "pdf":
+        if t == "txt":
+            out = out_path(src, "txt", o, outdir)
+            return run([need("pdftotext"), "-layout", src, out], "pdftotext", out)
+        if t in ("png", "jpg"):
+            out = out_path(src, t, o, outdir)
+            stem = os.path.splitext(out)[0]
+            ok = run([need("pdftoppm"), "-r", "150", "-png" if t == "png" else "-jpeg", src, stem], "pdftoppm", None)
+            if ok and not DRY:
+                pages = sorted(p for p in os.listdir(os.path.dirname(stem) or ".") if p.startswith(os.path.basename(stem) + "-") and p.endswith("." + t))
+                for p in pages:
+                    made.append({"out": os.path.join(os.path.dirname(stem) or ".", p), "tool": "pdftoppm"})
+                    if not AS_JSON:
+                        print(f"wrote {os.path.join(os.path.dirname(stem) or '.', p)}  (pdftoppm)")
+            return ok
+        if t in OFFICE or t == "html":
+            return office(src, t, o, outdir)
+    if t == "pdf" and (s in OFFICE or s in ("html", "txt")):
+        return office(src, "pdf", o, outdir)
+    if t == "pdf" and s in ("md", "rst", "org", "tex", "epub"):
+        # pandoc needs a pdf engine; go through html and LibreOffice so nothing else needs installing
+        html = out_path(src, "html", None, outdir)
+        if not run([need("pandoc"), src, "-s", "-o", html], "pandoc", None):
+            return False
+        ok = office(html, "pdf", o, outdir)
+        if not DRY and os.path.exists(html):
+            os.unlink(html)
+        return ok
+    if t == "pdf" and s in IMAGES:
+        out = out_path(src, "pdf", o, outdir)
+        return run([need("magick"), src, out], "imagemagick", out)
+    if s in DOCS and t in DOCS:
+        if s in OFFICE and t in OFFICE or s in ("xlsx", "xls", "ods", "pptx", "ppt", "odp") or t in ("xlsx", "xls", "ods", "pptx", "ppt", "odp"):
+            return office(src, t, o, outdir)
+        out = out_path(src, t, o, outdir)
+        fmt = {"md": "gfm", "txt": "plain", "tex": "latex"}.get(t, t)
+        args = [need("pandoc"), src, "-o", out]
+        if t in ("html", "epub", "docx", "odt", "rtf"):
+            args.insert(2, "-s")
+        if t == "html":
+            args += ["--metadata", f"title={os.path.splitext(os.path.basename(src))[0]}"]
+        if t in ("md", "txt", "tex"):
+            args += ["-t", fmt]
+        return run(args, "pandoc", out)
+    if s in IMAGES and t in IMAGES:
+        out = out_path(src, t, o, outdir)
+        if have("magick"):
+            return run([have("magick"), src, *(["-background", "white", "-flatten"] if t == "jpg" else []), out], "imagemagick", out)
+        return pillow(src, out)
+    if (s in AUDIO or s in VIDEO) and (t in AUDIO or t in VIDEO or t == "gif"):
+        if t == "gif":
+            return gif(src, o, outdir, 12, 480)
+        out = out_path(src, t, o, outdir)
+        args = [need("ffmpeg"), "-hide_banner", "-loglevel", "error", "-i", src]
+        if t in AUDIO:
+            args += ["-vn"]
+            if t == "mp3":
+                args += ["-c:a", "libmp3lame", "-q:a", "2"]
+            elif t == "m4a":
+                args += ["-c:a", "aac", "-b:a", "192k"]
+        elif t == "mp4":
+            args += ["-c:v", "libx264", "-preset", "medium", "-crf", "20", "-c:a", "aac", "-movflags", "+faststart"]
+        elif t == "webm":
+            args += ["-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0", "-c:a", "libopus"]
+        return run([*args, out], "ffmpeg", out)
+    print(f"conv: I don't know how to turn .{s} into .{t}", file=sys.stderr)
+    return False
+
+
+def pillow(src, out):
+    try:
+        from PIL import Image
+    except ImportError:
+        need("magick")
+    if DRY:
+        print(f"pillow: {src} -> {out}")
+        return True
+    im = Image.open(src)
+    if ext(out) in ("jpg", "jpeg") and im.mode in ("RGBA", "P", "LA"):
+        im = im.convert("RGB")
+    im.save(out)
+    made.append({"out": out, "tool": "pillow"})
+    if not AS_JSON:
+        print(f"wrote {out}  (pillow)")
+    return True
+
+
+def office(src, t, o, outdir):
+    lo = need("libreoffice")
+    d = outdir or os.path.dirname(os.path.abspath(src)) or "."
+    env = dict(os.environ, HOME=os.environ.get("HOME", "/tmp"))
+    produced = os.path.join(d, os.path.splitext(os.path.basename(src))[0] + "." + t)
+    clash = os.path.exists(produced)
+    if not run([lo, "--headless", "--norestore", "--convert-to", t, "--outdir", d, src], "libreoffice", None, env=env):
+        return False
+    if DRY:
+        return True
+    final = o or (out_path(src, t, None, outdir) if clash else produced)
+    if os.path.abspath(final) != os.path.abspath(produced) and os.path.exists(produced):
+        os.replace(produced, final)
+    if not os.path.exists(final):
+        print(f"conv: libreoffice made nothing for {src}", file=sys.stderr)
+        return False
+    made.append({"out": final, "tool": "libreoffice"})
+    if not AS_JSON:
+        print(f"wrote {final}  (libreoffice)")
+    return True
+
+
+def pdf_merge(files, o):
+    out = o or out_path(files[0], "pdf", None, None, suffix=" merged")
+    if have("qpdf"):
+        return run([have("qpdf"), "--empty", "--pages", *files, "--", out], "qpdf", out)
+    if have("pdfunite"):
+        return run([have("pdfunite"), *files, out], "pdfunite", out)
+    try:
+        from pypdf import PdfWriter
+    except ImportError:
+        need("qpdf")
+    w = PdfWriter()
+    for f in files:
+        w.append(f)
+    w.write(out)
+    made.append({"out": out, "tool": "pypdf"})
+    print(f"wrote {out}  (pypdf)")
+    return True
+
+
+def pdf_pages_count(src):
+    q = have("qpdf")
+    if q:
+        r = subprocess.run([q, "--show-npages", src], capture_output=True, text=True)
+        if r.returncode == 0:
+            return int(r.stdout.strip())
+    try:
+        from pypdf import PdfReader
+        return len(PdfReader(src).pages)
+    except Exception:
+        return 0
+
+
+def pdf_split(src, every, outdir):
+    q = need("qpdf")
+    n = pdf_pages_count(src)
+    d = outdir or os.path.dirname(os.path.abspath(src))
+    stem = os.path.splitext(os.path.basename(src))[0]
+    ok = True
+    for start in range(1, n + 1, every):
+        end = min(start + every - 1, n)
+        out = os.path.join(d, f"{stem} p{start}" + (f"-{end}" if end != start else "") + ".pdf")
+        ok &= run([q, src, "--pages", ".", f"{start}-{end}", "--", out], "qpdf", out)
+    return ok
+
+
+def pdf_pages(src, spec, o, outdir):
+    q = need("qpdf")
+    out = o or out_path(src, "pdf", None, outdir, suffix=f" p{spec}")
+    return run([q, src, "--pages", ".", spec, "--", out], "qpdf", out)
+
+
+def pdf_rotate(src, deg, pages, o, outdir):
+    q = need("qpdf")
+    out = o or out_path(src, "pdf", None, outdir, suffix=f" rotated{deg}")
+    return run([q, src, f"--rotate=+{deg}:{pages or '1-z'}", out], "qpdf", out)
+
+
+def compress(src, o, outdir):
+    s = ext(src)
+    if s == "pdf":
+        out = o or out_path(src, "pdf", None, outdir, suffix=" small")
+        return run([need("gs"), "-sDEVICE=pdfwrite", "-dCompatibilityLevel=1.5", "-dPDFSETTINGS=/ebook", "-dNOPAUSE", "-dQUIET", "-dBATCH", f"-sOutputFile={out}", src], "ghostscript", out)
+    if s in IMAGES:
+        out = o or out_path(src, "jpg" if s in ("jpg", "jpeg", "heic", "heif", "tiff", "tif", "bmp") else s, None, outdir, suffix=" small")
+        return run([need("magick"), src, "-auto-orient", "-resize", "2000x2000>", "-quality", "82", "-strip", out], "imagemagick", out)
+    if s in VIDEO:
+        out = o or out_path(src, "mp4", None, outdir, suffix=" small")
+        return run([need("ffmpeg"), "-hide_banner", "-loglevel", "error", "-i", src, "-c:v", "libx264", "-preset", "slow", "-crf", "26",
+                    "-vf", "scale='min(1280,iw)':-2", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out], "ffmpeg", out)
+    print(f"conv: can't compress a .{s}", file=sys.stderr)
+    return False
+
+
+def ocr(src, o, outdir):
+    out = o or out_path(src, "pdf", None, outdir, suffix=" ocr")
+    if have("ocrmypdf"):
+        args = [have("ocrmypdf"), "--skip-text", "-l", os.environ.get("SAKURA_OCR_LANGS", "eng"), src, out] if ext(src) == "pdf" else [have("ocrmypdf"), "--image-dpi", "300", "-l", os.environ.get("SAKURA_OCR_LANGS", "eng"), src, out]
+        return run(args, "ocrmypdf", out)
+    t = need("tesseract")
+    if ext(src) == "pdf":
+        print("conv: tesseract alone reads images; for a pdf install ocrmypdf: " + TOOLS["ocrmypdf"], file=sys.stderr)
+        return False
+    return run([t, src, os.path.splitext(out)[0], "pdf"], "tesseract", out)
+
+
+def unlock(src, o, outdir):
+    q = need("qpdf")
+    out = o or out_path(src, "pdf", None, outdir, suffix=" unlocked")
+    if DRY:
+        print(f"{q} --password-file=<asked on the terminal> --decrypt {shlex.quote(src)} {shlex.quote(out)}")
+        return True
+    pw = os.environ.get("SAKURA_CONV_PASSWORD") if os.environ.get("SAKURA_CONV_PASSWORD_FROM_ENV_FOR_TESTS") else None
+    if pw is None:
+        try:
+            pw = getpass.getpass(f"password for {os.path.basename(src)} (not stored): ")
+        except (EOFError, KeyboardInterrupt):
+            print("\nconv: no password given; nothing done", file=sys.stderr)
+            return False
+    # the password goes to qpdf on a file descriptor, never on the command line where `ps` and the recap would see it
+    r, w = os.pipe()
+    os.write(w, pw.encode())
+    os.close(w)
+    cmd = [q, f"--password-file=/dev/fd/{r}", "--decrypt", src, out]
+    p = subprocess.run(cmd, capture_output=True, text=True, pass_fds=(r,))
+    os.close(r)
+    if p.returncode != 0:
+        print(f"conv: qpdf couldn't open it: {p.stderr.strip()[-300:]}", file=sys.stderr)
+        return False
+    made.append({"out": out, "tool": "qpdf"})
+    if not AS_JSON:
+        print(f"wrote {out}  (qpdf)")
+    return True
+
+
+def strip(src, o, outdir):
+    s = ext(src)
+    out = o or out_path(src, s, None, outdir, suffix=" clean")
+    if have("exiftool") and (s in IMAGES or s in VIDEO or s in AUDIO or s == "pdf"):
+        if not run([have("exiftool"), "-all=", "-tagsfromfile", "@", "-orientation", "-icc_profile", "-o", out, src], "exiftool", out):
+            return False
+        return True
+    if s in IMAGES:
+        if have("magick"):
+            return run([have("magick"), src, "-auto-orient", "-strip", out], "imagemagick", out)
+        try:
+            from PIL import Image, ImageOps
+            im = ImageOps.exif_transpose(Image.open(src))
+            clean = Image.new(im.mode, im.size)
+            clean.putdata(list(im.getdata()))
+            clean.save(out)
+            made.append({"out": out, "tool": "pillow"})
+            print(f"wrote {out}  (pillow)")
+            return True
+        except ImportError:
+            need("magick")
+    if s in VIDEO or s in AUDIO:
+        return run([need("ffmpeg"), "-hide_banner", "-loglevel", "error", "-i", src, "-map_metadata", "-1", "-map_metadata:s", "-1", "-c", "copy", "-fflags", "+bitexact", out], "ffmpeg", out)
+    if s == "pdf":
+        q = need("qpdf")
+        # qpdf can't drop the Info dictionary on its own; empty it through a tiny pypdf pass when available, else linearize and warn
+        try:
+            from pypdf import PdfReader, PdfWriter
+            if DRY:
+                print(f"pypdf: strip metadata {src} -> {out}")
+                return True
+            w = PdfWriter(clone_from=PdfReader(src))
+            w.metadata = None  # drops the /Info dictionary (author, creator, producer, dates)
+            if "/Metadata" in w._root_object:
+                del w._root_object["/Metadata"]  # and the XMP packet
+            w.write(out)
+            made.append({"out": out, "tool": "pypdf"})
+            print(f"wrote {out}  (pypdf)")
+            return True
+        except ImportError:
+            return run([q, "--linearize", src, out], "qpdf", out) and print("conv: qpdf keeps the document info; install exiftool to drop it") is None
+    print(f"conv: don't know how to strip a .{s}", file=sys.stderr)
+    return False
+
+
+def trim(src, start, end, o, outdir):
+    out = o or out_path(src, ext(src), None, outdir, suffix=" cut")
+    args = [need("ffmpeg"), "-hide_banner", "-loglevel", "error", "-ss", start, "-i", src]
+    if end:
+        args += ["-to", end] if ":" in end or not end.startswith("+") else ["-t", end[1:]]
+        if ":" in end or not end.startswith("+"):
+            # -to after -ss -i is relative to the seek point in recent ffmpeg; compute a duration instead to be exact
+            args[-2:] = ["-t", str(max(0.0, to_seconds(end) - to_seconds(start)))]
+    return run([*args, "-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", out], "ffmpeg", out)
+
+
+def to_seconds(t):
+    parts = [float(p) for p in t.split(":")]
+    s = 0.0
+    for p in parts:
+        s = s * 60 + p
+    return s
+
+
+def audio(src, to, o, outdir):
+    to = (to or "m4a").lstrip(".")
+    out = o or out_path(src, to, None, outdir)
+    args = [need("ffmpeg"), "-hide_banner", "-loglevel", "error", "-i", src, "-vn"]
+    if to == "mp3":
+        args += ["-c:a", "libmp3lame", "-q:a", "2"]
+    elif to == "m4a":
+        args += ["-c:a", "aac", "-b:a", "192k"]
+    elif to == "wav":
+        args += ["-c:a", "pcm_s16le"]
+    return run([*args, out], "ffmpeg", out)
+
+
+def gif(src, o, outdir, fps, width):
+    out = o or out_path(src, "gif", None, outdir)
+    flt = f"fps={fps},scale={width}:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128[p];[s1][p]paletteuse=dither=bayer"
+    return run([need("ffmpeg"), "-hide_banner", "-loglevel", "error", "-i", src, "-vf", flt, "-loop", "0", out], "ffmpeg", out)
+
+
+def thumbs(src, o, outdir):
+    out = o or out_path(src, "jpg", None, outdir, suffix=" sheet")
+    probe = subprocess.run([need("ffprobe"), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", src], capture_output=True, text=True).stdout.strip()
+    dur = float(probe or 0) or 1
+    n = 16
+    return run([need("ffmpeg"), "-hide_banner", "-loglevel", "error", "-i", src, "-vf", f"fps=1/{dur / n:.3f},scale=320:-1,tile=4x4", "-frames:v", "1", "-q:v", "3", out], "ffmpeg", out)
+
+
+def tools_report():
+    for t, how in TOOLS.items():
+        p = have(t)
+        print(f"  {'ok     ' if p else 'missing'}  {t:<12} {p or how}")
+    try:
+        import PIL  # noqa
+        print("  ok       pillow       (python)")
+    except ImportError:
+        pass
+    return 0
+
+
+def main():
+    a = [x for x in sys.argv[1:] if x not in ("--dry", "--json")]
+    if not a or a[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0 if a else 2
+    if a == ["--tools"]:
+        return tools_report()
+    opt = {"o": None, "dir": None, "to": None, "every": 1, "pages": None, "fps": 12, "width": 480}
+    rest = []
+    while a:
+        x = a.pop(0)
+        if x in ("-o", "--out"):
+            opt["o"] = a.pop(0)
+        elif x == "--dir":
+            opt["dir"] = a.pop(0)
+            os.makedirs(opt["dir"], exist_ok=True)
+        elif x == "--to":
+            opt["to"] = a.pop(0)
+        elif x == "--every":
+            opt["every"] = int(a.pop(0))
+        elif x == "--pages":
+            opt["pages"] = a.pop(0)
+        elif x == "--fps":
+            opt["fps"] = int(a.pop(0))
+        elif x == "--width":
+            opt["width"] = int(a.pop(0))
+        else:
+            rest.append(x)
+    if not rest:
+        print(__doc__)
+        return 2
+    cmd, args = rest[0], rest[1:]
+    ok = True
+    if cmd == "merge":
+        ok = len(args) >= 2 and pdf_merge(args, opt["o"])
+    elif cmd == "split":
+        ok = bool(args) and pdf_split(args[0], opt["every"], opt["dir"])
+    elif cmd == "pages":
+        ok = len(args) == 2 and pdf_pages(args[0], args[1], opt["o"], opt["dir"])
+    elif cmd == "rotate":
+        ok = len(args) == 2 and args[1] in ("90", "180", "270") and pdf_rotate(args[0], args[1], opt["pages"], opt["o"], opt["dir"])
+    elif cmd in ("compress", "shrink"):
+        for f in args:
+            ok &= compress(f, opt["o"] if len(args) == 1 else None, opt["dir"])
+    elif cmd == "ocr":
+        ok = bool(args) and ocr(args[0], opt["o"], opt["dir"])
+    elif cmd == "unlock":
+        ok = bool(args) and unlock(args[0], opt["o"], opt["dir"])
+    elif cmd == "strip":
+        for f in args:
+            ok &= strip(f, opt["o"] if len(args) == 1 else None, opt["dir"])
+    elif cmd == "trim":
+        ok = len(args) >= 2 and trim(args[0], args[1], args[2] if len(args) > 2 else None, opt["o"], opt["dir"])
+    elif cmd == "audio":
+        ok = bool(args) and audio(args[0], opt["to"], opt["o"], opt["dir"])
+    elif cmd == "gif":
+        ok = bool(args) and gif(args[0], opt["o"], opt["dir"], opt["fps"], opt["width"])
+    elif cmd == "thumbs":
+        ok = bool(args) and thumbs(args[0], opt["o"], opt["dir"])
+    else:
+        files = rest
+        if not opt["to"]:
+            print("conv FILE... --to EXT  (or merge, split, pages, rotate, compress, ocr, unlock, strip, trim, audio, gif, thumbs)", file=sys.stderr)
+            return 2
+        for f in files:
+            ok &= convert_one(f, opt["to"], opt["o"] if len(files) == 1 else None, opt["dir"])
+    if AS_JSON:
+        for m in made:
+            print(json.dumps(m))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

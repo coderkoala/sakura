@@ -14,6 +14,8 @@ explicit robots.txt/ToS mention from the operator; otherwise this is their own f
 
 ## Tools
 
+Videos: `vid URL` (the user's own videos kept with metadata, thumbnail, subtitles), `vid archive URL` for a channel or
+playlist (resumable; `vid status`), `vid audio URL` for the sound. Plain files: `dl URL`. Both are Sakura's own commands.
 Install on demand (ask me with `j`): curl wget yt-dlp (uv tool install yt-dlp), aria2.
 Check `command -v` first; prefer apt, then `uv tool install`, then a release binary into ~/.local/bin.
 

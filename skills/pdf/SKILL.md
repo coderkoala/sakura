@@ -3,6 +3,10 @@ name: pdf
 description: Turn markdown/HTML into a clean PDF whose page breaks never split a table, list, figure or heading-from-its-text
 ---
 
+For merging, splitting, page picks, rotating, compressing, OCR, unlocking and metadata stripping, `conv merge|split|pages|
+rotate|compress|ocr|unlock|strip X.pdf` does it locally (qpdf, ghostscript, ocrmypdf); `conv FILE --to pdf` for office files.
+Never send a PDF to a website for any of this.
+
 Produce PDFs where layout is respected across page breaks. Preferred engine: WeasyPrint (HTML/CSS, honours CSS
 fragmentation) or Typst (fast, no LaTeX). Install on demand.
 

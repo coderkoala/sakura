@@ -9,6 +9,9 @@ originals). Explain quality trade-offs (codecs, bitrates, colour spaces, mesh re
 
 ## Tools
 
+For the everyday jobs, `conv` already picks the right command: `conv FILE --to EXT`, `conv trim|audio|gif|thumbs|shrink VIDEO`,
+`conv compress|strip IMAGE`. Reach for raw ffmpeg/ImageMagick when the user needs a knob `conv` doesn't have. Never an online
+converter: the files stay here.
 Install on demand (ask me with `j`): ffmpeg imagemagick; IMAGE GENERATION via stable-diffusion.cpp at ~/.local/share/sd (see the `image` skill).
 Check `command -v` first; prefer apt, then `uv tool install`, then a release binary into ~/.local/bin.
 

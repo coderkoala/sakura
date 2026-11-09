@@ -28,6 +28,7 @@ Measured on one machine with an 8 GB GPU, driver Ornith 1.5 35B-A3B since 0.9.5 
 | `sakura-gpu` (40 checks), `torrent` (19 checks and a live daemon lifecycle), `dl` (12 checks, byte-range resume proven), `sakura-backup` (27 checks, a real restore each run) | `fmt`, `?watch`, `drive` against a real Google/Microsoft account (local remote only so far) |
 | `look` (OCR and the vision model), `ledger`, `schema`, `procwatch`, `dq`, `pa offer`, `pa cron`, `docpack`, `fleet`, `drive`, `tbl`, `logs`, workers in worktrees (`evals/abilities.py`, 60 checks) | `hear`, `say`, `clip`, `?pr`, `?review`, `?red`, `?try`, `?morning`, `pa mail` rules, `?decide`/`?why` (smoke-tested by hand) |
 | A trust boundary: fetched content scanned for injection and bannered as data, smuggling characters stripped, data-egress to un-named hosts gated for approval, the answer checked for exfil sinks (`evals/injection.py`, 25 checks) | Dual-LLM / quarantine split — one model still holds untrusted content and the tools; the egress gate is the compensating control |
+| The machine room: `ports`, `space`, `drift`, `when`, `sakura-notes`, `host:` memory; `conv` and `vid` (`evals/machineroom.py`, 57 checks; `vid` against a local server) | `vid` against a real site with a browser login; `conv ocr` (ocrmypdf wasn't on the eval machine); LibreOffice conversions beyond txt→pdf |
 
 ## Next: make what exists trustworthy
 
@@ -129,6 +130,30 @@ on legitimate plan turns (`hooks/claim_check.py`, covered in its selftest and `e
 
 Next, if the appetite is there: a real quarantine split (a content-only model with no tools feeding a
 privileged model that never sees raw untrusted text); egress accounting across non-shell tool paths.
+
+## The machine room, and the no-upload rule (2026-11-09 brainstorm)
+
+Two threads. First, the questions a senior colleague answers in one line that still took a chain of `ss`, `du`, `diff` and
+crontab-reading: all built the same day, model-free, 57 checks.
+1. **`ports`:** what's listening, who holds it (pid, user, unit, container), from `/proc` so it works everywhere; over ssh too.
+2. **`space`:** what's eating the disk by category with a verdict, and a `clean --go` that only ever touches what rebuilds itself. The guardian's disk finding now points here.
+3. **`drift`:** a file, the packages, the enabled units or the authorized keys across the fleet, only the differences.
+4. **`when`:** cron and OnCalendar in English with the next firings; `--timers`.
+5. **`host:` memory** (memory workflows item 5): a fact about one machine loads only there.
+6. **`sakura-notes`:** release notes from the commits since the last tag, so `sakura-release` has honest input.
+
+Second, the rule: **nothing of yours is uploaded to be converted.** The web is full of sites that take a PDF, a photo or a video
+to merge, compress, OCR, strip or convert it, and keep a copy. Every one of them runs ffmpeg, pandoc, qpdf, ghostscript,
+ImageMagick, LibreOffice or tesseract underneath. So:
+7. **`conv`:** those tools behind one command that picks the right one, never overwrites an input, asks for a PDF password on the terminal and passes it over a pipe, and strips EXIF/GPS/author before a file is shared. The agent is told never to suggest a website for any of it.
+8. **`vid`:** yt-dlp the way an archivist uses it — metadata, thumbnail, subtitles and the info.json kept, a download archive so a channel or playlist resumes and fetches only what's new, a browser's own login for private videos and never a password. For keeping your own past videos, and the people in them.
+
+Next along the same line, not built: **`conv subs VIDEO`** (subtitles from `hear`, burned in or as .srt, in the language spoken);
+**faces and places in your photo library**, locally (who's in this picture, every photo of her), with the embeddings never leaving;
+**upscaling and restoring** old video and scans with a local model; **`vid` on a schedule** (`pa job every sunday: vid archive …`
+already works; a `vid watch` that says when a channel has something new would be the one-liner); **`conv` for archives** (rar, 7z,
+old zips with broken names) and for **ebooks** (epub↔mobi↔pdf for a reader); a **print-to-PDF path for web pages** through the
+shared browser. Each needs a deterministic eval before it can be claimed.
 
 ## Not doing
 

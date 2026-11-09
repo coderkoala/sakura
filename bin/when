@@ -1,0 +1,422 @@
+#!/usr/bin/env python3
+"""when — when does this run? Cron and systemd OnCalendar in plain English, with the next firings in your local time. No model.
+
+  when "0 3 * * 1"                  At 03:00 every Monday — then the next 5 times it fires
+  when "*/15 9-17 * * 1-5"          Every 15 minutes, 09:00–17:59, Monday to Friday
+  when "@daily"                      cron's shorthands (@hourly, @daily, @weekly, @monthly, @yearly, @reboot)
+  when "Mon..Fri *-*-* 09:00:00"    a systemd OnCalendar expression (also daily, weekly, "*-*-01 02:30", "*:0/10")
+  when --timers                      this machine's systemd timers (system and user): next run, how long until, the unit
+  when FILE | when -                 every line of a crontab (file or stdin), explained
+  options: -n N (how many firings; default 5)   --now "2026-11-09 10:00" (compute from then; for tests)   --json
+The month and weekday fields of cron are OR'd when both are restricted, as cron itself does. Times are the TZ you're in
+(or TZ=... when). An expression it can't read says so, and points at `systemd-analyze calendar`.
+"""
+import calendar
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+
+DOW = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"]
+DOW_LONG = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+MON = ["", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+MON_LONG = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+SHORTHAND = {"@yearly": "0 0 1 1 *", "@annually": "0 0 1 1 *", "@monthly": "0 0 1 * *", "@weekly": "0 0 * * 0",
+             "@daily": "0 0 * * *", "@midnight": "0 0 * * *", "@hourly": "0 * * * *"}
+
+
+class Unreadable(Exception):
+    pass
+
+
+# ---------- cron ----------
+
+def cron_field(text, lo, hi, names=None):
+    """-> (set of ints, restricted?)"""
+    vals = set()
+    restricted = text != "*"
+    for part in text.split(","):
+        step = 1
+        if "/" in part:
+            part, s = part.split("/", 1)
+            if not s.isdigit() or int(s) == 0:
+                raise Unreadable(f"step {s!r}")
+            step = int(s)
+        if part == "*":
+            a, b = lo, hi
+        else:
+            def val(x):
+                x = x.lower()
+                if names and x in names:
+                    return names.index(x)
+                if not x.isdigit():
+                    raise Unreadable(f"{x!r} in {text!r}")
+                return int(x)
+            if "-" in part:
+                a, b = (val(x) for x in part.split("-", 1))
+            else:
+                a = val(part)
+                b = hi if "/" in text and step > 1 else a
+        if a < lo or b > hi or a > b:
+            raise Unreadable(f"{part!r} out of range {lo}-{hi}")
+        vals.update(range(a, b + 1, step))
+    if names is DOW:
+        vals = {0 if v == 7 else v for v in vals}  # cron: 7 is Sunday too
+    return vals, restricted
+
+
+def parse_cron(expr):
+    expr = expr.strip()
+    if expr in SHORTHAND:
+        expr = SHORTHAND[expr]
+    if expr == "@reboot":
+        return None
+    f = expr.split()
+    if len(f) != 5:
+        raise Unreadable("cron needs 5 fields: minute hour day month weekday")
+    minute, _ = cron_field(f[0], 0, 59)
+    hour, _ = cron_field(f[1], 0, 23)
+    dom, dom_r = cron_field(f[2], 1, 31)
+    month, _ = cron_field(f[3], 1, 12, MON)
+    dow, dow_r = cron_field(f[4], 0, 7, DOW)
+    return {"minute": sorted(minute), "hour": sorted(hour), "dom": dom, "dom_r": dom_r, "month": month, "dow": dow, "dow_r": dow_r, "fields": f}
+
+
+def cron_day_ok(c, d):
+    if d.month not in c["month"]:
+        return False
+    dom_ok, dow_ok = d.day in c["dom"], (d.weekday() + 1) % 7 in c["dow"]
+    if c["dom_r"] and c["dow_r"]:
+        return dom_ok or dow_ok
+    return dom_ok and dow_ok
+
+
+def cron_next(c, now, n):
+    out = []
+    t = (now + dt.timedelta(minutes=1)).replace(second=0, microsecond=0)
+    day = t.date()
+    for _ in range(366 * 6):
+        if cron_day_ok(c, day):
+            for h in c["hour"]:
+                for m in c["minute"]:
+                    cand = dt.datetime.combine(day, dt.time(h, m), tzinfo=t.tzinfo)
+                    if cand >= t:
+                        out.append(cand)
+                        if len(out) == n:
+                            return out
+        day += dt.timedelta(days=1)
+    return out
+
+
+def _list(items, fmt):
+    items = list(items)
+    if len(items) <= 1:
+        return fmt(items[0]) if items else ""
+    if len(items) == 2:
+        return f"{fmt(items[0])} and {fmt(items[1])}"
+    return ", ".join(fmt(i) for i in items[:-1]) + f" and {fmt(items[-1])}"
+
+
+def _range_or_list(vals, lo, hi, fmt):
+    vals = sorted(vals)
+    if vals == list(range(lo, hi + 1)):
+        return None
+    if len(vals) >= 3 and vals == list(range(vals[0], vals[-1] + 1)):
+        return f"{fmt(vals[0])} to {fmt(vals[-1])}"
+    return _list(vals, fmt)
+
+
+def ordinal(n):
+    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+def cron_english(c):
+    f = c["fields"]
+    mins, hours = c["minute"], c["hour"]
+    # time part
+    if f[0].startswith("*/") and f[1] == "*":
+        when = f"Every {f[0][2:]} minutes"
+    elif f[0] == "*" and f[1] == "*":
+        when = "Every minute"
+    elif f[0] == "*":
+        when = "Every minute of " + _range_or_list(hours, 0, 23, lambda h: f"{h:02d}:xx")
+    elif f[1] == "*":
+        when = f"At minute {_list(mins, str)} past every hour" if len(mins) > 1 or mins[0] else "At the top of every hour"
+    elif f[0].startswith("*/"):
+        when = f"Every {f[0][2:]} minutes, " + (f"{hours[0]:02d}:00–{hours[-1]:02d}:59" if len(hours) > 1 else f"during {hours[0]:02d}:xx")
+    elif len(mins) == 1 and len(hours) > 1 and f[1].startswith("*/"):
+        when = f"Every {f[1][2:]} hours at :{mins[0]:02d}"
+    else:
+        when = "At " + _list([f"{h:02d}:{m:02d}" for h in hours for m in mins][:8], str)
+    # day part
+    days = []
+    if c["dow_r"]:
+        if sorted(c["dow"]) == [1, 2, 3, 4, 5]:
+            days.append("Monday to Friday")
+        elif sorted(c["dow"]) == [0, 6]:
+            days.append("at weekends")
+        else:
+            days.append("every " + _list(sorted(c["dow"], key=lambda d: (d - 1) % 7), lambda d: DOW_LONG[d]))
+    if c["dom_r"]:
+        days.append("on the " + _list(sorted(c["dom"]), ordinal) + (" of every month" if f[3] == "*" else ""))
+    if c["dom_r"] and c["dow_r"]:
+        day = " or ".join(days)
+    elif days:
+        day = " ".join(days)
+    else:
+        day = "every day" if when.startswith("At") and f[1] != "*" else ""
+    month = ""
+    if f[3] != "*":
+        month = " in " + (_range_or_list(c["month"], 1, 12, lambda m: MON_LONG[m]) or "")
+    return re.sub(r"\s+", " ", f"{when} {day}{month}").strip()
+
+
+# ---------- systemd OnCalendar ----------
+
+SD_SHORT = {"minutely": "*-*-* *:*:00", "hourly": "*-*-* *:00:00", "daily": "*-*-* 00:00:00", "midnight": "*-*-* 00:00:00",
+            "weekly": "Mon *-*-* 00:00:00", "monthly": "*-*-01 00:00:00", "quarterly": "*-01,04,07,10-01 00:00:00",
+            "semiannually": "*-01,07-01 00:00:00", "yearly": "*-01-01 00:00:00", "annually": "*-01-01 00:00:00"}
+
+
+def sd_component(text, lo, hi):
+    """One calendar component (year, month, day, hour, minute, second) -> set, or None for any."""
+    if text == "*":
+        return None
+    vals = set()
+    for part in text.split(","):
+        step = 1
+        if "/" in part:
+            part, s = part.split("/", 1)
+            if not s.isdigit() or int(s) == 0:
+                raise Unreadable(f"step {s!r}")
+            step = int(s)
+        if ".." in part:
+            a, b = part.split("..", 1)
+            if not (a.isdigit() and b.isdigit()):
+                raise Unreadable(f"range {part!r}")
+            a, b = int(a), int(b)
+        elif part == "*":
+            a, b = lo, hi
+        elif part.isdigit():
+            a = int(part)
+            b = hi if step > 1 else a
+        else:
+            raise Unreadable(f"{part!r}")
+        if a < lo or b > hi:
+            raise Unreadable(f"{part!r} out of range {lo}-{hi}")
+        vals.update(range(a, b + 1, step))
+    return vals
+
+
+def parse_sd(expr):
+    expr = expr.strip()
+    low = expr.lower()
+    if low in SD_SHORT:
+        expr = SD_SHORT[low]
+    parts = expr.split()
+    dows = None
+    if parts and re.match(r"^[A-Za-z]", parts[0]):
+        dows = set()
+        for p in parts[0].split(","):
+            if ".." in p:
+                a, b = p.split("..", 1)
+                a, b = DOW.index(a[:3].lower()) if a[:3].lower() in DOW else -1, DOW.index(b[:3].lower()) if b[:3].lower() in DOW else -1
+                if a < 0 or b < 0:
+                    raise Unreadable(f"weekday {p!r}")
+                i = a
+                while True:
+                    dows.add(i)
+                    if i == b:
+                        break
+                    i = (i + 1) % 7
+            elif p[:3].lower() in DOW:
+                dows.add(DOW.index(p[:3].lower()))
+            else:
+                raise Unreadable(f"weekday {p!r}")
+        parts = parts[1:]
+    date, time_ = "*-*-*", "00:00:00"
+    if len(parts) == 2:
+        date, time_ = parts
+    elif len(parts) == 1:
+        if "-" in parts[0] and ":" not in parts[0]:
+            date = parts[0]
+        else:
+            time_ = parts[0]
+    elif len(parts) > 2:
+        raise Unreadable("too many parts")
+    d = date.split("-")
+    if len(d) == 2:
+        d = ["*", *d]
+    if len(d) != 3:
+        raise Unreadable(f"date {date!r}")
+    tm = time_.split(":")
+    if len(tm) == 2:
+        tm.append("00")
+    if len(tm) != 3:
+        raise Unreadable(f"time {time_!r}")
+    return {"dow": dows, "year": sd_component(d[0], 1970, 2199), "month": sd_component(d[1], 1, 12), "day": sd_component(d[2], 1, 31),
+            "hour": sd_component(tm[0], 0, 23), "minute": sd_component(tm[1], 0, 59), "second": sd_component(tm[2], 0, 59), "expr": expr}
+
+
+def sd_next(c, now, n):
+    out = []
+    t = (now + dt.timedelta(seconds=1)).replace(microsecond=0)
+    day = t.date()
+    hours = sorted(c["hour"]) if c["hour"] is not None else range(24)
+    minutes = sorted(c["minute"]) if c["minute"] is not None else range(60)
+    seconds = sorted(c["second"]) if c["second"] is not None else [0]
+    per_day = len(hours) * len(minutes) * len(seconds)
+    for _ in range(366 * 6):
+        ok = ((c["year"] is None or day.year in c["year"]) and (c["month"] is None or day.month in c["month"]) and
+              (c["day"] is None or day.day in c["day"]) and (c["dow"] is None or (day.weekday() + 1) % 7 in c["dow"]))
+        if ok:
+            if per_day > 20000:
+                raise Unreadable("too many firings a day to list")
+            for h in hours:
+                for m in minutes:
+                    for s in seconds:
+                        cand = dt.datetime.combine(day, dt.time(h, m, s), tzinfo=t.tzinfo)
+                        if cand >= t:
+                            out.append(cand)
+                            if len(out) == n:
+                                return out
+        day += dt.timedelta(days=1)
+    return out
+
+
+def sd_english(c):
+    bits = []
+    if c["minute"] is not None and c["hour"] is None and len(c["minute"]) > 1 and c["second"] in (None, {0}):
+        ms = sorted(c["minute"])
+        step = ms[1] - ms[0] if len(ms) > 1 and all(b - a == ms[1] - ms[0] for a, b in zip(ms, ms[1:])) else None
+        bits.append(f"Every {step} minutes" if step else "At minutes " + _list(ms, str) + " past every hour")
+    elif c["hour"] is None and c["minute"] is not None:
+        bits.append(f"At :{sorted(c['minute'])[0]:02d} past every hour")
+    elif c["hour"] is not None and c["minute"] is not None:
+        bits.append("At " + _list([f"{h:02d}:{m:02d}" for h in sorted(c["hour"]) for m in sorted(c["minute"])][:8], str))
+    elif c["hour"] is None and c["minute"] is None:
+        bits.append("Every minute" if c["second"] in (None, {0}) else "Every second")
+    if c["dow"] is not None:
+        d = sorted(c["dow"])
+        bits.append("Monday to Friday" if d == [1, 2, 3, 4, 5] else "at weekends" if d == [0, 6] else "every " + _list([DOW_LONG[i] for i in d], str))
+    if c["day"] is not None:
+        bits.append("on the " + _list(sorted(c["day"]), ordinal))
+    if c["dow"] is None and c["day"] is None and c["month"] is None:
+        bits.append("every day" if c["hour"] is not None else "")
+    if c["month"] is not None:
+        bits.append("in " + _list([MON_LONG[m] for m in sorted(c["month"])], str))
+    if c["year"] is not None:
+        bits.append("in " + _list(sorted(c["year"]), str))
+    return re.sub(r"\s+", " ", " ".join(b for b in bits if b)).replace("Every day", "every day").strip()
+
+
+# ---------- timers ----------
+
+def timers():
+    rows = []
+    for scope in (["--system"], ["--user"]):
+        try:
+            out = subprocess.run(["systemctl", *scope, "list-timers", "--all", "--no-legend", "--no-pager", "--output=json"],
+                                 capture_output=True, text=True, timeout=10).stdout
+            data = json.loads(out) if out.strip().startswith("[") else []
+        except (OSError, ValueError, subprocess.SubprocessError):
+            data = []
+        for t in data:
+            nxt = t.get("next")
+            when_ = dt.datetime.fromtimestamp(nxt / 1e6).strftime("%a %Y-%m-%d %H:%M") if nxt else "-"
+            left = ""
+            if nxt:
+                secs = nxt / 1e6 - dt.datetime.now().timestamp()
+                left = f"{secs / 86400:.1f} days" if secs > 86400 else f"{secs / 3600:.1f} h" if secs > 3600 else f"{secs / 60:.0f} min"
+            rows.append((scope[0][2:], t.get("unit", ""), when_, left, t.get("activates", "")))
+    return rows
+
+
+# ---------- main ----------
+
+def describe(expr, now, n):
+    """-> (english, [datetimes]) or raises Unreadable."""
+    e = expr.strip()
+    fields = e.split()
+    looks_cron = len(fields) == 5 and not any(":" in f or f.count("-") >= 2 or ".." in f for f in fields)
+    if e.startswith("@") or looks_cron:
+        c = parse_cron(e)
+        if c is None:
+            return "At every boot", []
+        return cron_english(c), cron_next(c, now, n)
+    c = parse_sd(e)
+    return sd_english(c), sd_next(c, now, n)
+
+
+def fmt(d):
+    return d.strftime("%a %Y-%m-%d %H:%M" + (":%S" if d.second else ""))
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0 if a else 2
+    n, now, as_json = 5, dt.datetime.now().astimezone(), "--json" in a
+    a = [x for x in a if x != "--json"]
+    if "-n" in a:
+        i = a.index("-n")
+        n = int(a[i + 1])
+        del a[i:i + 2]
+    if "--now" in a:
+        i = a.index("--now")
+        now = dt.datetime.fromisoformat(a[i + 1].replace(" ", "T"))
+        if now.tzinfo is None:
+            now = now.astimezone()
+        del a[i:i + 2]
+    if a == ["--timers"]:
+        rows = timers()
+        if as_json:
+            print(json.dumps([dict(zip(("scope", "unit", "next", "left", "activates"), r)) for r in rows], indent=1))
+        elif not rows:
+            print("no timers (or no systemd here)")
+        else:
+            widths = [max(len(str(r[i])) for r in rows + [("SCOPE", "TIMER", "NEXT", "LEFT", "RUNS")]) for i in range(5)]
+            for r in [("SCOPE", "TIMER", "NEXT", "LEFT", "RUNS"), *sorted(rows, key=lambda r: r[2])]:
+                print("  ".join(str(c).ljust(w) for c, w in zip(r, widths)).rstrip())
+        return 0
+    exprs = []
+    if len(a) == 1 and (a[0] == "-" or os.path.isfile(a[0])):
+        text = sys.stdin.read() if a[0] == "-" else open(a[0]).read()
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" in line.split()[0]:
+                continue
+            f = line.split()
+            if f[0].startswith("@"):
+                exprs.append((f[0], " ".join(f[1:])))
+            elif len(f) >= 6:
+                exprs.append((" ".join(f[:5]), " ".join(f[5:])))
+    else:
+        exprs.append((" ".join(a), ""))
+    results, rc = [], 0
+    for expr, cmd in exprs:
+        try:
+            english, nexts = describe(expr, now, n)
+            results.append({"expr": expr, "command": cmd, "english": english, "next": [d.isoformat() for d in nexts]})
+            if not as_json:
+                print(f"{expr}" + (f"    {cmd}" if cmd else ""))
+                print(f"  {english}")
+                for d in nexts:
+                    print(f"    {fmt(d)}")
+                if not nexts and english != "At every boot":
+                    print("    (never fires in the next six years)")
+        except Unreadable as e:
+            rc = 1
+            results.append({"expr": expr, "command": cmd, "error": str(e)})
+            if not as_json:
+                print(f"{expr}\n  can't read it ({e}); `systemd-analyze calendar {expr!r}` may", file=sys.stderr)
+    if as_json:
+        print(json.dumps(results, indent=1))
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

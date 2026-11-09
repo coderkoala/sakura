@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""sakura-notes — release notes drafted from the commits since the last tag, for sakura-release. No model.
+
+  sakura-notes                      notes for everything since the last tag, as Markdown, on stdout
+  sakura-notes v0.9.7               since that tag or commit
+  sakura-notes --to notes.md        write them to a file (what sakura-release takes)
+  sakura-notes --version 0.9.9      the heading's version (default: the VERSION file)
+Commits are grouped by their conventional prefix: feat → New, fix → Fixed, docs → Documented, test/eval → Proven, the rest →
+Also; `release:` commits are left out. The scope in `feat(logs):` becomes a bold lead. A footer counts the commits and the
+files changed, and names the evals the range touched, so the notes say what was proven, not only what was written.
+"""
+import os
+import re
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+GROUPS = [("feat", "New"), ("fix", "Fixed"), ("perf", "Faster"), ("docs", "Documented"), ("test", "Proven"), ("eval", "Proven"),
+          ("refactor", "Tidied"), ("chore", "Also"), ("build", "Also"), ("ci", "Also")]
+
+
+def git(*a, cwd=None):
+    return subprocess.run(["git", *a], cwd=cwd or ROOT, capture_output=True, text=True, check=False).stdout
+
+
+def last_tag(cwd):
+    return git("describe", "--tags", "--abbrev=0", cwd=cwd).strip()
+
+
+def commits(since, cwd):
+    rng = f"{since}..HEAD" if since else "HEAD"
+    out = git("log", "--no-merges", "--format=%H%x00%s%x00%b%x01", rng, cwd=cwd)
+    items = []
+    for rec in out.split("\x01"):
+        rec = rec.strip("\n")
+        if not rec.strip():
+            continue
+        sha, subject, body = (rec.split("\x00") + ["", ""])[:3]
+        items.append((sha.strip(), subject.strip(), body.strip()))
+    return items
+
+
+def classify(subject):
+    m = re.match(r"^(\w+)(?:\(([^)]+)\))?(!)?:\s*(.+)$", subject)
+    if not m:
+        return "Also", None, subject, False
+    kind, scope, bang, rest = m.groups()
+    kind = kind.lower()
+    if kind == "release":
+        return None, None, None, False
+    group = dict(GROUPS).get(kind, "Also")
+    return group, scope, rest, bool(bang)
+
+
+def main():
+    a = sys.argv[1:]
+    if a and a[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    cwd = os.environ.get("SAKURA_NOTES_REPO") or ROOT
+    to, version, since = None, None, None
+    while a:
+        x = a.pop(0)
+        if x == "--to":
+            to = a.pop(0)
+        elif x == "--version":
+            version = a.pop(0)
+        else:
+            since = x
+    if since is None:
+        since = last_tag(cwd) or None
+    if version is None:
+        try:
+            version = open(os.path.join(cwd, "VERSION")).read().strip()
+        except OSError:
+            version = ""
+    items = commits(since, cwd)
+    groups = {}
+    breaking = []
+    for sha, subject, body in items:
+        group, scope, rest, bang = classify(subject)
+        if group is None:
+            continue
+        line = (f"**{scope}:** " if scope else "") + rest[0].upper() + rest[1:]
+        groups.setdefault(group, []).append(line)
+        if bang or "BREAKING" in body:
+            breaking.append(line)
+    out = [f"# Sakura {version}".rstrip(), ""]
+    if since:
+        out.append(f"Since {since}: {len(items)} commits." if items else f"Nothing since {since}.")
+        out.append("")
+    if breaking:
+        out += ["## Breaking", *[f"- {l}" for l in breaking], ""]
+    for _, title in GROUPS:
+        if title in groups and not any(o == f"## {title}" for o in out):
+            out += [f"## {title}", *[f"- {l}" for l in groups[title]], ""]
+    files = git("diff", "--name-only", f"{since}..HEAD" if since else "HEAD", cwd=cwd).split()
+    evals = sorted({f for f in files if f.startswith("evals/") and f.endswith(".py") and f != "evals/__init__.py"})
+    tools = sorted({os.path.basename(f) for f in files if f.startswith("bin/")})
+    foot = [f"{len(files)} files changed"]
+    if tools:
+        foot.append("commands touched: " + ", ".join(f"`{t}`" for t in tools[:12]) + (" …" if len(tools) > 12 else ""))
+    if evals:
+        foot.append("evals touched: " + ", ".join(f"`{e}`" for e in evals))
+    out.append("_" + "; ".join(foot) + "._")
+    text = "\n".join(out).rstrip() + "\n"
+    if to:
+        open(to, "w").write(text)
+        print(f"wrote {to} ({len(items)} commits since {since or 'the start'})")
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

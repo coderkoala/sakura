@@ -141,7 +141,7 @@ def check_disks(findings, all_):
         days = days_to_full(d["mount"], d)
         line = f"{d['mount']}: {pct:.0f}% used, {human(d['avail'])} free" + (f", full in about {days:.0f} days at this rate" if days is not None else "")
         if pct >= DISK_WARN:
-            findings.append(("disk", f"{line}. Find what's big: `sudo -A du -xh --max-depth=2 {d['mount']} 2>/dev/null | sort -rh | head -20`"))
+            findings.append(("disk", f"{line}. `space` says what's big and what's safe to clear" + ("" if d["mount"] in ("/", "/home") else f"; for this mount: `space {d['mount']}`")))
         elif days is not None and days <= DISK_DAYS:
             findings.append(("disk", f"{line}."))
         else:

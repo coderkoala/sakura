@@ -32,6 +32,11 @@
 #   ?backup run NAME | prove NAME   backups on restic, proven by restoring a real file (sakura-backup --help)
 #   ?dl URL [--sha256 HEX]  resumable download in the background; dl watch, dl stop/resume ID
 #   torrent add "magnet:..."  |  torrent watch   downloads over transmission, notification when done
+#   ports [PORT|HOST]  what's listening and who holds it;  space [clean [--go]]  what's eating the disk, and the safe set to clear
+#   drift FILE|packages|units|sshkeys [HOST...]  how the machines differ;  when "0 3 * * 1"  a cron/OnCalendar line in English, next runs
+#   conv FILE --to EXT | merge|split|pages|rotate|compress|ocr|unlock|strip|trim|audio|gif   every conversion, locally, never a website
+#   vid URL | vid archive URL   your own videos kept with their metadata; a channel or playlist, resumable (vid status)
+#   sakura-notes [TAG]  release notes from the commits since the last tag (for sakura-release)
 #   sakura-status   one line for tmux's status bar: driver, night queue, offers, guardian
 #   ?go [request]  a session that doesn't stop to ask (sakura-trust on makes every ? like this)
 if command -v sakura-launch >/dev/null 2>&1; then

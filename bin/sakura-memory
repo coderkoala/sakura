@@ -5,6 +5,8 @@ Two stores, one fact per line, loaded into every new session as a frozen snapsho
   user   who the user is and how they want to work   (USER.md,   1200 chars)
   notes  machines, projects, lessons learned         (MEMORY.md, 2000 chars)
 A full store refuses the write and lists what's in it, so the agent has to decide what to drop.
+A fact that starts with "host:NAME " is about one machine and loads only there (the stores sync between machines):
+  sakura-memory add notes "host:eldayn staging is on port 8081"
 
   sakura-memory add <store> "fact"
   sakura-memory replace <store> "unique part of the old fact" "new fact"
@@ -126,6 +128,28 @@ def entries(text):
     return [l[2:].strip() for l in text.splitlines() if l.startswith("- ")]
 
 
+# A fact about one machine starts with "host:NAME " and loads only on that machine (the stores sync between them).
+HOST_PREFIX = re.compile(r"^host:([\w.-]+)\s+", re.I)
+
+
+def this_host():
+    name = os.environ.get("SAKURA_HOSTNAME")
+    if not name:
+        import socket
+        name = socket.gethostname()
+    return name.split(".")[0].lower()
+
+
+def host_of(item):
+    m = HOST_PREFIX.match(item)
+    return m.group(1).split(".")[0].lower() if m else None
+
+
+def for_this_host(items):
+    me = this_host()
+    return [i for i in items if host_of(i) in (None, me)]
+
+
 def render(items):
     return "".join(f"- {i}\n" for i in items)
 
@@ -133,7 +157,8 @@ def render(items):
 def listing(store, items):
     cap = STORES[store][1]
     used = len(render(items))
-    body = "\n".join(f"  - {i}" for i in items) or "  (empty)"
+    me = this_host()
+    body = "\n".join(f"  - {i}" + ("" if host_of(i) in (None, me) else "   (another machine's; not loaded here)") for i in items) or "  (empty)"
     return f"{store}: {used}/{cap} chars\n{body}"
 
 
@@ -266,8 +291,12 @@ def snapshot():
             continue
         if not items:
             continue
-        shown = [f"[withheld: {flagged(i)}. See it with: sakura-memory show {store}]" if flagged(i) else i for i in items]
-        parts.append(f"{store} ({len(render(items))}/{cap} chars)\n" + render(shown).rstrip())
+        here = for_this_host(items)
+        if not here:
+            continue
+        shown = [f"[withheld: {flagged(i)}. See it with: sakura-memory show {store}]" if flagged(i) else i for i in here]
+        elsewhere = len(items) - len(here)
+        parts.append(f"{store} ({len(render(items))}/{cap} chars" + (f"; {elsewhere} about other machines not shown" if elsewhere else "") + ")\n" + render(shown).rstrip())
     return "\n\n".join(parts)
 
 

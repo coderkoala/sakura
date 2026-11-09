@@ -79,6 +79,18 @@ prefix_rule(pattern=["git", "describe"], decision="allow", justification="read-o
 prefix_rule(pattern=["docker", "ps"], decision="allow", justification="read-only")
 prefix_rule(pattern=["docker", "images"], decision="allow", justification="read-only")
 prefix_rule(pattern=["docker", "logs"], decision="allow", justification="read-only")
+
+# The machine room: readers only (space clean --go, conv and vid write files, so they still go through the guard).
+prefix_rule(pattern=["ports"], decision="allow", justification="read-only")
+prefix_rule(pattern=["when"], decision="allow", justification="read-only")
+prefix_rule(pattern=["drift"], decision="allow", justification="read-only")
+prefix_rule(pattern=["space", "--json"], decision="allow", justification="read-only")
+prefix_rule(pattern=["conv", "--tools"], decision="allow", justification="read-only")
+prefix_rule(pattern=["vid", "status"], decision="allow", justification="read-only")
+prefix_rule(pattern=["vid", "log"], decision="allow", justification="read-only")
+prefix_rule(pattern=["vid", "list"], decision="allow", justification="read-only")
+prefix_rule(pattern=["vid", "info"], decision="allow", justification="read-only")
+prefix_rule(pattern=["sakura-notes"], decision="allow", justification="read-only")
 prefix_rule(pattern=["docker", "inspect"], decision="allow", justification="read-only")
 prefix_rule(pattern=["systemctl", "status"], decision="allow", justification="read-only")
 prefix_rule(pattern=["kubectl", "get"], decision="allow", justification="read-only")

@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""ports — what's listening on this machine (or another), and who holds it. No model, no root needed for your own processes.
+
+  ports                      every listening TCP and UDP socket: proto, address, port, pid, user, process, systemd unit or container
+  ports 8080                 who holds that port (and, with --conn, who's connected to it)
+  ports HOST [PORT]          the same on another machine, over ssh (python3 there is all it needs)
+  ports --conn               established connections, grouped by process, with how many peers each has
+  ports --json               machine-readable
+Read from /proc/net/{tcp,tcp6,udp,udp6} and /proc/*/fd, so it works where `ss` and `lsof` aren't installed. A socket whose
+owner it can't see (another user's, without root) shows pid "?" — `sudo -A ports` sees them all. The unit column comes from
+the process's cgroup: `nginx.service`, `user@1000: syncthing.service`, or `docker: <id>`, named via `docker ps` when present.
+"""
+import json
+import os
+import pwd
+import re
+import shlex
+import socket
+import subprocess
+import sys
+
+TCP_LISTEN = "0A"
+TCP_ESTABLISHED = "01"
+UDP_UNCONNECTED = "07"
+
+
+def parse_addr(hexaddr, v6):
+    ip, port = hexaddr.split(":")
+    port = int(port, 16)
+    if v6:
+        raw = bytes.fromhex(ip)
+        # /proc stores each 32-bit word little-endian
+        words = [raw[i:i + 4][::-1] for i in range(0, 16, 4)]
+        addr = socket.inet_ntop(socket.AF_INET6, b"".join(words))
+        if addr.startswith("::ffff:"):
+            addr = addr[7:]
+    else:
+        addr = socket.inet_ntop(socket.AF_INET, bytes.fromhex(ip)[::-1])
+    if addr in ("0.0.0.0", "::"):
+        addr = "*"
+    return addr, port
+
+
+def sockets():
+    """Every socket in /proc/net: {proto, state, local, lport, remote, rport, inode}."""
+    out = []
+    for name, v6, proto in (("tcp", False, "tcp"), ("tcp6", True, "tcp"), ("udp", False, "udp"), ("udp6", True, "udp")):
+        try:
+            lines = open(f"/proc/net/{name}").read().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            f = line.split()
+            if len(f) < 10:
+                continue
+            la, lp = parse_addr(f[1], v6)
+            ra, rp = parse_addr(f[2], v6)
+            out.append({"proto": proto, "state": f[3], "local": la, "lport": lp, "remote": ra, "rport": rp, "inode": f[9]})
+    return out
+
+
+def inode_owners():
+    """socket inode -> pid, for every process whose fds we may read."""
+    owners = {}
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            fds = os.listdir(f"/proc/{pid}/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                link = os.readlink(f"/proc/{pid}/fd/{fd}")
+            except OSError:
+                continue
+            if link.startswith("socket:["):
+                owners.setdefault(link[8:-1], int(pid))
+    return owners
+
+
+_docker_names = None
+
+
+def docker_name(cid):
+    global _docker_names
+    if _docker_names is None:
+        _docker_names = {}
+        try:
+            out = subprocess.run(["docker", "ps", "--no-trunc", "--format", "{{.ID}} {{.Names}}"], capture_output=True, text=True, timeout=5).stdout
+            for l in out.splitlines():
+                parts = l.split()
+                if len(parts) == 2:
+                    _docker_names[parts[0]] = parts[1]
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return _docker_names.get(cid, cid[:12])
+
+
+def unit_of(pid):
+    try:
+        cg = open(f"/proc/{pid}/cgroup").read()
+    except OSError:
+        return ""
+    m = re.search(r"docker[-/]([0-9a-f]{12,64})", cg)
+    if m:
+        return "docker: " + docker_name(m.group(1))
+    m = re.search(r"/user@(\d+)\.service/.*?/([^/\n]+\.(?:service|scope))\s*$", cg, re.M)
+    if m:
+        return f"user@{m.group(1)}: {m.group(2)}" if not m.group(2).startswith("app-") else f"user@{m.group(1)}: {m.group(2)}"
+    m = re.search(r"/([^/\n]+\.service)\s*$", cg, re.M)
+    if m and m.group(1) not in ("user@1000.service",):
+        return m.group(1)
+    m = re.search(r"/([^/\n]+\.scope)\s*$", cg, re.M)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def process(pid):
+    info = {"pid": pid, "user": "?", "process": "?", "cmd": "", "unit": ""}
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("Uid:"):
+                    uid = int(line.split()[1])
+                    try:
+                        info["user"] = pwd.getpwuid(uid).pw_name
+                    except KeyError:
+                        info["user"] = str(uid)
+                elif line.startswith("Name:"):
+                    info["process"] = line.split(None, 1)[1].strip()
+        cmd = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+        joined = " ".join(shlex.quote(c.decode(errors="replace")) for c in cmd if c)
+        info["cmd"] = re.sub(r"\s+", " ", joined)[:120]
+    except OSError:
+        pass
+    info["unit"] = unit_of(pid)
+    return info
+
+
+def listening(port=None):
+    owners = inode_owners()
+    rows = []
+    for s in sockets():
+        is_listen = (s["proto"] == "tcp" and s["state"] == TCP_LISTEN) or (s["proto"] == "udp" and s["state"] == UDP_UNCONNECTED and s["rport"] == 0)
+        if not is_listen or (port is not None and s["lport"] != port):
+            continue
+        pid = owners.get(s["inode"])
+        p = process(pid) if pid else {"pid": "?", "user": "?", "process": "?", "cmd": "", "unit": ""}
+        rows.append({"proto": s["proto"], "addr": s["local"], "port": s["lport"], **p})
+    rows.sort(key=lambda r: (r["port"], r["proto"], r["addr"]))
+    # the same process bound on v4 and v6 to the same port is one line
+    seen, merged = {}, []
+    for r in rows:
+        k = (r["proto"], r["port"], r["pid"])
+        if k in seen and {seen[k]["addr"], r["addr"]} <= {"*", "0.0.0.0", "::"}:
+            continue
+        seen[k] = r
+        merged.append(r)
+    return merged
+
+
+def connections(port=None):
+    owners = inode_owners()
+    groups = {}
+    for s in sockets():
+        if s["proto"] != "tcp" or s["state"] != TCP_ESTABLISHED:
+            continue
+        if port is not None and port not in (s["lport"], s["rport"]):
+            continue
+        pid = owners.get(s["inode"])
+        p = process(pid) if pid else {"pid": "?", "user": "?", "process": "?", "cmd": "", "unit": ""}
+        g = groups.setdefault(p["pid"], {"pid": p["pid"], "process": p["process"], "user": p["user"], "unit": p["unit"], "ports": set(), "peers": set(), "n": 0})
+        g["ports"].add(s["lport"])
+        g["peers"].add(f"{s['remote']}:{s['rport']}")
+        g["n"] += 1
+    rows = []
+    for g in groups.values():
+        ports_ = sorted(g.pop("ports"))
+        g["port"] = str(ports_[0]) if len(ports_) == 1 else f"{len(ports_)} local ports"
+        peers = sorted(g["peers"])
+        g["peers"] = ", ".join(peers[:3]) + (f" +{len(peers) - 3} more" if len(peers) > 3 else "")
+        rows.append(g)
+    rows.sort(key=lambda r: -r["n"])
+    return rows
+
+
+def table(rows, cols):
+    if not rows:
+        return ""
+    widths = [max(len(c), *(len(str(r.get(c, ""))) for r in rows)) for c in cols]
+    lines = ["  ".join(c.upper().ljust(w) for c, w in zip(cols, widths)).rstrip()]
+    for r in rows:
+        lines.append("  ".join(str(r.get(c, "")).ljust(w) for c, w in zip(cols, widths)).rstrip())
+    return "\n".join(lines)
+
+
+def remote(host, args):
+    me = open(os.path.realpath(__file__), "rb").read()
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, "python3 - " + " ".join(shlex.quote(a) for a in args)]
+    r = subprocess.run(cmd, input=me, capture_output=True, timeout=60)
+    sys.stdout.write(r.stdout.decode(errors="replace"))
+    if r.returncode:
+        sys.stderr.write(r.stderr.decode(errors="replace"))
+    return r.returncode
+
+
+def main():
+    a = sys.argv[1:]
+    if a and a[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    as_json = "--json" in a
+    conn = "--conn" in a
+    a = [x for x in a if x not in ("--json", "--conn")]
+    host, port = None, None
+    for x in a:
+        if x.isdigit():
+            port = int(x)
+        elif host is None:
+            host = x
+        else:
+            print(f"ports: what's {x!r}? (a host, a port, --conn, --json)", file=sys.stderr)
+            return 2
+    if host:
+        return remote(host, [str(port)] * (port is not None) + ["--json"] * as_json + ["--conn"] * conn)
+    if conn:
+        rows = connections(port)
+        if as_json:
+            print(json.dumps(rows, indent=1))
+        elif rows:
+            print(table(rows, ["port", "pid", "user", "process", "unit", "n", "peers"]))
+        else:
+            print("no established connections" + (f" on port {port}" if port else ""))
+        return 0
+    rows = listening(port)
+    if as_json:
+        print(json.dumps(rows, indent=1))
+        return 0
+    if not rows:
+        if port is not None:
+            print(f"nothing listens on port {port}")
+            c = connections(port)
+            if c:
+                print(table(c, ["pid", "process", "unit", "n", "peers"]))
+        else:
+            print("nothing is listening (that you can see; try sudo -A ports)")
+        return 1 if port is not None else 0
+    print(table(rows, ["proto", "addr", "port", "pid", "user", "process", "unit", "cmd"]))
+    if any(r["pid"] == "?" for r in rows) and os.geteuid() != 0:
+        print("\n(? = another user's process; sudo -A ports shows it)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
