@@ -28,6 +28,17 @@ def main(argv):
     if not want:
         print(__doc__.strip())
         return 2
+    # Sakura's own toolkit first, with no model: if a command's manual answers the ask, say so before anything else.
+    try:
+        what = subprocess.run([os.path.join(os.path.dirname(os.path.realpath(__file__)), "sakura-what"), want, "--json"], capture_output=True, text=True, timeout=10)
+        top = json.loads(what.stdout or "[]")
+        if top and top[0]["score"] >= 6:
+            print(f"Sakura has this: {top[0]['command']} — {top[0]['about'].split(' — ', 1)[-1][:100]}")
+            if top[0].get("example"):
+                print(f"  e.g. {top[0]['example'][:120]}")
+            print("  (sakura-what for more; the model's answer follows)")
+    except Exception:
+        pass
     have = [t for t in ("rg", "fd", "fzf", "jq", "yq", "docker", "systemctl", "journalctl", "gh", "git", "python3", "uv", "node", "php", "logrotate", "cron", "tmux", "rsync", "ssh", "dq", "tbl", "logs", "pa", "fleet", "procwatch") if shutil.which(t)]
     osname = subprocess.run("bash -c '. /etc/os-release && echo $PRETTY_NAME'", shell=True, capture_output=True, text=True).stdout.strip()
     brief = "\n".join([

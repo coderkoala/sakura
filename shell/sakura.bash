@@ -42,11 +42,13 @@
 #   money import bank.csv | month | where "KFC" | rule "KFC" expenses:food   statements into plain-text accounting (hledger)
 #   dupes DIR... [--link|--rm --go]  the same file by content, across drives;  shelve DIR --into LIB [--go]  photos/videos into YEAR/YEAR-MM by date taken
 #   sakura-doctor [--fix]  is this install whole: every command, hook and config checked, what's missing
+#   ?what [words]   which command does this? (no model; alone: everything, by situation);  ?docs <question>  your docs packs and documents
+#   ?otp NAME   a 2FA code from pass;  vault get NAME  the password onto the clipboard;  vault import bitwarden export.json
 #   sakura-notes [TAG]  release notes from the commits since the last tag (for sakura-release)
 #   sakura-status   one line for tmux's status bar: driver, night queue, offers, guardian
 #   ?go [request]  a session that doesn't stop to ask (sakura-trust on makes every ? like this)
 if command -v sakura-launch >/dev/null 2>&1; then
-    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' '?pr' '?review' '?try' '?hear' '?morning' '?red' '?decide' '?why' '?setup' '?on' '?explain' '?how' '?watch' '?fmt' '?gpu' '?drive' '?dl' '?backup' 2>/dev/null
+    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' '?pr' '?review' '?try' '?hear' '?morning' '?red' '?decide' '?why' '?setup' '?on' '?explain' '?how' '?what' '?docs' '?otp' '?watch' '?fmt' '?gpu' '?drive' '?dl' '?backup' 2>/dev/null
     alias '?'='sakura-launch'
     alias '?fix'='sakura-fix --shell $$'
     alias '?undo'='sakura-undo'
@@ -66,6 +68,9 @@ if command -v sakura-launch >/dev/null 2>&1; then
     alias '?on'='sakura-on'
     alias '?explain'='sakura-explain'
     alias '?how'='sakura-how'
+    alias '?what'='sakura-what'
+    alias '?docs'='rag search'
+    alias '?otp'='vault otp'
     alias '?watch'='sakura-watch'
     alias '?fmt'='fmt'
     alias '?gpu'='sakura-gpu'

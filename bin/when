@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""when — when does this run? Cron and systemd OnCalendar in plain English, with the next firings in your local time. No model.
+"""when — when does this run? A cron line or a systemd OnCalendar expression in plain English, with the next firings in your local time. No model.
 
   when "0 3 * * 1"                  At 03:00 every Monday — then the next 5 times it fires
   when "*/15 9-17 * * 1-5"          Every 15 minutes, 09:00–17:59, Monday to Friday

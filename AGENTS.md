@@ -2,6 +2,10 @@
 
 How to work is in Sakura's base instructions. This file is the reference for this machine's tools.
 
+## Finding the command
+
+`sakura-what "merge two pdfs"` names the command for any ask from the manuals, with no model; `sakura-what` alone is everything by situation. Asked "can you…" or "how do I…", run it before answering from memory. Users forget commands; this is how they don't have to.
+
 ## Web knowledge (shell commands; they never need approval)
 
 - `wikipedia "<topic>"` — Wikipedia summary + URL. The primary source; never CAPTCHA-blocked.
@@ -124,6 +128,10 @@ CHECK
 - `drift FILE|packages|units|sshkeys [HOST...]` how the machines differ, differences only, a diff for a file.
 - `when "0 3 * * 1"` / `when "Mon..Fri 09:00"` a schedule in English with its next firings; `when --timers` every systemd timer. Never read a cron line in your head.
 - `sakura-doctor` after a dotfiles sync or on a new box: is the install whole (every command, hook, config), what's missing; `--fix` relinks.
+
+## Passwords and 2FA
+
+`vault otp NAME` prints the current 2FA code; `vault get NAME` puts a password on the clipboard (nothing printed; `--show` only when the user asks to see it); `vault list|find`; `vault import bitwarden export.json`. Never ask the user to type a secret into the chat: point them at `vault add NAME` (they type it at pass's own prompt). Never print, log or remember a password or seed; a 6-digit code is fine.
 
 ## Files and video stay here
 

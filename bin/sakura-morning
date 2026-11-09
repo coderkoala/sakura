@@ -16,6 +16,10 @@ if command -v sakura-guardian >/dev/null 2>&1; then
     out="$(sakura-guardian 2>/dev/null)"
     case "$out" in "nothing to worry about") echo "${dim}guardian: nothing to worry about${off}" ;; *) echo "$out" ;; esac
 fi
+if command -v sakura-doctor >/dev/null 2>&1; then
+    doc="$(sakura-doctor --quick 2>/dev/null | grep -E '^(FAIL|WARN)' | head -4)"
+    [ -n "$doc" ] && printf '%s\n' "${bold}install:${off}" "$doc" "  ${dim}(sakura-doctor for the rest; --fix relinks)${off}"
+fi
 if command -v sakura-tonight >/dev/null 2>&1; then
     rep="$(sakura-tonight report 2>/dev/null)"
     if [ -n "$rep" ] && [ "$(echo "$rep" | head -1 | grep -o '20[0-9-]*')" = "$(date -d yesterday +%F 2>/dev/null)" -o "$(echo "$rep" | head -1 | grep -o '20[0-9-]*')" = "$(date +%F)" ]; then

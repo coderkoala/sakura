@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""sakura-what — which command does this? Ask in your own words; the answer comes from every tool's own manual, with no model.
+
+  sakura-what "merge two pdfs"           the commands that do it, best first, each with the line of its manual that matched
+  sakura-what                            what Sakura can do, grouped by situation (from AGENTS.md), one line per command
+  sakura-what --keys                     the ? keys (the header of shell/sakura.bash)
+  sakura-what TOOL                       that tool's manual (same as TOOL --help)
+  --json                                 for other tools (sakura-how asks here first, before it asks the model)
+It reads bin/*'s headers at run time, so a new command is findable the moment it exists. The `?what` key runs it.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+BIN = os.path.join(ROOT, "bin")
+# words people say → words the manuals use. Both sides are matched, so this only adds reach.
+SYNONYMS = {
+    "pdf": ["conv", "merge", "split", "redact", "sign", "pages"], "pdfs": ["conv", "pdf"], "convert": ["conv", "--to"], "conversion": ["conv"],
+    "merge": ["conv", "merge"], "combine": ["merge", "conv"], "join": ["merge"], "compress": ["compress", "shrink", "conv"], "smaller": ["compress", "shrink"],
+    "ocr": ["ocr", "conv", "look", "text"], "scan": ["ocr", "look", "restore"], "scanned": ["ocr"], "password": ["vault", "unlock", "pass"],
+    "passwords": ["vault", "pass"], "2fa": ["vault", "otp", "totp"], "totp": ["vault", "otp"], "code": ["otp", "vault"], "bitwarden": ["vault", "import"],
+    "secret": ["vault"], "login": ["vault", "cookies"], "disk": ["space", "disk"], "full": ["space", "disk"], "storage": ["space"], "big": ["space", "biggest"],
+    "eating": ["space"], "clean": ["space", "clean", "strip"], "cleanup": ["space", "dupes"], "port": ["ports"], "listening": ["ports"], "listen": ["ports"],
+    "socket": ["ports"], "cron": ["when", "pa", "crontab"], "crontab": ["when"], "timer": ["when", "pa"], "schedule": ["when", "pa", "remind"], "schedules": ["when", "pa"],
+    "remind": ["pa", "remind"], "reminder": ["pa", "remind"], "tomorrow": ["pa", "remind"], "every": ["pa", "when"], "duplicate": ["dupes"], "duplicates": ["dupes"], "dupes": ["dupes"],
+    "same": ["dupes", "drift"], "copies": ["dupes"], "photo": ["shelve", "faces", "look", "restore", "conv"], "photos": ["shelve", "faces", "dupes", "restore"],
+    "picture": ["look", "faces", "restore"], "pictures": ["shelve", "faces"], "face": ["faces"], "who": ["faces", "ports"], "sort": ["shelve", "tbl"],
+    "organize": ["shelve"], "organise": ["shelve"], "date": ["shelve", "when", "live"], "year": ["shelve"], "video": ["vid", "conv", "restore"], "videos": ["vid", "shelve"],
+    "youtube": ["vid"], "channel": ["vid"], "playlist": ["vid"], "subtitles": ["subs", "conv"], "subtitle": ["subs"], "transcribe": ["hear", "subs"],
+    "speech": ["hear", "say", "subs"], "voice": ["hear", "say"], "speak": ["say"], "translate": ["translate"], "nepali": ["translate", "subs"], "hindi": ["translate"],
+    "upscale": ["restore"], "sharpen": ["restore"], "blurry": ["restore"], "old": ["restore", "shelve"], "restore": ["restore", "sakura-backup", "undo"],
+    "backup": ["sakura-backup"], "backups": ["sakura-backup", "sakura-guardian"], "undo": ["sakura-undo"], "revert": ["sakura-undo"], "download": ["dl", "vid", "torrent"],
+    "downloads": ["dl", "space"], "magnet": ["torrent"], "torrent": ["torrent"], "email": ["himalaya", "pa", "sakura-mail-setup"], "mail": ["himalaya", "pa"],
+    "inbox": ["himalaya", "pa"], "server": ["logs", "fleet", "drift", "sakura-on", "ports"], "servers": ["fleet", "drift", "logs"], "machines": ["fleet", "drift"],
+    "ssh": ["sakura-on", "logs", "fleet", "drift"], "logs": ["logs"], "errors": ["logs", "sakura-fix"], "error": ["sakura-fix", "logs", "sakura-explain"],
+    "failed": ["sakura-fix", "logs"], "broke": ["sakura-fix", "sakura-doctor"], "broken": ["sakura-doctor", "sakura-fix"], "fix": ["sakura-fix", "sakura-doctor"],
+    "differ": ["drift"], "difference": ["drift"], "config": ["drift", "sakura-doctor"], "gpu": ["sakura-gpu"], "vram": ["sakura-gpu"], "model": ["sakura-model", "consult"],
+    "remember": ["sakura-memory", "sakura-decide"], "forget": ["sakura-memory"], "decided": ["sakura-decide"], "why": ["sakura-decide"], "what did": ["sakura-recap"],
+    "yesterday": ["sakura-recap"], "search": ["rag", "sakura-recall", "web_search", "sakura-what"], "documents": ["rag", "docpack"], "docs": ["docpack", "rag"],
+    "notes": ["sakura-memory", "hear"], "receipt": ["ledger"], "receipts": ["ledger"], "bank": ["money"], "statement": ["money"], "spend": ["money"],
+    "spent": ["money"], "budget": ["money"], "money": ["money", "ledger"], "table": ["tbl"], "csv": ["dq", "tbl", "money"], "sql": ["dq"], "query": ["dq", "rag"],
+    "clipboard": ["clip"], "screen": ["look", "sakura-explain"], "screenshot": ["look"], "image": ["look", "conv", "restore"], "weather": ["live"], "news": ["live"],
+    "price": ["live"], "rate": ["live"], "wikipedia": ["wikipedia"], "web": ["web_search", "fetch_url", "sakura-browser"], "page": ["fetch_url", "conv", "sakura-browser"],
+    "website": ["fetch_url", "sakura-browser", "conv"], "browser": ["sakura-browser"], "night": ["sakura-tonight"], "tonight": ["sakura-tonight"], "later": ["sakura-tonight", "pa"],
+    "tour": ["sakura-tour"], "codebase": ["sakura-tour"], "pr": ["sakura-pr", "sakura-review"], "review": ["sakura-review"], "test": ["sakura-red", "sakura-try"],
+    "try": ["sakura-try"], "format": ["fmt", "conv"], "lint": ["fmt"], "drive": ["drive"], "dropbox": ["drive"], "google": ["drive"], "phone": ["pa", "notify"],
+    "notify": ["notify", "pa"], "install": ["sakura-setup", "sakura-doctor", "restore"], "new machine": ["sakura-setup"], "setup": ["sakura-setup"],
+    "health": ["sakura-guardian", "sakura-doctor"], "wrong": ["sakura-guardian", "sakura-doctor"], "release": ["sakura-release", "sakura-notes"],
+    "zip": ["conv", "extract"], "unzip": ["conv", "extract"], "archive": ["conv", "vid", "extract"], "gif": ["conv"], "audio": ["conv", "hear"], "mp3": ["conv"],
+    "sign": ["conv", "sign"], "signature": ["conv", "sign"], "form": ["conv", "fill"], "fill": ["conv", "fill"], "metadata": ["conv", "strip"], "exif": ["strip", "shelve"],
+    "location": ["strip", "conv"], "keep": ["sakura-tool", "vid"], "tool": ["sakura-tool", "sakura-teach"], "teach": ["sakura-teach"], "learn": ["sakura-learn"],
+    "explain": ["sakura-explain", "sakura-learn", "when"], "how": ["sakura-how", "sakura-what"], "which": ["sakura-what"], "command": ["sakura-what", "sakura-how"],
+}
+NOUNS = {"photo", "photos", "picture", "pictures", "video", "videos", "image", "images", "file", "files", "pdf", "pdfs", "page", "web", "server", "servers", "machines", "code", "line", "docs", "documents", "notes", "csv", "mail", "email"}
+STOP = {"a", "an", "the", "my", "me", "i", "to", "of", "in", "on", "for", "and", "or", "is", "it", "this", "that", "these", "two", "some", "with", "from", "into", "do", "can", "you", "want", "need", "please", "how", "what", "be", "up"}
+
+
+def header(path):
+    """The manual at the top of a tool: a Python docstring or the leading # comment block."""
+    try:
+        lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
+    except OSError:
+        return []
+    out = []
+    if len(lines) > 1 and lines[1].startswith('"""'):
+        body = lines[1][3:]
+        if body.rstrip().endswith('"""'):
+            return [body.rstrip()[:-3].rstrip()]
+        out.append(body)
+        for l in lines[2:]:
+            if '"""' in l:
+                out.append(l.split('"""')[0])
+                break
+            out.append(l)
+    else:
+        for l in lines[1:]:
+            if l.startswith("#"):
+                out.append(l.lstrip("#").strip())
+            elif l.strip() and not l.startswith("#!"):
+                break
+    return [l.rstrip() for l in out if l.strip()]
+
+
+def tools():
+    for n in sorted(os.listdir(BIN)):
+        p = os.path.join(BIN, n)
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            h = header(p)
+            if h:
+                yield n, h
+
+
+def words(s):
+    return [w for w in re.findall(r"[a-z0-9?.+-]+", s.lower()) if w not in STOP]
+
+
+def score(query, name, manual):
+    q = words(query)
+    # a synonym's first entry is the primary tool for that word and counts nearly as much as the word itself
+    weights = {w: 1.0 for w in q}
+    for w in q:
+        for key in (w, w[:-1] if w.endswith("s") else None):
+            noun = (key or "") in NOUNS  # a thing can belong to many tools; the verb says which
+            for i, x in enumerate(SYNONYMS.get(key or "", [])):
+                weights[x.lower()] = max(weights.get(x.lower(), 0), 0.5 if noun else 0.9 if i == 0 else 0.5)
+    expanded = set(weights)
+    first = manual[0].lower()
+    text = "\n".join(manual).lower()
+    s = 0.0
+    name_hit = 0.0  # the name counts once, by the strongest word, so a synonym can't double a direct hit
+    for w in expanded:
+        weight = weights[w]
+        if w == name or w == name.replace("sakura-", ""):
+            name_hit = max(name_hit, 6 * weight)
+        elif w in name:
+            name_hit = max(name_hit, 3 * weight)
+        if re.search(rf"(?<![a-z0-9-]){re.escape(w)}", first):
+            s += 2 * weight
+        if re.search(rf"(?<![a-z0-9-]){re.escape(w)}", text):
+            s += 1 * weight
+    s += name_hit
+    # the example line that matches most
+    best, best_n = manual[0], -1
+    for l in manual[1:]:
+        ll = l.lower()
+        n = sum(1 for w in expanded if re.search(rf"(?<![a-z0-9-]){re.escape(w)}", ll))
+        if n > best_n and l.strip().startswith(name) or (n > best_n and ll.lstrip().startswith("  ")):
+            best, best_n = l.strip(), n
+    return s, best
+
+
+def cheat_sheet():
+    """Sections of AGENTS.md → the commands each names, with each command's first manual line."""
+    firsts = {n: h[0] for n, h in tools()}
+    try:
+        text = open(os.path.join(ROOT, "AGENTS.md"), encoding="utf-8").read()
+    except OSError:
+        text = ""
+    sections = re.split(r"^## ", text, flags=re.M)[1:]
+    seen = set()
+    out = []
+    for sec in sections:
+        title, body = sec.split("\n", 1) if "\n" in sec else (sec, "")
+        names = []
+        for m in re.finditer(r"`([a-z][\w-]*)", body):
+            n = m.group(1)
+            if n in firsts and n not in names and n not in seen:
+                names.append(n)
+        if names:
+            out.append(f"\n{title.strip()}")
+            for n in names:
+                seen.add(n)
+                out.append(f"  {n:<20} {firsts[n].split(' — ', 1)[-1][:100]}")
+    rest = [n for n in firsts if n not in seen]
+    if rest:
+        out.append("\nAlso")
+        for n in rest:
+            out.append(f"  {n:<20} {firsts[n].split(' — ', 1)[-1][:100]}")
+    return "\n".join(out).lstrip("\n")
+
+
+def keys():
+    try:
+        lines = open(os.path.join(ROOT, "shell", "sakura.bash"), encoding="utf-8").read().splitlines()
+    except OSError:
+        return ""
+    return "\n".join(l.lstrip("# ").rstrip() for l in lines[1:] if l.startswith("#   "))
+
+
+def main():
+    a = sys.argv[1:]
+    if a and a[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    as_json = "--json" in a
+    a = [x for x in a if x != "--json"]
+    if a == ["--keys"]:
+        print(keys())
+        return 0
+    if not a:
+        print(cheat_sheet())
+        print("\nAsk in words: sakura-what \"merge two pdfs\"   ·   the ? keys: sakura-what --keys")
+        return 0
+    query = " ".join(a)
+    if len(a) == 1 and os.path.isfile(os.path.join(BIN, a[0])):
+        print("\n".join(header(os.path.join(BIN, a[0]))))
+        return 0
+    ranked = []
+    for n, h in tools():
+        s, line = score(query, n, h)
+        if s > 0:
+            ranked.append((s, n, h[0], line))
+    ranked.sort(key=lambda r: -r[0])
+    top = ranked[:5]
+    if as_json:
+        print(json.dumps([{"command": n, "score": round(s, 1), "about": first, "example": line} for s, n, first, line in top], indent=1))
+        return 0
+    if not top:
+        print(f"nothing in the manuals matches “{query}”. `sakura-what` alone lists everything; `sakura-how {query}` asks the model.")
+        return 1
+    for s, n, first, line in top:
+        about = first.split(" — ", 1)[-1] if " — " in first else first
+        print(f"{n:<16} {about[:110]}")
+        if line and not line.startswith(n + " —") and line != first:
+            print(f"{'':16} e.g. {line[:120]}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -13,6 +13,7 @@ import argparse
 import base64
 import json
 import os
+import shutil
 import socket
 import struct
 import subprocess
@@ -1117,6 +1118,183 @@ def money(tmp):
     }
 
 
+def what(tmp):
+    w = os.path.join(BIN, "sakura-what")
+    asks = {
+        "merge two pdfs": "conv",
+        "what is eating my disk": "space",
+        "who is in this photo": "faces",
+        "2fa code for github": "vault",
+        "remind me tomorrow at 10": "pa",
+        "download this youtube video for keeps": "vid",
+        "find duplicate photos": "dupes",
+        "what's listening on port 8080": "ports",
+        "import my bitwarden passwords": "vault",
+        "my server logs errors": "logs",
+        "what did you do yesterday": "sakura-recap",
+        "turn a docx into pdf": "conv",
+        "sort my photos by year": "shelve",
+        "explain this cron line": "when",
+        "is anything wrong with this box": "sakura-guardian",
+    }
+    hits, misses = 0, []
+    for ask, want in asks.items():
+        top = json.loads(run([w, ask, "--json"]).stdout or "[]")
+        if top and top[0]["command"] == want:
+            hits += 1
+        else:
+            misses.append(
+                f"{ask!r} → {top[0]['command'] if top else 'nothing'} (wanted {want})"
+            )
+    sheet = run([w]).stdout
+    keys = run([w, "--keys"]).stdout
+    manual = run([w, "conv"]).stdout
+    nothing = run([w, "flibbertigibbet zorp"])
+    if misses:
+        print("   misses: " + "; ".join(misses))
+    return {
+        "plain asks land on the right command (all 15)": hits == len(asks),
+        "the cheat sheet groups every command by AGENTS.md section, no stray quotes": "The machine room"
+        in sheet
+        and "  space " in sheet
+        and '"""' not in sheet
+        and "Files and video" in sheet,
+        "--keys prints the ? keys": "?fix" in keys and "?what" in keys,
+        "a tool name prints its manual": manual.startswith("conv —"),
+        "nonsense says so and exits 1": nothing.returncode == 1
+        and "nothing in the manuals" in nothing.stdout,
+    }
+
+
+def vault(tmp):
+    if not (shutil.which("pass") and shutil.which("gpg") and shutil.which("oathtool")):
+        return {"vault (pass, gpg or oathtool missing)": False}
+    env = {
+        "GNUPGHOME": os.path.join(tmp, "gnupg"),
+        "PASSWORD_STORE_DIR": os.path.join(tmp, "store"),
+        "DISPLAY": "",
+        "WAYLAND_DISPLAY": "",
+    }
+    os.makedirs(env["GNUPGHOME"], mode=0o700)
+    subprocess.run(
+        [
+            "gpg",
+            "--batch",
+            "--quiet",
+            "--pinentry-mode",
+            "loopback",
+            "--passphrase",
+            "",
+            "--quick-generate-key",
+            "Eval <eval@test>",
+            "rsa2048",
+            "sign,encr",
+            "0",
+        ],
+        env={**os.environ, **env},
+        capture_output=True,
+        check=True,
+    )
+    key = [
+        l.split(":")[4]
+        for l in subprocess.run(
+            ["gpg", "--list-secret-keys", "--with-colons"],
+            env={**os.environ, **env},
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        if l.startswith("sec")
+    ][0]
+    v = os.path.join(BIN, "vault")
+    init = run([v, "init", key], env)
+    export = os.path.join(tmp, "bw.json")
+    open(export, "w").write(
+        json.dumps(
+            {
+                "encrypted": False,
+                "folders": [{"id": "f1", "name": "Work"}],
+                "items": [
+                    {
+                        "type": 1,
+                        "folderId": "f1",
+                        "name": "GitHub",
+                        "notes": "work",
+                        "login": {
+                            "username": "kai",
+                            "password": "hunter2-Xy!",
+                            "totp": "JBSWY3DPEHPK3PXP",
+                            "uris": [{"uri": "https://github.com"}],
+                        },
+                    },
+                    {
+                        "type": 1,
+                        "folderId": None,
+                        "name": "Router",
+                        "login": {
+                            "username": "admin",
+                            "password": "r0uter",
+                            "totp": "otpauth://totp/Router:admin?secret=GEZDGNBVGY3TQOJQ&issuer=Router",
+                        },
+                    },
+                    {"type": 2, "folderId": "f1", "name": "Wifi", "notes": "ssid home"},
+                    {"type": 4, "name": "Identity", "identity": {"firstName": "K"}},
+                ],
+            }
+        )
+    )
+    dry = run([v, "import", "bitwarden", export, "--dry"], env)
+    dry_files = [
+        f
+        for _, _, fs in os.walk(env["PASSWORD_STORE_DIR"])
+        for f in fs
+        if f.endswith(".gpg")
+    ]
+    imp = run([v, "import", "bitwarden", export], env)
+    pw = run([v, "get", "bitwarden/Work/GitHub", "--show"], env)
+    login = run([v, "get", "bitwarden/Work/GitHub", "--field", "login", "--show"], env)
+    noclip = run([v, "get", "bitwarden/Work/GitHub"], env)
+    code = run([v, "otp", "bitwarden/Work/GitHub"], env).stdout.strip()
+    expect = subprocess.run(
+        ["oathtool", "--totp", "-b", "JBSWY3DPEHPK3PXP"], capture_output=True, text=True
+    ).stdout.strip()
+    code2 = run([v, "otp", "bitwarden/Router"], env).stdout.strip()
+    status = run([v, "status"], env).stdout
+    store_files = {
+        os.path.relpath(os.path.join(r, f), env["PASSWORD_STORE_DIR"])
+        for r, _, fs in os.walk(env["PASSWORD_STORE_DIR"])
+        for f in fs
+        if f.endswith(".gpg")
+    }
+    return {
+        "init with the key, dry run adds nothing": init.returncode == 0
+        and "would import 2 logins (2 with 2FA)" in dry.stdout
+        and not dry_files,
+        "import lands logins, notes and otp under the prefix; no secret in its output": imp.returncode
+        == 0
+        and {
+            "bitwarden/Work/GitHub.gpg",
+            "bitwarden/Router.gpg",
+            "bitwarden/notes/Work/Wifi.gpg",
+        }
+        <= store_files
+        and "hunter2" not in imp.stdout + imp.stderr
+        and "JBSWY3DP" not in imp.stdout + imp.stderr,
+        "get --show returns the password and a named field": pw.stdout.strip()
+        == "hunter2-Xy!"
+        and login.stdout.strip() == "kai",
+        "get without a display refuses to print and says so": noclip.returncode == 1
+        and "hunter2" not in noclip.stdout
+        and "--show" in noclip.stderr,
+        "the TOTP matches oathtool, from a bare seed and from an otpauth URI": code
+        == expect
+        and len(code) == 6
+        and len(code2) == 6
+        and code2.isdigit(),
+        "status counts the entries and sees pass-otp": "3 entries" in status
+        and "pass-otp installed" in status,
+    }
+
+
 CASES = {
     "ports": ports,
     "space": space,
@@ -1134,6 +1312,8 @@ CASES = {
     "doctor": doctor,
     "pdfops": pdfops,
     "money": money,
+    "what": what,
+    "vault": vault,
 }
 
 

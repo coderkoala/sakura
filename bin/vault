@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""vault — your passwords and 2FA codes, from `pass` (gpg, already in your dotfiles), without a secret ever landing on screen or in a log.
+
+  vault otp NAME                    the current 6-digit code (pass-otp), printed — a code is good for 30 seconds, the seed never shows
+  vault get NAME                    the password onto the clipboard, cleared after 45 s; nothing printed but "copied". --show prints it
+  vault get NAME --field login      another line of the entry (login, url, notes…); --field copies too
+  vault list [FILTER] | vault find WORDS        what's in the store (names only)
+  vault add NAME                    `pass insert` — you type the password at the prompt, it never passes through Sakura
+  vault add-otp NAME                paste an otpauth:// URI at the prompt (from the QR code: `look --text qr.png` reads it); stored, never printed
+  vault import bitwarden export.json [--prefix bitwarden] [--dry]
+                                    every login into pass as PREFIX/Folder/Name (password first line; login:, url:, notes: after),
+                                    TOTP seeds into pass-otp alongside; secure notes as notes. Counts only are printed. Delete the export after.
+  vault init [KEYID]                set up the store with your gpg key (made for you if there's none);   vault status
+Needs pass, pass-otp and gpg. The store is ~/.password-store (PASSWORD_STORE_DIR). `clip` does the clipboard; with no display,
+get says so and you use --show. The agent is told: never ask the user to type a secret into the chat; point them at `vault add`.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+
+STORE = os.path.expanduser(os.environ.get("PASSWORD_STORE_DIR") or "~/.password-store")
+
+
+def need(tool, how):
+    if not shutil.which(tool):
+        print(f"vault: needs {tool}: {how}", file=sys.stderr)
+        sys.exit(3)
+
+
+def pass_(args, stdin=None, capture=True):
+    need("pass", "sudo -A apt-get install -y pass pass-extension-otp")
+    return subprocess.run(["pass", *args], input=stdin, capture_output=capture, text=True)
+
+
+def have_otp_ext():
+    for d in ("/usr/lib/password-store/extensions", "/usr/local/lib/password-store/extensions", os.path.expanduser("~/.password-store/.extensions")):
+        if os.path.exists(os.path.join(d, "otp.bash")):
+            return True
+    return False
+
+
+def to_clipboard(text, seconds=45):
+    clip = shutil.which("clip") or os.path.join(os.path.dirname(os.path.realpath(__file__)), "clip")
+    if not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")) or not os.path.exists(clip):
+        return False
+    r = subprocess.run([clip, "set"], input=text, text=True, capture_output=True)
+    if r.returncode:
+        return False
+    # clear it later, from a detached child, only if it still holds what we put there
+    subprocess.Popen([sys.executable, "-c", f"import subprocess,time,sys; time.sleep({seconds}); cur=subprocess.run([{clip!r}],capture_output=True,text=True).stdout; "
+                      f"subprocess.run([{clip!r},'set'],input='',text=True) if cur.strip()==sys.argv[1].strip() else None", text], start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
+
+
+def entry(name):
+    r = pass_(["show", name])
+    if r.returncode:
+        print(f"vault: {r.stderr.strip() or 'no such entry'}", file=sys.stderr)
+        sys.exit(1)
+    return r.stdout
+
+
+def field(text, name):
+    if name in ("password", "pass"):
+        return text.splitlines()[0] if text else ""
+    for l in text.splitlines()[1:]:
+        m = re.match(rf"\s*{re.escape(name)}\s*:\s*(.*)$", l, re.I)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def cmd_get(name, fld, show):
+    text = entry(name)
+    val = field(text, fld or "password")
+    if val is None:
+        print(f"vault: no field “{fld}” in {name}; fields: " + ", ".join(l.split(":")[0].strip() for l in text.splitlines()[1:] if ":" in l), file=sys.stderr)
+        return 1
+    if show:
+        print(val)
+        return 0
+    if to_clipboard(val):
+        print(f"copied {fld or 'the password'} for {name} to the clipboard; it clears in 45 s")
+        return 0
+    print("vault: no clipboard here (no display). `vault get NAME --show` prints it; mind who can see the screen.", file=sys.stderr)
+    return 1
+
+
+def cmd_otp(name):
+    if not have_otp_ext():
+        print("vault: pass-otp isn't installed: sudo -A apt-get install -y pass-extension-otp", file=sys.stderr)
+        return 3
+    r = pass_(["otp", name])
+    if r.returncode:
+        print(f"vault: {r.stderr.strip() or 'no otp in that entry'}", file=sys.stderr)
+        return 1
+    print(r.stdout.strip())
+    return 0
+
+
+def otpauth_from(totp, name, issuer=None):
+    """Bitwarden stores either a full otpauth:// URI or a bare base32 seed."""
+    t = (totp or "").strip()
+    if not t:
+        return None
+    if t.lower().startswith("otpauth://"):
+        return t
+    if t.lower().startswith("steam://"):
+        return None
+    seed = re.sub(r"[\s-]", "", t).upper()
+    if not re.fullmatch(r"[A-Z2-7]+=*", seed):
+        return None
+    from urllib.parse import quote
+    label = quote(f"{issuer}:{name}" if issuer else name)
+    return f"otpauth://totp/{label}?secret={seed}" + (f"&issuer={quote(issuer)}" if issuer else "")
+
+
+def safe_name(s):
+    s = re.sub(r"[\\/:*?\"<>|]+", "-", (s or "").strip()).strip(" .")
+    return s or "untitled"
+
+
+def cmd_import_bitwarden(path, prefix, dry):
+    try:
+        data = json.load(open(path, encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"vault: can't read {path}: {e}", file=sys.stderr)
+        return 1
+    if data.get("encrypted"):
+        print("vault: that export is encrypted; export again as plain JSON (Bitwarden: Tools → Export vault → .json), then delete it after the import", file=sys.stderr)
+        return 1
+    folders = {f.get("id"): safe_name(f.get("name")) for f in data.get("folders", []) or []}
+    counts = {"logins": 0, "otp": 0, "notes": 0, "cards": 0, "skipped": 0, "existing": 0}
+    for item in data.get("items", []) or []:
+        kind = item.get("type")
+        folder = folders.get(item.get("folderId"))
+        name = safe_name(item.get("name"))
+        login = item.get("login") or {}
+        if kind == 1 and (login.get("username") or login.get("password") or login.get("totp")):
+            user = login.get("username") or ""
+            entry_name = "/".join(p for p in (prefix, folder, name) if p)
+            if user and any(n for n in (data.get("items") or []) if n is not item and safe_name(n.get("name")) == name and n.get("folderId") == item.get("folderId")):
+                entry_name += "/" + safe_name(user)
+            lines = [login.get("password") or ""]
+            if user:
+                lines.append(f"login: {user}")
+            for u in (login.get("uris") or [])[:3]:
+                if u.get("uri"):
+                    lines.append(f"url: {u['uri']}")
+            if item.get("notes"):
+                lines.append("notes: " + item["notes"].replace("\n", "\n  "))
+            if dry:
+                print(f"  would add {entry_name}" + (" (+otp)" if login.get("totp") else ""))
+                counts["otp"] += bool(otpauth_from(login.get("totp"), name, user or None))
+            else:
+                r = pass_(["insert", "--multiline", "--force", entry_name], stdin="\n".join(lines) + "\n")
+                if r.returncode:
+                    counts["skipped"] += 1
+                    print(f"  failed: {entry_name}: {r.stderr.strip()[:120]}", file=sys.stderr)
+                    continue
+                uri = otpauth_from(login.get("totp"), name, user or None)
+                if uri:
+                    r2 = pass_(["otp", "append", "--force", entry_name], stdin=uri + "\n")
+                    if r2.returncode == 0:
+                        counts["otp"] += 1
+                    else:
+                        print(f"  otp failed for {entry_name}: {r2.stderr.strip()[:120]}", file=sys.stderr)
+            counts["logins"] += 1
+        elif kind == 2 and item.get("notes"):
+            entry_name = "/".join(p for p in (prefix, "notes", folder, name) if p)
+            if dry:
+                print(f"  would add {entry_name} (note)")
+            else:
+                r = pass_(["insert", "--multiline", "--force", entry_name], stdin="\nnotes: " + item["notes"].replace("\n", "\n  ") + "\n")
+                if r.returncode:
+                    counts["skipped"] += 1
+                    continue
+            counts["notes"] += 1
+        elif kind == 3 and item.get("card"):
+            c = item["card"]
+            entry_name = "/".join(p for p in (prefix, "cards", folder, name) if p)
+            lines = [c.get("number") or "", f"holder: {c.get('cardholderName') or ''}", f"expiry: {c.get('expMonth') or ''}/{c.get('expYear') or ''}", f"code: {c.get('code') or ''}", f"brand: {c.get('brand') or ''}"]
+            if dry:
+                print(f"  would add {entry_name} (card)")
+            else:
+                r = pass_(["insert", "--multiline", "--force", entry_name], stdin="\n".join(lines) + "\n")
+                if r.returncode:
+                    counts["skipped"] += 1
+                    continue
+            counts["cards"] += 1
+        else:
+            counts["skipped"] += 1
+    verb = "would import" if dry else "imported"
+    print(f"{verb} {counts['logins']} logins ({counts['otp']} with 2FA), {counts['notes']} notes, {counts['cards']} cards into {STORE} under “{prefix}”; {counts['skipped']} skipped (identities, empty items)")
+    if not dry:
+        print(f"now: shred -u {path}   (the export is plain text)")
+    return 0
+
+
+def gpg_keys():
+    r = subprocess.run(["gpg", "--list-secret-keys", "--with-colons"], capture_output=True, text=True)
+    return [l.split(":")[4] for l in r.stdout.splitlines() if l.startswith("sec")]
+
+
+def cmd_init(keyid):
+    need("gpg", "sudo -A apt-get install -y gnupg")
+    keys = gpg_keys()
+    if not keyid:
+        if not keys:
+            name = os.environ.get("USER", "me")
+            print("no gpg key yet; making one (RSA 4096, no expiry). You'll be asked for a passphrase by gpg's own prompt.")
+            r = subprocess.run(["gpg", "--quick-generate-key", f"{name} (sakura vault)", "rsa4096", "sign,encr", "0"], capture_output=False)
+            if r.returncode:
+                return 1
+            keys = gpg_keys()
+        keyid = keys[-1]
+    r = pass_(["init", keyid], capture=False)
+    return r.returncode
+
+
+def cmd_status():
+    keys = gpg_keys()
+    gpgid = os.path.join(STORE, ".gpg-id")
+    n = sum(1 for _, _, fs in os.walk(STORE) for f in fs if f.endswith(".gpg")) if os.path.isdir(STORE) else 0
+    print(f"store: {STORE} ({'exists' if os.path.isdir(STORE) else 'not initialised: vault init'}), {n} entries")
+    print(f"key:   {open(gpgid).read().strip() if os.path.exists(gpgid) else 'none set'}; secret keys here: {len(keys)}")
+    print(f"otp:   {'pass-otp installed' if have_otp_ext() else 'pass-otp missing (sudo -A apt-get install -y pass-extension-otp)'}")
+    print(f"git:   {'the store is a git repo (pass git …)' if os.path.isdir(os.path.join(STORE, '.git')) else 'not a git repo; the dotfiles sync it if it lives there'}")
+    return 0
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0 if a else 2
+    show, dry, fld, prefix = "--show" in a, "--dry" in a, None, "bitwarden"
+    if "--field" in a:
+        i = a.index("--field")
+        fld = a[i + 1]
+        del a[i:i + 2]
+    if "--prefix" in a:
+        i = a.index("--prefix")
+        prefix = a[i + 1]
+        del a[i:i + 2]
+    a = [x for x in a if x not in ("--show", "--dry")]
+    cmd, args = a[0], a[1:]
+    if cmd == "otp" and args:
+        return cmd_otp(args[0])
+    if cmd == "get" and args:
+        return cmd_get(args[0], fld, show)
+    if cmd == "list":
+        r = pass_(["ls", *args], capture=False)
+        return r.returncode
+    if cmd == "find" and args:
+        return pass_(["find", *args], capture=False).returncode
+    if cmd == "add" and args:
+        return pass_(["insert", args[0]], capture=False).returncode
+    if cmd == "add-otp" and args:
+        if not have_otp_ext():
+            print("vault: pass-otp isn't installed: sudo -A apt-get install -y pass-extension-otp", file=sys.stderr)
+            return 3
+        return pass_(["otp", "append" if os.path.exists(os.path.join(STORE, args[0] + ".gpg")) else "insert", args[0]], capture=False).returncode
+    if cmd == "import" and len(args) == 2 and args[0] == "bitwarden":
+        return cmd_import_bitwarden(args[1], prefix, dry)
+    if cmd == "init":
+        return cmd_init(args[0] if args else None)
+    if cmd == "status":
+        return cmd_status()
+    print(__doc__)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

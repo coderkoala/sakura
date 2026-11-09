@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""dupes — the same file twice (or ten times) across folders, drives and old backups, found by content, not by name. No model.
+"""dupes — duplicate files: the same photo, video or document twice (or ten times) across folders, drives and old backups, found by content, not by name. No model.
 
   dupes DIR [DIR...]           groups of identical files (size, then a quick hash, then a full hash: nothing is called a
                                duplicate on a name or a size alone), biggest groups first, with the space they waste
