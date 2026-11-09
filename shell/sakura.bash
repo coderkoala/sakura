@@ -36,6 +36,8 @@
 #   drift FILE|packages|units|sshkeys [HOST...]  how the machines differ;  when "0 3 * * 1"  a cron/OnCalendar line in English, next runs
 #   conv FILE --to EXT | merge|split|pages|rotate|compress|ocr|unlock|strip|trim|audio|gif|extract   every conversion, locally, never a website
 #   vid URL | vid archive URL | vid watch URL   your own videos kept with their metadata; a channel or playlist, resumable; what's new
+#   dupes DIR... [--link|--rm --go]  the same file by content, across drives;  shelve DIR --into LIB [--go]  photos/videos into YEAR/YEAR-MM by date taken
+#   sakura-doctor [--fix]  is this install whole: every command, hook and config checked, what's missing
 #   sakura-notes [TAG]  release notes from the commits since the last tag (for sakura-release)
 #   sakura-status   one line for tmux's status bar: driver, night queue, offers, guardian
 #   ?go [request]  a session that doesn't stop to ask (sakura-trust on makes every ? like this)

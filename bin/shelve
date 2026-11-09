@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""shelve — photos and videos put in order by the day they were taken, into YEAR/YEAR-MONTH folders. Never overwrites. No model.
+
+  shelve DIR [DIR...] --into LIBRARY     move each photo/video to LIBRARY/2019/2019-07/<original name>; dry run (prints the plan)
+  shelve DIR --into LIBRARY --go         do it (move; --copy to copy instead)
+  shelve DIR --into LIBRARY --by day     2019/2019-07-14/ folders instead of months (--by year for just the year)
+  shelve DIR --json
+The date comes from the picture's EXIF (DateTimeOriginal), a video's creation time (ffprobe), the filename if it carries one
+(IMG_20190714_…, 2019-07-14 …, WhatsApp names), and only then the file's modification time, which is marked "(mtime)" in the
+plan because copies and downloads lose the real date. A file whose name already exists at the destination with different bytes
+gets " (2)"; identical bytes are reported as a duplicate and left where they are (dupes handles those). Sidecars (.xmp, .json
+from a Takeout, .aae) travel with their photo.
+"""
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+PHOTOS = {"jpg", "jpeg", "png", "heic", "heif", "webp", "tiff", "tif", "dng", "cr2", "cr3", "nef", "arw", "orf", "raf", "rw2", "gif", "bmp", "avif"}
+VIDEOS = {"mp4", "mov", "m4v", "mkv", "avi", "3gp", "mts", "m2ts", "webm", "mpg", "mpeg", "wmv"}
+SIDECARS = {"xmp", "aae", "json", "thm", "lrv", "srt"}
+NAME_DATE = [re.compile(r"(?<!\d)(20\d\d|19\d\d)[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])(?!\d)")]
+
+
+def exif_date(path):
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            ex = im.getexif()
+            sub = ex.get_ifd(0x8769) if hasattr(ex, "get_ifd") else {}
+            raw = sub.get(0x9003) or sub.get(0x9004) or ex.get(0x0132)
+            if raw and re.match(r"\d{4}:\d\d:\d\d", str(raw)):
+                return dt.datetime.strptime(str(raw)[:19], "%Y:%m:%d %H:%M:%S"), "exif"
+    except Exception:
+        pass
+    return None
+
+
+def video_date(path):
+    if not shutil.which("ffprobe"):
+        return None
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format_tags=creation_time:stream_tags=creation_time", "-of", "json", path],
+                             capture_output=True, text=True, timeout=30).stdout
+        data = json.loads(out or "{}")
+        cands = [data.get("format", {}).get("tags", {}).get("creation_time")] + [s.get("tags", {}).get("creation_time") for s in data.get("streams", [])]
+        for c in cands:
+            if c:
+                c = c.replace("Z", "+00:00")
+                d = dt.datetime.fromisoformat(c[:26] if "." in c else c)
+                if d.year > 1980:
+                    return d.astimezone().replace(tzinfo=None) if d.tzinfo else d, "video"
+    except Exception:
+        pass
+    return None
+
+
+def name_date(path):
+    base = os.path.basename(path)
+    for rx in NAME_DATE:
+        m = rx.search(base)
+        if m:
+            try:
+                return dt.datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))), "name"
+            except ValueError:
+                pass
+    return None
+
+
+def taken(path):
+    e = os.path.splitext(path)[1].lower().lstrip(".")
+    got = (exif_date(path) if e in PHOTOS else video_date(path) if e in VIDEOS else None) or name_date(path)
+    if got:
+        return got
+    return dt.datetime.fromtimestamp(os.stat(path).st_mtime), "mtime"
+
+
+def digest(path):
+    h = hashlib.blake2b(digest_size=16)
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.digest()
+
+
+def plan(roots, lib, by):
+    items, dupes = [], []
+    lib = os.path.abspath(lib)
+    for root in roots:
+        for d, dirs, files in os.walk(root):
+            dirs[:] = [x for x in dirs if not os.path.islink(os.path.join(d, x)) and not os.path.abspath(os.path.join(d, x)).startswith(lib + os.sep)]
+            stems = {}
+            for f in files:
+                stems.setdefault(os.path.splitext(f)[0], []).append(f)
+            for f in files:
+                p = os.path.join(d, f)
+                e = os.path.splitext(f)[1].lower().lstrip(".")
+                if os.path.islink(p) or e not in PHOTOS | VIDEOS:
+                    continue
+                when, src = taken(p)
+                folder = when.strftime("%Y/%Y-%m") if by == "month" else when.strftime("%Y/%Y-%m-%d") if by == "day" else when.strftime("%Y")
+                dest = os.path.join(lib, folder, f)
+                n = 2
+                while os.path.exists(dest):
+                    if os.path.getsize(dest) == os.path.getsize(p) and digest(dest) == digest(p):
+                        dupes.append((p, dest))
+                        dest = None
+                        break
+                    stem, ext = os.path.splitext(f)
+                    dest = os.path.join(lib, folder, f"{stem} ({n}){ext}")
+                    n += 1
+                if dest is None:
+                    continue
+                side = [os.path.join(d, s) for s in stems.get(os.path.splitext(f)[0], []) if s != f and os.path.splitext(s)[1].lower().lstrip(".") in SIDECARS]
+                side += [os.path.join(d, f + ".json")] if f + ".json" in files else []
+                items.append({"src": p, "dest": dest, "date": when.strftime("%Y-%m-%d"), "from": src, "sidecars": side})
+    return items, dupes
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0 if a else 2
+    opt = {"into": None, "by": "month", "go": False, "copy": False, "json": False}
+    roots = []
+    while a:
+        x = a.pop(0)
+        if x == "--into":
+            opt["into"] = a.pop(0)
+        elif x == "--by":
+            opt["by"] = a.pop(0)
+        elif x in ("--go", "--copy", "--json"):
+            opt[x[2:]] = True
+        else:
+            roots.append(x)
+    if not roots or not opt["into"] or opt["by"] not in ("month", "day", "year"):
+        print("shelve DIR [DIR...] --into LIBRARY [--by month|day|year] [--go] [--copy]", file=sys.stderr)
+        return 2
+    items, dupes = plan(roots, opt["into"], opt["by"])
+    moved = 0
+    for it in items:
+        if opt["go"]:
+            os.makedirs(os.path.dirname(it["dest"]), exist_ok=True)
+            op = shutil.copy2 if opt["copy"] else shutil.move
+            op(it["src"], it["dest"])
+            for s in it["sidecars"]:
+                sd = os.path.join(os.path.dirname(it["dest"]), os.path.basename(s))
+                if not os.path.exists(sd):
+                    op(s, sd)
+            moved += 1
+        if not opt["json"]:
+            mark = "" if it["from"] != "mtime" else "  (mtime)"
+            print(f"{it['date']}  {it['src']}  →  {os.path.relpath(it['dest'], opt['into'])}{mark}")
+    if opt["json"]:
+        print(json.dumps({"items": items, "duplicates": [{"src": s, "already": d} for s, d in dupes], "moved": moved}, indent=1))
+        return 0
+    for s, d in dupes:
+        print(f"already there (same bytes), left alone: {s}  =  {d}")
+    guessed = sum(1 for it in items if it["from"] == "mtime")
+    tail = f"{len(items)} files" + (f", {guessed} dated only by mtime" if guessed else "") + (f", {len(dupes)} already in the library" if dupes else "")
+    print(f"\n{'moved' if opt['go'] and not opt['copy'] else 'copied' if opt['go'] else 'would move'} {tail}" + ("" if opt["go"] else "; add --go (or --copy --go)"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

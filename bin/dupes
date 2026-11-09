@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""dupes — the same file twice (or ten times) across folders, drives and old backups, found by content, not by name. No model.
+
+  dupes DIR [DIR...]           groups of identical files (size, then a quick hash, then a full hash: nothing is called a
+                               duplicate on a name or a size alone), biggest groups first, with the space they waste
+  dupes DIR --min 1M           ignore files smaller than that (default 64K)   --ext mp4,jpg   only these kinds
+  dupes DIR --keep oldest|newest|shortest|first   which copy to keep in each group (default: oldest; "first" = the first DIR given)
+  dupes DIR --link             replace the other copies with hard links to the kept one (same bytes once, every path still works)
+  dupes DIR --rm               delete the other copies      both are a dry run until --go is added
+  dupes DIR --json
+Symlinks are skipped, so are .git and the caches. Nothing is deleted or linked without --go, and --go never touches the kept
+copy; a group's kept path is printed first with a *. Paths on different filesystems can't be hard-linked (it says so and skips).
+"""
+import hashlib
+import json
+import os
+import sys
+
+SKIP_DIRS = {".git", ".cache", "node_modules", "__pycache__", ".Trash", ".venv", "venv", ".sakura"}
+
+
+def human(n):
+    for u in ("B", "K", "M", "G", "T"):
+        if n < 1024 or u == "T":
+            return f"{n:.0f}{u}" if u == "B" else f"{n:.1f}{u}"
+        n /= 1024
+
+
+def size_arg(s):
+    s = s.upper()
+    mult = {"K": 1024, "M": 1024 ** 2, "G": 1024 ** 3}
+    return int(float(s[:-1]) * mult[s[-1]]) if s[-1] in mult else int(s)
+
+
+def walk(roots, min_size, exts):
+    seen = set()
+    for order, root in enumerate(roots):
+        for d, dirs, files in os.walk(root, onerror=lambda e: None):
+            dirs[:] = [x for x in dirs if x not in SKIP_DIRS and not os.path.islink(os.path.join(d, x))]
+            for f in files:
+                p = os.path.join(d, f)
+                if exts and os.path.splitext(f)[1].lower().lstrip(".") not in exts:
+                    continue
+                try:
+                    st = os.lstat(p)
+                except OSError:
+                    continue
+                if os.path.islink(p) or not os.path.isfile(p) or st.st_size < min_size:
+                    continue
+                key = (st.st_dev, st.st_ino)
+                if key in seen:
+                    continue  # already a hard link of something we have: not a duplicate, the same file
+                seen.add(key)
+                yield p, st, order
+
+
+def quick_hash(p, size):
+    h = hashlib.blake2b(digest_size=16)
+    with open(p, "rb") as f:
+        h.update(f.read(65536))
+        if size > 131072:
+            f.seek(size // 2)
+            h.update(f.read(65536))
+            f.seek(-65536, 2)
+            h.update(f.read(65536))
+    return h.digest()
+
+
+def full_hash(p):
+    h = hashlib.blake2b(digest_size=32)
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.digest()
+
+
+def find(roots, min_size, exts):
+    by_size = {}
+    for p, st, order in walk(roots, min_size, exts):
+        by_size.setdefault(st.st_size, []).append((p, st, order))
+    groups = []
+    for size, items in by_size.items():
+        if len(items) < 2:
+            continue
+        by_quick = {}
+        for it in items:
+            try:
+                by_quick.setdefault(quick_hash(it[0], size), []).append(it)
+            except OSError:
+                continue
+        for cand in by_quick.values():
+            if len(cand) < 2:
+                continue
+            by_full = {}
+            for it in cand:
+                try:
+                    by_full.setdefault(full_hash(it[0]), []).append(it)
+                except OSError:
+                    continue
+            for same in by_full.values():
+                if len(same) >= 2:
+                    groups.append((size, same))
+    groups.sort(key=lambda g: -g[0] * (len(g[1]) - 1))
+    return groups
+
+
+def choose(items, keep):
+    if keep == "newest":
+        return max(items, key=lambda it: it[1].st_mtime)
+    if keep == "shortest":
+        return min(items, key=lambda it: (len(it[0]), it[0]))
+    if keep == "first":
+        return min(items, key=lambda it: (it[2], it[0]))
+    return min(items, key=lambda it: (it[1].st_mtime, it[0]))
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0 if a else 2
+    opt = {"min": 65536, "ext": set(), "keep": "oldest", "link": False, "rm": False, "go": False, "json": False}
+    roots = []
+    while a:
+        x = a.pop(0)
+        if x == "--min":
+            opt["min"] = size_arg(a.pop(0))
+        elif x == "--ext":
+            opt["ext"] = {e.strip().lower().lstrip(".") for e in a.pop(0).split(",")}
+        elif x == "--keep":
+            opt["keep"] = a.pop(0)
+            if opt["keep"] not in ("oldest", "newest", "shortest", "first"):
+                print("dupes: --keep oldest|newest|shortest|first", file=sys.stderr)
+                return 2
+        elif x in ("--link", "--rm", "--go", "--json"):
+            opt[x[2:]] = True
+        else:
+            roots.append(os.path.abspath(x))
+    if not roots or not all(os.path.isdir(r) for r in roots):
+        print("dupes DIR [DIR...]", file=sys.stderr)
+        return 2
+    if opt["link"] and opt["rm"]:
+        print("dupes: --link or --rm, not both", file=sys.stderr)
+        return 2
+    groups = find(roots, opt["min"], opt["ext"])
+    wasted = sum(size * (len(items) - 1) for size, items in groups)
+    out = []
+    acted = 0
+    for size, items in groups:
+        kept = choose(items, opt["keep"])
+        others = [it for it in items if it is not kept]
+        rec = {"size": size, "keep": kept[0], "others": [o[0] for o in others]}
+        out.append(rec)
+        if not opt["json"]:
+            print(f"{human(size)} × {len(items)}  (wastes {human(size * len(others))})")
+            print(f"  * {kept[0]}")
+            for o in others:
+                print(f"    {o[0]}")
+        if opt["go"] and (opt["link"] or opt["rm"]):
+            for o in others:
+                try:
+                    if opt["rm"]:
+                        os.unlink(o[0])
+                    else:
+                        if o[1].st_dev != kept[1].st_dev:
+                            print(f"    (another filesystem, can't hard-link: {o[0]})")
+                            continue
+                        tmp = o[0] + ".dupes-tmp"
+                        os.link(kept[0], tmp)
+                        os.replace(tmp, o[0])
+                    acted += 1
+                except OSError as e:
+                    print(f"    failed: {o[0]}: {e}", file=sys.stderr)
+    if opt["json"]:
+        print(json.dumps({"groups": out, "wasted": wasted, "acted": acted}, indent=1))
+        return 0
+    if not groups:
+        print("no duplicates")
+        return 0
+    verb = "removed" if opt["rm"] else "hard-linked" if opt["link"] else None
+    if verb and opt["go"]:
+        print(f"\n{len(groups)} groups; {acted} copies {verb}, about {human(wasted)} freed")
+    elif verb:
+        print(f"\n{len(groups)} groups, {human(wasted)} wasted; add --go to {'remove' if opt['rm'] else 'hard-link'} the unstarred copies")
+    else:
+        print(f"\n{len(groups)} groups, {human(wasted)} wasted. --link keeps every path and the bytes once; --rm deletes the copies (dry run until --go)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

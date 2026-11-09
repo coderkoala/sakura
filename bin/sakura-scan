@@ -70,7 +70,8 @@ def report(label, text):
 def main():
     args = sys.argv[1:]
     if args and args[0] in ("-h", "--help"):
-        sys.exit(__doc__)
+        print(__doc__)
+        return 0
     if not args:
         args = ["-"] if not sys.stdin.isatty() else []
     if not args:

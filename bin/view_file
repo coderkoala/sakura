@@ -11,7 +11,10 @@ MAX_LINE = 400
 
 def main():
     a = sys.argv[1:]
-    if not a or a[0] in ("-h", "--help"):
+    if a and a[0] in ("-h", "--help"):
+        print(__doc__)
+        return
+    if not a:
         sys.exit(__doc__)
     try:
         start = max(int(a[1]), 1) if len(a) > 1 else 1
