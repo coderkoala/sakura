@@ -177,6 +177,22 @@ PROGRESS = re.compile(r"(?:\bnow\s+\w+ing\b|\bnext\b[,:]?\s|\bstep\s+\d+\b|^\w+i
 # A command for the user to run, when the request was for the work itself.
 WRITES_IN_FENCE = re.compile(r"```[a-z]*\n(?:(?!```).)*?(?:(?:^|\s)>>?\s*[\w/~$.]|\btee\s|\bsudo\s|\bchmod\s|\bcp\s|\bmv\s|\bedit_file\s|\bsakura-tool\s+keep\b)", re.S)
 ASKING_HOW = re.compile(r"^\W*(how\b|what\b|why\b|which\b|explain\b|show me\b|can you (?:explain|show)\b|write me a (?:command|one-?liner)\b|give me a (?:command|one-?liner)\b)|\?\s*$", re.I)
+# The user asked for THINKING, not the work: a plan, a design, options, advice. Ending such a turn with
+# a plan is the deliverable, not a stall — so the continuation nags ("do it now, not a plan") must stay
+# off. Kept broad on purpose; a false match only means one turn isn't pushed to act, which is the point
+# when the user wanted a plan. A coordinator session (SAKURA_COORDINATOR) is always in this mode.
+ASKING_PLAN = re.compile(
+    r"\b(?:brainstorm|come up with (?:a|some)|lay out|sketch|outline|draft (?:a|me a|up a)?|propose|suggest|recommend|"
+    r"what(?:'?s| is| are| would)|how would you|think (?:about|through)|weigh|consider|compare|evaluate)\b"
+    r"[^.?!\n]{0,40}\b(?:plan|approach|strategy|strategies|option|options|idea|ideas|design|architecture|roadmap|roadmaps|"
+    r"way|ways|way forward|next steps?|proposal|recommendation|recommendations|trade-?offs?|pros and cons)\b"
+    r"|\b(?:plan|design|architect|outline|scope) (?:out |how |the |a |an )?(?:you'?d|we'?d|to approach|the approach|this|it)\b"
+    r"|\bwhat(?:'?s| is| do you think is)? the best way\b"
+    r"|\b(?:don'?t|do not|no need to) (?:actually )?(?:do|implement|build|write|run|execute|change) (?:it|anything|the code)\b"
+    r"|\bjust (?:a )?(?:plan|brainstorm|think|outline|ideas?|the plan)\b"
+    r"|\bplan (?:it )?(?:out|first)\b",
+    re.I,
+)
 
 
 # Nothing but code, as an answer to a request to get something done: the tool call came out as text.
@@ -238,13 +254,16 @@ def stopped_at_step(answer, total):
 
 
 def continuation_reason(answer, prompt=""):
-    """Block an empty final message, one that only announces work, or one that stops partway through."""
+    """Block an empty final message, one that only announces work, or one that stops partway through.
+    When the user asked for a plan/design/advice (ASKING_PLAN), a turn that ends with a plan is the
+    deliverable, so the announce/progress nags are suppressed — only a truly empty answer is caught."""
     a = (answer or "").strip()
     if not a.strip("`~ \n"):  # a lone code fence says nothing either
         return ("You ended the turn without writing an answer. Write the answer now, from the tool output above "
                 "(or, if something is still missing, run the tool call that gets it, then answer).")
+    asked_plan = bool(ASKING_PLAN.search(prompt or ""))
     last = re.split(r"(?<=[.!?])\s+|\n+", a)[-1].strip(" *_`#>-")
-    if len(a) < 400 and (a.endswith(":") or ANNOUNCE.search(last) or ANNOUNCE.search(a)):
+    if not asked_plan and len(a) < 400 and (a.endswith(":") or ANNOUNCE.search(last) or ANNOUNCE.search(a)):
         return (f"You ended the turn announcing a step instead of doing it (“{a[:120]}”). Do it now — make the "
                 "tool call, check its output — and end with the actual result, not a plan.")
     total = steps_in(prompt)
@@ -252,7 +271,7 @@ def continuation_reason(answer, prompt=""):
     if at:
         return (f"You stopped at step {at} of the {total} the user asked for. Carry on with step {at + 1} now, make the "
                 "tool calls for every remaining step, and only then give the final result.")
-    if total and len(a) < 400 and PROGRESS.search(last):
+    if not asked_plan and total and len(a) < 400 and PROGRESS.search(last):
         return ("That's a progress note, and the user asked for several steps. Finish every remaining step with tool "
                 "calls, then give the final result.")
     return None
@@ -379,9 +398,13 @@ def main():
     answer = data.get("last_assistant_message") or ""
     path = data.get("transcript_path")
     prompt, evidence, grounded, fact = turn_evidence(path) if path else ("", "", False, False)
+    # A coordinator plans and briefs and NEVER runs the work (a worker does), so none of the "do it now"
+    # continuation nags apply to it. Likewise when the user asked for a plan, not the work.
+    coordinator = bool(os.environ.get("SAKURA_COORDINATOR"))
+    asked_plan = bool(ASKING_PLAN.search(prompt or ""))
     # 1. Continuation: empty, announce-only or partway endings get sent back, at most MAX_CONTINUES per turn.
-    cont = continuation_reason(answer, prompt)
-    if not cont and steps_in(prompt) and not used_tools(path):
+    cont = None if coordinator else continuation_reason(answer, prompt)
+    if not cont and not coordinator and not asked_plan and steps_in(prompt) and not used_tools(path):
         cont = ("You listed the steps without doing them. If they are work to carry out, do them now with tool calls, "
                 "then give the result. If the user only asked for an explanation, restate your answer.")
     if not cont and tool_not_kept(prompt, evidence):
@@ -397,13 +420,15 @@ def main():
                     "calls. If the script works, keep it now:\nsakura-tool keep NAME ./FILE --about \"one line\" <<'CHECK'\nprintf 'input\\n' | NAME | grep -qx "
                     "'expected'\nCHECK\nIf the check fails, read why, fix the script or the check, and keep again. If it's a scheduled thing, run the `pa job` "
                     "line. Then report what was kept and how to call it. If it truly can't be kept, say BLOCKED and why.")
-    if not cont and path and bare_done(answer, prompt, turn_results(path)):
+    if not cont and not coordinator and not asked_plan and path and bare_done(answer, prompt, turn_results(path)):
         cont = ("The user numbered their steps, and you've run fewer commands than there are steps. Check each one with a command, do what's "
                 "missing, and report what each one's output showed.")
-    if not cont and wrote_out_the_call(answer, prompt) and not used_tools(path):
+    # A coordinator writes out commands on purpose (that's the brief it hands a worker), and a plan is
+    # meant to contain them — so these only fire in an ordinary do-the-work session.
+    if not cont and not coordinator and not asked_plan and wrote_out_the_call(answer, prompt) and not used_tools(path):
         cont = ("You wrote that out as text, so nothing happened. Do it now with an actual tool call, then report what the output shows. "
                 "If the user only wanted to read the code, give it again and say that nothing was run.")
-    if not cont and handed_over(answer, prompt) and not used_tools(path):
+    if not cont and not coordinator and not asked_plan and handed_over(answer, prompt) and not used_tools(path):
         cont = ("You wrote out commands and ran nothing, so nothing has happened. Run them yourself now with tool calls, then report "
                 "what the output shows. If the user only wanted to read the commands, say that nothing was run.")
     # With the continuations, not the once-only claims: told once, the model just insisted that it had run the command.
@@ -481,6 +506,32 @@ def selftest():
         if (continuation_reason(ans, chain) is not None) != want:
             bad += 1
             print(f"chain {'SHOULD BLOCK' if want else 'SHOULD PASS'}: {ans!r}")
+    # The plan fix: when the user asked for a plan/design/advice, a turn that ends with a plan is the
+    # deliverable, so the announce/progress nags stay off — but a truly empty answer still blocks, and an
+    # ordinary work prompt is unaffected.
+    plan_prompts = ["brainstorm an approach for the caching layer, don't implement anything yet",
+                    "what's your plan for the migration?", "lay out the options and trade-offs",
+                    "how would you design the auth flow?", "pick up all the roadmaps needed and plan it out first"]
+    plan_answers = ["Let me outline the approach:", "I'll lay out a few options.",
+                    "Here's my plan. Now let me think about step 2:", "Next, I'd add a cache layer."]
+    for pp in plan_prompts:
+        if not ASKING_PLAN.search(pp):
+            bad += 1
+            print(f"ASKING_PLAN SHOULD MATCH: {pp!r}")
+        for ans in plan_answers:
+            if continuation_reason(ans, pp) is not None:
+                bad += 1
+                print(f"plan SHOULD PASS: prompt={pp[:30]!r} ans={ans!r}")
+    if continuation_reason("", "what's your plan?") is None:
+        bad += 1
+        print("plan: an empty answer should still block")
+    if continuation_reason("Let me check the config:", "fix the build so it passes") is None:
+        bad += 1
+        print("non-plan announce should still block")
+    for wp in ["fix the build so it passes", "deploy to prod", "run the tests and report", "restart nginx on web1"]:
+        if ASKING_PLAN.search(wp):
+            bad += 1
+            print(f"ASKING_PLAN should NOT match a work prompt: {wp!r}")
     if steps_in("fix calc.py in 2 hours") or steps_in("python 3.14 and node 26.") or steps_in("use v1. then 2.") > 2:
         bad += 1
         print("steps_in misread prose as steps")

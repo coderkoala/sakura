@@ -16,7 +16,35 @@ from html.parser import HTMLParser
 
 import webtiers
 
+try:  # the trust boundary: fetched content is data, and may try to give the model orders
+    import injection
+except Exception:
+    injection = None
+
 UA = "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0"
+
+
+def _guarded(text, source=None):
+    """Neutralize smuggling characters in fetched text and, if it scans as an injection/exfil attempt,
+    return a banner to lead it. (clean_text, lead). No-op (and never raises) if injection is missing."""
+    if injection is None or not text:
+        return text or "", ""
+    try:
+        clean, lead, _ = injection.inspect(text, source)
+        return clean, (lead + "\n\n" if lead else "")
+    except Exception:
+        return text, ""
+
+
+def _clean(s):
+    """Strip smuggling characters from a short snippet/title. Never banners (too short to act on);
+    scanning full pages is fetch_url's job."""
+    if injection is None or not s:
+        return s or ""
+    try:
+        return injection.neutralize(s)[0]
+    except Exception:
+        return s
 
 
 def log(*a):
@@ -196,9 +224,9 @@ def web_search(query, max_results=8):
     if results:
         lines = ["Other web results:"]
         for i, r in enumerate(results, 1):
-            lines.append(f"{i}. {r['title']}\n   {r['url']}")
+            lines.append(f"{i}. {_clean(r['title'])}\n   {r['url']}")
             if r.get("snippet"):
-                lines.append(f"   {r['snippet']}")
+                lines.append(f"   {_clean(r['snippet'])}")
         parts.append("\n".join(lines))
     elif not parts:
         instant = _ddg_instant(query)
@@ -254,9 +282,9 @@ def curated_search(domain, query, max_results=8):
     if results:
         lines = [f"Scoped search results for: {query}"]
         for i, r in enumerate(results, 1):
-            lines.append(f"{i}. {r['title']}\n   {r['url']}")
+            lines.append(f"{i}. {_clean(r['title'])}\n   {r['url']}")
             if r.get("snippet"):
-                lines.append(f"   {r['snippet']}")
+                lines.append(f"   {_clean(r['snippet'])}")
         lines.append("\nCite the URL(s) you used.")
         return header + "\n".join(lines)
     # Engines are blocking this host: these authoritative sites are NOT blocked — fetch them directly.
@@ -371,9 +399,10 @@ def fetch_url(url, max_chars=20000, deep=True):
     if status == 200 and _looks_like_feed(raw, ctype):
         rendered = _render_feed(raw, final_url)
         if rendered:
+            rendered, lead = _guarded(rendered, final_url)
             clipped = rendered[:max_chars]
             suffix = "" if len(rendered) <= max_chars else f"\n\n[truncated at {max_chars} chars]"
-            return clipped + suffix
+            return lead + clipped + suffix
 
     is_html = "<" in raw[:2000]
     text = _page_text(raw, is_html)
@@ -388,6 +417,7 @@ def fetch_url(url, max_chars=20000, deep=True):
         return (f"Source: {url}\n\nThis site refused automated reading (HTTP {status}, or a human check). Don't retry it another way. "
                 f"Use another source, or open it where the user can deal with it: sakura-browser open \"{url}\"")
 
+    text, lead = _guarded(text, final_url)
     clipped = text[:max_chars]
     suffix = "" if len(text) <= max_chars else f"\n\n[truncated at {max_chars} chars]"
 
@@ -398,7 +428,7 @@ def fetch_url(url, max_chars=20000, deep=True):
         feed = _discover_feed(raw, final_url)
         if feed:
             hint = f"\n\n[This page advertises a feed: {feed} — fetch_url it to read all entries at once.]"
-    return f"Source: {final_url}\n\n{clipped}{suffix}{hint}"
+    return f"Source: {final_url}\n\n{lead}{clipped}{suffix}{hint}"
 
 
 # ── Version grounding ─────────────────────────────────────────────────────────
@@ -693,7 +723,8 @@ def wikipedia(query, sentences=6):
     page_url = summ.get("content_urls", {}).get("desktop", {}).get("page") or (
         "https://en.wikipedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_"))
     )
-    return f"Wikipedia: {title}\n\n{extract}\n\nSource: {page_url}"
+    extract, lead = _guarded(extract, page_url)
+    return f"Wikipedia: {title}\n\n{lead}{extract}\n\nSource: {page_url}"
 
 
 TOOLS = [

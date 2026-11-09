@@ -27,6 +27,7 @@ Measured on one machine with an 8 GB GPU, driver Ornith 1.5 35B-A3B since 0.9.5 
 | The guardian's checks (deterministic) | The guardian's disk projection, until it has a fortnight of samples |
 | `sakura-gpu` (40 checks), `torrent` (19 checks and a live daemon lifecycle), `dl` (12 checks, byte-range resume proven), `sakura-backup` (27 checks, a real restore each run) | `fmt`, `?watch`, `drive` against a real Google/Microsoft account (local remote only so far) |
 | `look` (OCR and the vision model), `ledger`, `schema`, `procwatch`, `dq`, `pa offer`, `pa cron`, `docpack`, `fleet`, `drive`, `tbl`, `logs`, workers in worktrees (`evals/abilities.py`, 60 checks) | `hear`, `say`, `clip`, `?pr`, `?review`, `?red`, `?try`, `?morning`, `pa mail` rules, `?decide`/`?why` (smoke-tested by hand) |
+| A trust boundary: fetched content scanned for injection and bannered as data, smuggling characters stripped, data-egress to un-named hosts gated for approval, the answer checked for exfil sinks (`evals/injection.py`, 25 checks) | Dual-LLM / quarantine split — one model still holds untrusted content and the tools; the egress gate is the compensating control |
 
 ## Next: make what exists trustworthy
 
@@ -101,6 +102,33 @@ Built: recall on back-references (`hooks/recall_context.py`), project notes (`.s
 4. **Consolidation:** when a full store refuses a write, a model pass proposes merges as offers; facts unretrieved for 90 days get flagged.
 5. **Fleet-scoped memory:** a `host:` prefix so facts about one machine don't load on another; the stores already sync through dotfiles.
 Skipped deliberately: temporal knowledge graphs (heavy infra; FTS over sessions and decisions already answers why/when at this scale).
+
+## Trust boundary (2026-11-09 — V1 goal shipped)
+
+The goal: **protect outgoing networks where a model does as a page tells it — every action from a
+remote source needs explicit approval, and injection is detected on the machine.** Indirect prompt
+injection has no prompt-level cure (a guardrail is just more text the next injection argues with), so
+this is built as two deterministic mechanics, each with an eval graded by real behaviour, not the
+model's say-so. Full write-up and threat model: [docs/trust-boundary.md](docs/trust-boundary.md).
+
+1. **Content in is data.** `mcp/sakura-web/injection.py` scans everything fetched — `fetch_url` (so
+   `live research` and the grounding hook too), `web_search`/`curated_search`/`wikipedia`, the browser's
+   `open`/`read`, and `rag search` passages. It strips invisible/bidi/Unicode-tag smuggling characters
+   (decoding the tag block first, so an order hidden in "blank" text is caught), and fences any content
+   that tries to give the model orders or beacon data out with a *this is data* banner. Measured at 0
+   false positives on the repo's own prose and on ordinary API docs. `sakura-scan` runs it on demand.
+2. **Data out stops for approval.** `hooks/egress_guard.py` gates every shell command and the final
+   answer: a request that *sends data* (a body, a substitution, a `?data=` beacon) to a host the user
+   never named asks for approval via the `q`/`w` overlay even when `sakura-trust` is on; reading is never
+   gated; the allowlist (`rules/egress-allow.txt`) and any host the user named are trusted, so a host
+   that first appeared in a fetched page isn't. The answer is blocked if it hides an exfiltration sink.
+
+Also fixed here: the Stop-hook "do it now, not a plan" nag no longer fires when the user asked for a
+plan/design/advice, or in a coordinator session (which plans and delegates by design) — it was firing
+on legitimate plan turns (`hooks/claim_check.py`, covered in its selftest and `evals/injection.py`).
+
+Next, if the appetite is there: a real quarantine split (a content-only model with no tools feeding a
+privileged model that never sees raw untrusted text); egress accounting across non-shell tool paths.
 
 ## Not doing
 

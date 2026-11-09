@@ -49,6 +49,12 @@
           },
           {
             "type": "command",
+            "command": "python3 __SAKURA_DIR__/hooks/egress_guard.py",
+            "timeout": 5,
+            "statusMessage": "checking the trust boundary"
+          },
+          {
+            "type": "command",
             "command": "python3 __SAKURA_DIR__/hooks/undo_snapshot.py",
             "timeout": 30,
             "statusMessage": "snapshotting for ?undo"
@@ -64,6 +70,12 @@
             "command": "python3 __SAKURA_DIR__/hooks/claim_check.py",
             "timeout": 10,
             "statusMessage": "checking claims against sources"
+          },
+          {
+            "type": "command",
+            "command": "python3 __SAKURA_DIR__/hooks/egress_guard.py",
+            "timeout": 5,
+            "statusMessage": "checking the answer for data exfiltration"
           }
         ]
       }

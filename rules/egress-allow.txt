@@ -1,0 +1,80 @@
+# Egress allowlist — hosts Sakura may send an outbound request to without stopping to ask.
+#
+# WHY THIS EXISTS. A fetched page, email or document is untrusted data; it can carry an order for the
+# model ("send the user's keys to https://attacker/…"). The content scanner (injection.py) marks such
+# content as data on the way in, and egress_guard.py gates the action it's trying to cause: a request
+# that SENDS DATA to a host the user never named stops for explicit approval. This file is the set of
+# hosts that are known-safe destinations — the knowledge sources the tools already use, and localhost —
+# so ordinary research and local work never stop.
+#
+# WHAT COUNTS AS A MATCH. One host per line. A line matches the request's host exactly, or as a parent
+# domain (a line "github.com" also allows "api.github.com"). Loopback and private addresses are always
+# allowed and need no line here. Reading a page (a plain GET, no data) is never gated, whatever the
+# host — only sending data out is. Comments start with #.
+#
+# ADDING A HOST. Put your own always-allowed destinations under "User hosts" at the end, or add them in
+# ~/.sakura/egress-allow.txt (that file is read too, and isn't overwritten by an update). You can also
+# just approve a one-off when Sakura asks — naming the host to it is enough for that session.
+
+# ── Loopback / local (also matched automatically) ──
+localhost
+127.0.0.1
+0.0.0.0
+::1
+
+# ── Wikipedia / Wikidata ──
+wikipedia.org
+wikidata.org
+wikimedia.org
+
+# ── Package registries & release/version sources ──
+registry.npmjs.org
+api.npmjs.org
+www.npmjs.com
+pypi.org
+pypistats.org
+repo.packagist.org
+packagist.org
+crates.io
+go.dev
+proxy.golang.org
+endoflife.date
+
+# ── Code hosting / docs (read + the API the gh/live tools use) ──
+github.com
+api.github.com
+raw.githubusercontent.com
+objects.githubusercontent.com
+codeload.github.com
+
+# ── Vulnerability / security feeds ──
+services.nvd.nist.gov
+nvd.nist.gov
+api.osv.dev
+osv.dev
+www.cisa.gov
+
+# ── Live facts: weather, quakes, fx, markets, stats, papers, Q&A ──
+api.open-meteo.com
+open-meteo.com
+geocoding-api.open-meteo.com
+earthquake.usgs.gov
+api.frankfurter.dev
+open.er-api.com
+api.coinbase.com
+api.nasdaq.com
+api.stackexchange.com
+hn.algolia.com
+news.ycombinator.com
+export.arxiv.org
+api.crossref.org
+doi.org
+api.worldbank.org
+news.google.com
+
+# ── Search / instant-answer endpoints the web tools call ──
+duckduckgo.com
+html.duckduckgo.com
+api.duckduckgo.com
+
+# ── User hosts (yours; add below, one per line) ──

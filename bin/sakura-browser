@@ -82,7 +82,19 @@ def main():
     if not data:
         sys.exit("sakura-browser: the browser stopped. Run the command again to restart it.")
     out = json.loads(data)
-    print(out["out"])
+    text = out["out"]
+    # A page the browser shows is untrusted content like any fetch: strip smuggling characters, and
+    # lead it with a banner if it tries to give the agent orders. open/read return page text; the
+    # other commands return short status lines.
+    if cmd in ("open", "read") and out.get("ok") and text:
+        try:
+            sys.path.insert(0, os.path.join(ROOT, "mcp", "sakura-web"))
+            import injection
+            clean, lead, _ = injection.inspect(text, req.get("url") or "the current page")
+            text = (lead + "\n\n" + clean) if lead else clean
+        except Exception:
+            pass
+    print(text)
     sys.exit(0 if out["ok"] else 1)
 
 
