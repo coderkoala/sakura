@@ -5,6 +5,7 @@
 # (or LANG: python, node, php, rust, go, bash) and opens Sakura there with a brief that says: try it, show the output,
 # keep nothing. The directory is removed when the session ends. With no words it just drops you into the directory.
 set -u
+case "${1:-}" in -h|--help) sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"; exit 0 ;; esac
 lang=""; words=()
 for a in "$@"; do
     case "$a" in python|py|node|js|ts|php|rust|go|bash|sh|ruby) [ -z "$lang" ] && { lang=$a; continue; } ;; esac
@@ -20,7 +21,7 @@ if [ -z "$lang" ]; then
 fi
 case "$lang" in py) lang=python ;; js|ts) lang=node ;; sh) lang=bash ;; esac
 from="$PWD"
-dir="$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/sakura-try/XXXXXX")" || exit 1
+mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/sakura-try" && dir="$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/sakura-try/XXXXXX")" || exit 1
 trap 'rm -rf -- "$dir"' EXIT
 cd "$dir" || exit 1
 if [ ${#words[@]} -eq 0 ]; then

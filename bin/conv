@@ -16,6 +16,8 @@ Nothing leaves the machine; the input is never overwritten; the output lands nex
   conv trim video.mp4 START [END]   cut a piece (00:01:30 or 90), copying the streams, no re-encode
   conv audio video.mp4 [--to mp3]   the sound track (then `hear FILE` can transcribe it)
   conv gif clip.mp4 [--fps 12 --width 480]   a gif;   conv thumbs video.mp4   a contact sheet;   conv shrink video.mp4  = compress
+  conv URL --to pdf|png|html|md|txt   a web page saved here: printed to pdf or a full-page png by the local headless browser (Chromium,
+                               or Playwright's), to html as fetched, to md/txt through pandoc. Only that URL is fetched.
   conv extract ARCHIVE...      zip, tar(.gz/.bz2/.xz/.zst), 7z, rar: into a new folder named after the archive, never into the
                                current directory; entries that would land outside it (zip-slip) are refused
   conv --tools                 which converters are here and the install line for each that isn't
@@ -41,7 +43,7 @@ TOOLS = {  # name: (how to install)
     "pandoc": "sudo -A apt-get install -y pandoc", "libreoffice": "sudo -A apt-get install -y libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress",
     "pdftotext": "sudo -A apt-get install -y poppler-utils", "pdftoppm": "sudo -A apt-get install -y poppler-utils", "pdfunite": "sudo -A apt-get install -y poppler-utils",
     "qpdf": "sudo -A apt-get install -y qpdf", "gs": "sudo -A apt-get install -y ghostscript", "magick": "sudo -A apt-get install -y imagemagick",
-    "ffmpeg": "sudo -A apt-get install -y ffmpeg", "ocrmypdf": "uv tool install ocrmypdf  (and sudo -A apt-get install -y tesseract-ocr)",
+    "ffmpeg": "sudo -A apt-get install -y ffmpeg", "chromium": "sudo -A apt-get install -y chromium", "ocrmypdf": "uv tool install ocrmypdf  (and sudo -A apt-get install -y tesseract-ocr)",
     "tesseract": "sudo -A apt-get install -y tesseract-ocr", "exiftool": "sudo -A apt-get install -y libimage-exiftool-perl",
 }
 DRY = "--dry" in sys.argv
@@ -477,6 +479,65 @@ def extract(src, outdir):
     return True
 
 
+def chromium():
+    for c in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "brave-browser"):
+        if shutil.which(c):
+            return shutil.which(c)
+    for d in ("/opt/pw-browsers", os.path.expanduser("~/.cache/ms-playwright")):
+        if os.path.isdir(d):
+            for sub in sorted(os.listdir(d), reverse=True):
+                for cand in (os.path.join(d, sub), os.path.join(d, sub, "chrome-linux", "chrome"), os.path.join(d, sub, "chrome-linux", "headless_shell")):
+                    if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                        return cand
+    return None
+
+
+def url_convert(url, to, o, outdir):
+    import urllib.parse
+    import urllib.request
+    to = to.lower().lstrip(".")
+    name = urllib.parse.urlparse(url).netloc.replace(":", "_") + (urllib.parse.urlparse(url).path.rstrip("/").replace("/", "_") or "")
+    name = (name or "page")[:80]
+    fake = os.path.join(outdir or os.getcwd(), name + ".x")
+    out = o or out_path(fake, to, None, outdir)
+    if to in ("pdf", "png"):
+        b = chromium()
+        if b:
+            cmd = [b, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars", "--run-all-compositor-stages-before-draw", "--virtual-time-budget=5000",
+                   f"--print-to-pdf={out}" if to == "pdf" else f"--screenshot={out}", *(["--no-pdf-header-footer"] if to == "pdf" else ["--window-size=1280,2000"]), url]
+            return run(cmd, "chromium", out)
+        if to == "png":
+            print("conv: a png of a page needs Chromium (sudo -A apt-get install -y chromium)", file=sys.stderr)
+            return False
+    # html first, then whatever pandoc or LibreOffice make of it
+    html = out if to == "html" else out_path(fake, "html", None, outdir)
+    if DRY:
+        print(f"fetch {url} -> {html}")
+    else:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) conv/1.0"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                open(html, "wb").write(r.read())
+        except Exception as e:
+            print(f"conv: couldn't fetch {url}: {e}", file=sys.stderr)
+            return False
+    if to == "html":
+        made.append({"out": html, "tool": "fetch"})
+        if not AS_JSON:
+            print(f"wrote {html}  (fetched)")
+        return True
+    try:
+        if to in ("md", "txt"):
+            return run([need("pandoc"), "-f", "html", "-t", "gfm" if to == "md" else "plain", "--wrap=none", html, "-o", out], "pandoc", out)
+        if to == "pdf":
+            return office(html, "pdf", out, outdir)
+        print(f"conv: a page can become pdf, png, html, md or txt, not .{to}", file=sys.stderr)
+        return False
+    finally:
+        if to != "html" and not DRY and os.path.exists(html):
+            os.unlink(html)
+
+
 def tools_report():
     for t, how in TOOLS.items():
         p = have(t)
@@ -558,7 +619,10 @@ def main():
             print("conv FILE... --to EXT  (or merge, split, pages, rotate, compress, ocr, unlock, strip, trim, audio, gif, thumbs)", file=sys.stderr)
             return 2
         for f in files:
-            ok &= convert_one(f, opt["to"], opt["o"] if len(files) == 1 else None, opt["dir"])
+            if f.startswith(("http://", "https://")):
+                ok &= url_convert(f, opt["to"], opt["o"] if len(files) == 1 else None, opt["dir"])
+            else:
+                ok &= convert_one(f, opt["to"], opt["o"] if len(files) == 1 else None, opt["dir"])
     if AS_JSON:
         for m in made:
             print(json.dumps(m))

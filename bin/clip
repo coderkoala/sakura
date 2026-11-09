@@ -4,6 +4,7 @@
 #   clip set        put stdin on the clipboard:   some-command | clip set
 #   clip image F    save the clipboard's image to F (png)
 set -u
+case "${1:-}" in -h|--help) sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"; exit 0 ;; esac
 # Without a display there's no clipboard; say so instead of hanging on a socket that isn't there.
 if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then echo "clip: no display (not in a graphical session)" >&2; exit 1; fi
 wl() { [ -n "${WAYLAND_DISPLAY:-}" ] && command -v "$1" >/dev/null 2>&1; }

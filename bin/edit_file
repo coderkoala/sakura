@@ -92,7 +92,10 @@ def show(path, before, after):
 
 def main():
     a = sys.argv[1:]
-    if not a or "-h" in a or "--help" in a:
+    if "-h" in a or "--help" in a:
+        print(__doc__)
+        return
+    if not a:
         sys.exit(__doc__)
     flags = {x for x in a if x.startswith("--")}
     files = [x for x in a if not x.startswith("--")]

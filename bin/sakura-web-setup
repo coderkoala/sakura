@@ -4,6 +4,7 @@
 #   SearXNG in Docker, listening on 127.0.0.1:8888 only
 # Sakura works without these, with plainer fetching and fewer search results.
 set -eu
+case "${1:-}" in -h|--help) sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"; exit 0 ;; esac
 ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}/sakura"
 ENVDIR="$DATA/webenv"

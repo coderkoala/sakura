@@ -33,6 +33,9 @@ TEXT_ARG = {"news", "weather", "time", "cve", "eol", "answers", "issues", "discu
 
 def main():
     a = sys.argv[1:]
+    if a and a[0] in ("-h", "--help"):
+        print(__doc__)
+        return
     if not a or a[0] not in COMMANDS:
         sys.exit(__doc__)
     args = [" ".join(a[1:])] if a[0] in TEXT_ARG and a[1:] else a[1:]

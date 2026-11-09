@@ -10,6 +10,7 @@
 # them off. The copy comes from a COMMITTED revision (default HEAD), never the working tree, and only after its
 # selftest passes. install.sh then leaves the guard out of ~/.sakura/hooks.json, so it doesn't run twice.
 set -eu
+case "${1:-}" in -h|--help) sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"; exit 0 ;; esac
 GUARD_DIR=/usr/local/lib/sakura/guard
 REQ=/etc/codex/requirements.toml
 MARK="# Written by sakura-guard-install. Edit hooks/ in the Sakura repo and rerun it instead."

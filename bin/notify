@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # notify "title" "body" — desktop notification, plus ntfy push when NTFY_TOPIC is set.
+case "${1:-}" in -h|--help) sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"; exit 0 ;; esac
 title="${1:-Notice}"; body="${2:-}"
 command -v notify-send >/dev/null 2>&1 && notify-send -- "$title" "$body"
 if [ -n "${NTFY_TOPIC:-}" ]; then

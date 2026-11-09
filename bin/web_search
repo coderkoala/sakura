@@ -3,6 +3,9 @@
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "mcp", "sakura-web"))
 import webkit
+if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+    print(__doc__)
+    sys.exit(0)
 if len(sys.argv) < 2:
     sys.exit("usage: web_search <query> [max_results]")
 q = sys.argv[1]

@@ -6,6 +6,7 @@
 #   sakura-mail-setup notify on|off                                a desktop notification for new mail, every 10 minutes
 # Passwords are never given to this command. It tells you what to run so that you type them into pass yourself.
 set -eu
+case "${1:-}" in -h|--help) sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"; exit 0 ;; esac
 HIMALAYA_VERSION="${SAKURA_HIMALAYA_VERSION:-v2.2.1}"
 BIN="$HOME/.local/bin"
 CONF="${XDG_CONFIG_HOME:-$HOME/.config}/himalaya/config.toml"

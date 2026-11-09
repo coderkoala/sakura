@@ -7,6 +7,7 @@
 # Off, the TUI stops at every mutating or unknown command: q approves, w says "no, do this instead".
 # One session only: SAKURA_TRUST=0 ? ...   or   SAKURA_TRUST=1 ? ... despite the switch.
 set -u
+case "${1:-}" in -h|--help) sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"; exit 0 ;; esac
 file="${SAKURA_HOME:-$HOME/.sakura}/ask"
 rm -f "${SAKURA_HOME:-$HOME/.sakura}/trust" 2>/dev/null  # the old opt-in marker; trust is the default now
 case "${1:-status}" in

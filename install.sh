@@ -105,6 +105,7 @@ elif [ "${SAKURA_NO_AUTOPULL:-0}" != 1 ] && "$ROOT/bin/sakura-model" models 2>/d
     "$ROOT/bin/sakura-model" pull-all --background | sed 's/^/  /' || need "sakura-model pull-all"
 fi
 echo "  driver: $("$ROOT/bin/sakura-model" plan 2>&1 || true)"
+"$ROOT/bin/sakura-doctor" --quick 2>/dev/null | grep -E "^(FAIL|WARN)" | sed "s/^/  doctor: /" || true
 # The guardian checks the machine once a day and says what's about to hurt; quiet when nothing is.
 command -v systemctl >/dev/null 2>&1 && "$ROOT/bin/sakura-guardian" on >/dev/null 2>&1 || true
 "$ROOT/bin/sakura-guard-install" --check >/dev/null 2>&1 || need "the guard where Sakura can't edit it: sudo $ROOT/bin/sakura-guard-install"

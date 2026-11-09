@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""sakura-doctor — is this Sakura install whole? Every command answers, every hook compiles, every config parses. No model.
+
+  sakura-doctor            the checks, as a table; exit 1 if anything FAILs (WARNs don't)
+  sakura-doctor --fix      also relink ~/.local/bin entries that point nowhere, and make bin/* executable
+  sakura-doctor --json
+Checks: bin/* is executable and `--help` exits 0 within 15 s; hooks/*.py compile; hooks.json, models.json, config.toml and
+the exec-policy rules parse; shell/sakura.bash is valid bash; ~/.local/bin links point at this checkout; python3 ≥ 3.11 and
+the modules the tools import; the converters and other external programs (`conv --tools`), the kept tools' own checks
+(`sakura-tool check`); whether Ollama answers and which driver `sakura-model plan` picks. Run it after a dotfiles sync or
+on a machine that's new to Sakura; it says what to install, not just what's wrong.
+"""
+import concurrent.futures
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import urllib.request
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+BIN = os.path.join(ROOT, "bin")
+NEEDS_ARGS = set()  # every bin/* prints its manual on --help; none exempt
+
+
+def run(cmd, timeout=15, **kw):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kw)
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def check_bins(fix):
+    out = []
+    names = sorted(n for n in os.listdir(BIN) if not n.startswith(".") and os.path.isfile(os.path.join(BIN, n)))
+
+    def one(n):
+        p = os.path.join(BIN, n)
+        if not os.access(p, os.X_OK):
+            if fix:
+                os.chmod(p, 0o755)
+            else:
+                return ("FAIL", f"bin/{n}", "not executable (chmod +x, or --fix)")
+        r = run([p, "--help"], cwd=ROOT, env=dict(os.environ, SAKURA_HOME=os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura"))))
+        if r is None:
+            return ("FAIL", f"bin/{n}", "--help hung for 15 s")
+        if r.returncode != 0:
+            return ("FAIL", f"bin/{n}", f"--help exited {r.returncode}: {(r.stderr or r.stdout).strip().splitlines()[-1][:100] if (r.stderr or r.stdout).strip() else ''}")
+        if not (r.stdout or "").strip():
+            return ("WARN", f"bin/{n}", "--help prints nothing")
+        return None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        for res in ex.map(one, names):
+            if res:
+                out.append(res)
+    if not out:
+        out.append(("PASS", "bin/*", f"{len(names)} commands answer --help"))
+    return out
+
+
+def check_hooks():
+    out = []
+    bad = []
+    for n in sorted(os.listdir(os.path.join(ROOT, "hooks"))):
+        if n.endswith(".py"):
+            r = run([sys.executable, "-m", "py_compile", os.path.join(ROOT, "hooks", n)])
+            if r is None or r.returncode:
+                bad.append(n)
+    out.append(("FAIL", "hooks", f"don't compile: {', '.join(bad)}") if bad else ("PASS", "hooks/*.py", "all compile"))
+    try:
+        h = json.load(open(os.path.join(ROOT, "hooks.json")))
+        missing = []
+        for ev, groups in h.get("hooks", {}).items():
+            for g in groups:
+                for hk in g.get("hooks", []):
+                    m = re.search(r"__SAKURA_DIR__/(\S+)", hk.get("command", ""))
+                    if m and not os.path.exists(os.path.join(ROOT, m.group(1))):
+                        missing.append(m.group(1))
+        out.append(("FAIL", "hooks.json", f"names files that don't exist: {', '.join(missing)}") if missing else ("PASS", "hooks.json", f"valid; {sum(len(g['hooks']) for gs in h['hooks'].values() for g in gs)} hooks wired"))
+    except (OSError, ValueError, KeyError) as e:
+        out.append(("FAIL", "hooks.json", f"doesn't parse: {e}"))
+    return out
+
+
+def check_configs():
+    out = []
+    try:
+        import tomllib
+        tomllib.load(open(os.path.join(ROOT, "config.toml"), "rb"))
+        out.append(("PASS", "config.toml", "parses"))
+    except Exception as e:
+        out.append(("FAIL", "config.toml", f"{e}"))
+    for n in ("models.json",):
+        try:
+            json.load(open(os.path.join(ROOT, n)))
+            out.append(("PASS", n, "parses"))
+        except Exception as e:
+            out.append(("FAIL", n, f"{e}"))
+    rules = os.path.join(ROOT, "rules")
+    bad = 0
+    for n in os.listdir(rules):
+        if n.endswith(".rules"):
+            for i, line in enumerate(open(os.path.join(rules, n)), 1):
+                s = line.strip()
+                if s and not s.startswith("#") and not re.match(r"^prefix_rule\(pattern=\[.*\],\s*decision=\"(allow|prompt|forbidden)\"", s):
+                    bad += 1
+    out.append(("FAIL", "rules/*.rules", f"{bad} lines aren't prefix_rule(...)") if bad else ("PASS", "rules/*.rules", "every line parses"))
+    r = run(["bash", "-n", os.path.join(ROOT, "shell", "sakura.bash")])
+    out.append(("PASS", "shell/sakura.bash", "valid bash") if r and r.returncode == 0 else ("FAIL", "shell/sakura.bash", (r.stderr if r else "timed out").strip()[:120]))
+    return out
+
+
+def check_links(fix):
+    out = []
+    lb = os.path.expanduser("~/.local/bin")
+    if not os.path.isdir(lb):
+        return [("WARN", "~/.local/bin", "doesn't exist; run ./install.sh")]
+    stale, missing, fixed = [], [], 0
+    for n in sorted(os.listdir(BIN)):
+        link = os.path.join(lb, n)
+        target = os.path.join(BIN, n)
+        if os.path.islink(link):
+            if not os.path.exists(link):
+                stale.append(n)
+                if fix:
+                    os.unlink(link)
+                    os.symlink(target, link)
+                    fixed += 1
+        elif not os.path.exists(link):
+            missing.append(n)
+            if fix:
+                os.symlink(target, link)
+                fixed += 1
+    if fix and fixed:
+        out.append(("PASS", "~/.local/bin", f"relinked {fixed}"))
+    elif stale:
+        out.append(("FAIL", "~/.local/bin", f"{len(stale)} links point nowhere ({', '.join(stale[:5])}…): sakura-doctor --fix"))
+    elif missing:
+        out.append(("WARN", "~/.local/bin", f"{len(missing)} commands not linked ({', '.join(missing[:6])}{'…' if len(missing) > 6 else ''}): ./install.sh or --fix"))
+    else:
+        out.append(("PASS", "~/.local/bin", "every command is linked"))
+    if lb not in os.environ.get("PATH", "").split(":"):
+        out.append(("WARN", "PATH", "~/.local/bin isn't on PATH in this shell"))
+    return out
+
+
+def check_python():
+    out = []
+    v = sys.version_info
+    out.append(("PASS", "python", f"{v.major}.{v.minor}") if (v.major, v.minor) >= (3, 11) else ("FAIL", "python", f"{v.major}.{v.minor}; 3.11+ needed"))
+    mods = {"PIL": "pillow (look, shelve, conv)", "pypdf": "pypdf (conv strip/merge fallback)", "duckdb": "duckdb (dq)"}
+    missing = [f"{m}: {why}" for m, why in mods.items() if run([sys.executable, "-c", f"import {m}"]).returncode]
+    out.append(("WARN", "python modules", "; ".join(missing) + " — uv pip install, or the tool installs on first use") if missing else ("PASS", "python modules", "pillow, pypdf, duckdb"))
+    return out
+
+
+def check_external():
+    out = []
+    r = run([os.path.join(BIN, "conv"), "--tools"], timeout=20)
+    if r and r.returncode == 0:
+        missing = [l.split()[1] for l in r.stdout.splitlines() if l.strip().startswith("missing")]
+        out.append(("WARN", "converters", f"missing: {', '.join(missing)} (conv --tools has the install lines)") if missing else ("PASS", "converters", "all present"))
+    for tool, why in (("ssh", "remote machines"), ("git", "everything"), ("restic", "sakura-backup"), ("rclone", "drive"), ("yt-dlp", "vid"), ("ffmpeg", "media"), ("jq", "scripts")):
+        if not shutil.which(tool) and not os.path.exists(os.path.expanduser(f"~/.local/bin/{tool}")):
+            out.append(("WARN", tool, f"not installed ({why})"))
+    return out
+
+
+def check_kept_tools():
+    r = run([os.path.join(BIN, "sakura-tool"), "check"], timeout=120)
+    if r is None:
+        return [("WARN", "kept tools", "check took over 2 minutes")]
+    if r.returncode:
+        return [("FAIL", "kept tools", (r.stdout + r.stderr).strip().splitlines()[-1][:120] if (r.stdout + r.stderr).strip() else "a kept tool's check fails")]
+    return [("PASS", "kept tools", (r.stdout.strip().splitlines() or ["none kept"])[-1][:100])]
+
+
+def check_models():
+    out = []
+    try:
+        with urllib.request.urlopen(os.environ.get("OLLAMA_API_BASE", "http://127.0.0.1:11434") + "/api/tags", timeout=3) as r:
+            n = len(json.load(r).get("models", []))
+        out.append(("PASS", "ollama", f"answers; {n} models"))
+    except Exception:
+        out.append(("WARN", "ollama", "not answering on 11434 (sakura-launch falls back or starts it)"))
+    r = run([os.path.join(BIN, "sakura-model"), "plan"], timeout=20)
+    if r and r.returncode == 0 and r.stdout.strip():
+        out.append(("PASS", "driver", r.stdout.strip().splitlines()[0][:100]))
+    else:
+        out.append(("WARN", "driver", "sakura-model plan didn't answer (no GPU here?)"))
+    return out
+
+
+def main():
+    a = sys.argv[1:]
+    if a and a[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    fix, as_json, quick = "--fix" in a, "--json" in a, "--quick" in a
+    rows = []
+    rows += check_bins(fix)
+    rows += check_hooks()
+    rows += check_configs()
+    rows += check_links(fix)
+    rows += check_python()
+    if not quick:
+        rows += check_external()
+        rows += check_kept_tools()
+        rows += check_models()
+    order = {"FAIL": 0, "WARN": 1, "PASS": 2}
+    rows.sort(key=lambda r: order[r[0]])
+    if as_json:
+        print(json.dumps([{"status": s, "what": w, "detail": d} for s, w, d in rows], indent=1))
+    else:
+        w1 = max(len(r[1]) for r in rows)
+        for s, w, d in rows:
+            print(f"{s:<5} {w.ljust(w1)}  {d}")
+        fails = sum(1 for r in rows if r[0] == "FAIL")
+        warns = sum(1 for r in rows if r[0] == "WARN")
+        print(f"\n{'whole' if not fails else f'{fails} failing'}" + (f", {warns} to look at" if warns else ""))
+    return 1 if any(r[0] == "FAIL" for r in rows) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

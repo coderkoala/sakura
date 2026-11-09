@@ -102,10 +102,12 @@ CHECK
 - `space` what's eating the disk, with a verdict per item; `space clean` the safe set, `--go` clears it (self-rebuilding caches, trash, apt, journal; never downloads, documents, models). "Disk full" → `space`.
 - `drift FILE|packages|units|sshkeys [HOST...]` how the machines differ, differences only, a diff for a file.
 - `when "0 3 * * 1"` / `when "Mon..Fri 09:00"` a schedule in English with its next firings; `when --timers` every systemd timer. Never read a cron line in your head.
+- `sakura-doctor` after a dotfiles sync or on a new box: is the install whole (every command, hook, config), what's missing; `--fix` relinks.
 
 ## Files and video stay here
 Never suggest a website to convert, merge, compress, OCR or unlock a file (ilovepdf and the like): `conv` does it locally.
 - `conv FILE --to pdf|docx|md|html|png|jpg|webp|mp3|mp4|gif|txt…` (pandoc, LibreOffice, ffmpeg, ImageMagick, poppler); `conv merge|split|pages|rotate|compress|ocr|unlock|strip X.pdf`; `conv trim|audio|gif|thumbs|shrink VIDEO`; `conv extract ARCHIVE` (its own folder, zip-slip refused). `strip` removes EXIF/GPS/author before sharing. Inputs are never overwritten; `--dry` shows the command; `--tools` what's installed.
+- `dupes DIR...` the same file by content across folders and drives (dry run; `--link --go` keeps one copy's bytes, `--rm --go` deletes copies). `shelve DIR --into LIB` files photos and videos into `YEAR/YEAR-MM/` by EXIF or creation date (dry run; `--go`). `conv URL --to pdf|png|md` saves a web page here.
 - `vid URL` keeps the user's own video with metadata, thumbnail, subtitles; `vid archive URL` a channel or playlist, detached, resumable (`vid status|log`); `vid watch URL` what's new there; `vid audio URL` then `hear`. Private videos: `--cookies-from-browser firefox`; never ask for a password.
 
 ## Remote machines

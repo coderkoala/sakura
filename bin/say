@@ -6,6 +6,7 @@
 #   SAKURA_VOICE=... sets the default Piper voice (default en_US-lessac-medium)
 # A reminder that speaks: pa remind in 10 minutes "stand up"  (pa calls `notify`, which calls `say` when SAKURA_SPEAK=1).
 set -u
+case "${1:-}" in -h|--help) sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"; exit 0 ;; esac
 voice="${SAKURA_VOICE:-en_US-lessac-medium}"
 [ "${1:-}" = --voice ] && { voice="$2"; shift 2; }
 if [ $# -gt 0 ]; then text="$*"; else text="$(cat)"; fi
