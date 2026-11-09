@@ -4,7 +4,8 @@
 #   sakura-release 0.9.7 notes.md            everything below, stopping before anything irreversible to show what it will do
 #   sakura-release 0.9.7 notes.md --go       actually do it
 # Steps: 1 clean tree check · 2 staged-secrets scan · 3 VERSION + commit + tag v· · 4 push with tags ·
-# 5 engine assets fetched from the last release that has them (sha256 verified; the binary is unchanged since v0.6.0) ·
+# 5 engine assets fetched from the last release that has them (sha256 verified; after an engine rebuild, put the new tar.gz and .sha256 in
+# ~/.cache/sakura/release-assets first, as for v0.9.9, or the old engine ships) ·
 # 6 gh release create (run as its own command, or the permission classifier balks) · 7 the dotfiles pin, autosync paused.
 # Any step failing stops the rest. Nothing here talks to a model.
 set -euo pipefail
@@ -32,7 +33,7 @@ fi
 say "  clean"
 
 say "== 3/7 version and tag"
-run bash -c "echo $ver > VERSION && git add VERSION && git commit -qm 'release: $ver' && git tag v$ver"
+run bash -c "echo $ver > VERSION && git add VERSION && { git diff --cached --quiet || git commit -qm 'release: $ver'; } && git tag v$ver"
 
 say "== 4/7 push"
 run git push -q origin main --tags
