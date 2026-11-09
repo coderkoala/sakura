@@ -4,6 +4,7 @@
 #   sakura-morning          print it
 #   sakura-morning --once   print it only if it hasn't been shown today (what the shell calls)
 set -u
+case "${1:-}" in -h|--help) sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"; exit 0 ;; esac
 stamp="${SAKURA_HOME:-$HOME/.sakura}/morning-shown"
 if [ "${1:-}" = --once ]; then
     [ "$(cat "$stamp" 2>/dev/null)" = "$(date +%F)" ] && exit 0
