@@ -174,6 +174,8 @@ def convert_one(src, to, o, outdir):
         out = out_path(src, "pdf", o, outdir)
         return run([need("magick"), src, out], "imagemagick", out)
     if s in DOCS and t in DOCS:
+        if t == "pptx" and s not in OFFICE:  # slides from markdown or html are pandoc's; LibreOffice can't read those into Impress
+            return pandoc_doc(src, t, out_path(src, t, o, outdir))
         if s in OFFICE and t in OFFICE or s in ("xlsx", "xls", "ods", "pptx", "ppt", "odp") or t in ("xlsx", "xls", "ods", "pptx", "ppt", "odp"):
             return office(src, t, o, outdir)
         return pandoc_doc(src, t, out_path(src, t, o, outdir))
@@ -1164,4 +1166,13 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import logging
+    logging.getLogger("pypdf").setLevel(logging.ERROR)
+    try:
+        sys.exit(main())
+    except Exception as e:
+        if not type(e).__module__.startswith(("pypdf", "fitz", "pymupdf")):
+            raise
+        # a file that isn't the PDF its name says, or a damaged one: one line, not a library's traceback
+        print(f"conv: that isn't a PDF this can read ({type(e).__name__}: {str(e)[:120]}). `file NAME` says what it really is.", file=sys.stderr)
+        sys.exit(1)

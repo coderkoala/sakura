@@ -1033,6 +1033,29 @@ def office(tmp):
     return out
 
 
+def edges(tmp):
+    """Two things that used to go wrong at the edges: slides from markdown, and a file that isn't the PDF its name says."""
+    import zipfile
+    conv = os.path.join(BIN, "conv")
+    deck = os.path.join(tmp, "deck.md")
+    open(deck, "w").write("# First\n\n- one\n- two\n\n# Second\n\nwords\n")
+    r = subprocess.run([conv, deck, "--to", "pptx"], capture_output=True, text=True, cwd=tmp)
+    out = os.path.join(tmp, "deck.pptx")
+    slides, text = 0, ""
+    if os.path.exists(out):
+        z = zipfile.ZipFile(out)
+        names = [n for n in z.namelist() if n.startswith("ppt/slides/slide")]
+        slides, text = len(names), "".join(z.read(n).decode("utf-8", "replace") for n in names)
+    fake = os.path.join(tmp, "form.pdf")
+    open(fake, "w").write("not a pdf\n")
+    f = subprocess.run([conv, "fields", fake], capture_output=True, text=True, cwd=tmp)
+    g = subprocess.run([conv, "pages", fake], capture_output=True, text=True, cwd=tmp)
+    return {
+        "markdown becomes slides, one per heading, with its words": r.returncode == 0 and slides == 2 and "First" in text and "two" in text,
+        "a file that isn't a PDF is one plain line and exit 1, not a traceback": f.returncode == 1 and "isn't a PDF" in f.stderr and "Traceback" not in f.stderr + g.stderr and g.returncode != 0,
+    }
+
+
 CASES = {
     "books": books,
     "kindle": kindle,
@@ -1040,6 +1063,7 @@ CASES = {
     "stems": stems,
     "ocr": ocr,
     "office": office,
+    "edges": edges,
 }
 
 
