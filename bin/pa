@@ -10,8 +10,11 @@ Log         pa log "shipped the fix"               feeds the standup
 Watching    pa watch every day 8am: releases tokio-rs/tokio      tells you when a `live` answer changes
 Scheduled   pa job every day 7am: summarise my unread mail       runs Sakura unattended, as a worker that can't send mail
 Auto-reply  pa autoreply on "I'm on a deadline and will reply when I can."     [--days N]  pa autoreply preview | off | status
+Voice       pa voice learn [--n 40] [--folder NAME] [--model]    how you write mail, counted from your own sent mail (through himalaya, on
+            this machine) into a short note: the greeting and sign-off you use, your length, tone and language. No sentence of any
+            mail, no address. `pa ask`, mail jobs, the default auto-reply and Sakura's drafts read it.     pa voice     pa voice forget
 Settings    pa set role developer     pa set repo ~/code/app     pa set place Kathmandu     pa unset repo ~/code/app     pa settings
-Anything    pa ask "..."     opens Sakura as your PA
+Anything    pa ask "..."     opens Sakura as your PA     pa ask --print "..."   the brief it would get, and stop
 
 Cron       pa cron "every day 02:00" -- rsync -a ~/notes/ backup:/notes/     a command on a schedule, exactly then, no model
            pa cron "dec 26 00:00" -- ~/bin/wish.sh                         once; "midnight", "friday 3pm", "in 2 hours", ISO dates work
@@ -44,8 +47,9 @@ sys.path.insert(0, os.path.join(ROOT, "mcp", "sakura-web"))
 DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 DAY_SHORT = {d[:3]: d for d in DAYS}
 MONTHS = "jan feb mar apr may jun jul aug sep oct nov dec".split()
+# sent: the folder `pa voice learn` reads, when it isn't called Sent.
 LIST_SETTINGS = {"role": "roles", "repo": "repos", "calendar": "calendars", "host": "hosts", "topic": "topics", "product": "products", "drafts": "drafts"}
-SINGLE_SETTINGS = {"place", "account"}
+SINGLE_SETTINGS = {"place", "account", "sent"}
 AUTOREPLY_EVERY = 600
 ONCE_PER_SENDER_DAYS = 7
 MAX_REPLIES_PER_RUN = 10
@@ -393,6 +397,8 @@ def cmd_test(args):
     elif item["kind"] == "mail":
         print(f"  himalaya message compose --to {item['to']} --subject {json.dumps(item['subject'])} --body {json.dumps(item['body'])} --send")
         print(f"  account: {who_am_i() or 'UNKNOWN (himalaya not configured; it would fail)'}")
+    elif item["kind"] == "job":
+        print(f"  {job_brief(item['prompt'])[0]}")
     else:
         print(f"  {item.get('text') or item.get('prompt')}")
 
@@ -610,11 +616,17 @@ def cmd_tick(_):
         notify("Auto-reply problem", str(e)[:200])
 
 
+def job_brief(prompt):
+    """What a job is told, and whether it's about mail. A mail job drafts in the user's learned voice."""
+    about_mail = re.search(r"\b(?:e-?mails?|mail(?:box)?|inbox|himalaya|unread|repl(?:y|ies)|newsletters?)\b", prompt, re.I)
+    return prompt + (voice_block() if about_mail else ""), about_mail
+
+
 def cmd_job_run(args):
     # A scheduled job reads things (news, mail), so it keeps the network, but it can only write to its own directory,
     # and it sees the mail credentials only when the job is about mail. Keys, agents and sockets stay hidden.
-    prompt = args[0]
-    about_mail = re.search(r"\b(?:e-?mails?|mail(?:box)?|inbox|himalaya|unread|repl(?:y|ies)|newsletters?)\b", prompt, re.I)
+    title = args[0]
+    prompt, about_mail = job_brief(title)
     env = dict(os.environ, SAKURA_WORKER="1", SAKURA_WORKER_NET="1", SAKURA_WORKER_SECRETS="mail" if about_mail else "")
     env.pop("SAKURA_COORDINATOR", None)
     work = os.path.join(DIR, "job-work")
@@ -623,10 +635,10 @@ def cmd_job_run(args):
         out = subprocess.run([os.path.join(ROOT, "bin", "sakura-launch"), "--exec", "--skip-git-repo-check", "--json", prompt], cwd=work, env=env,
                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=1800)
     except subprocess.TimeoutExpired:
-        notify("Scheduled job", f"{prompt[:60]}: ran out of time")
+        notify("Scheduled job", f"{title[:60]}: ran out of time")
         return
     if out.returncode == 78:  # the sandbox isn't available, and a job doesn't run without it
-        notify("Scheduled job", f"{prompt[:60]}: didn't run. {out.stderr.strip()[:200]}")
+        notify("Scheduled job", f"{title[:60]}: didn't run. {out.stderr.strip()[:200]}")
         return
     final = ""
     for line in out.stdout.splitlines():
@@ -636,7 +648,7 @@ def cmd_job_run(args):
             continue
         if item.get("type") == "agent_message" and item.get("text"):
             final = item["text"]
-    notify("Scheduled job", f"{prompt[:60]}: {final or 'finished with no answer'}")
+    notify("Scheduled job", f"{title[:60]}: {final or 'finished with no answer'}")
 
 
 # ── Auto-reply ────────────────────────────────────────────────────────────────
@@ -793,7 +805,8 @@ def cmd_autoreply(args):
         if not shutil.which("himalaya"):
             sys.exit("pa: email isn't set up. See: sakura-mail-setup")
         at = now()
-        state = {"on": True, "message": " ".join(rest).strip() or DEFAULT_REPLY, "since": at.isoformat(), "senders": state.get("senders", {}), "handled": state.get("handled", []), "log": state.get("log", [])}
+        # No message of your own: the plain default, closed the way you close your mail (pa voice learn).
+        state = {"on": True, "message": " ".join(rest).strip() or DEFAULT_REPLY + ("\n\n" + voice_signoff() if voice_signoff() else ""), "since": at.isoformat(), "senders": state.get("senders", {}), "handled": state.get("handled", []), "log": state.get("log", [])}
         if days:
             state["until"] = (at + timedelta(days=days)).isoformat()
         save("autoreply.json", state)
@@ -820,6 +833,268 @@ def cmd_autoreply(args):
             print(f"Auto-reply is on since {state['since'][:16].replace('T', ' ')}{', until ' + state['until'][:16].replace('T', ' ') if state.get('until') else ''}.\nIt says: {state['message']}")
         for line in state.get("log", [])[-8:]:
             print("  " + line)
+
+
+# ── Voice: how the user writes mail ───────────────────────────────────────────
+# `pa voice learn` reads the user's own sent mail and keeps a small style note (voice.md) that drafting reads. The
+# features are counted, not guessed, and the note is built from fixed vocabulary: a greeting word, a sign-off phrase,
+# the name they sign with, numbers. No sentence of any mail, no address and no link can get into it.
+
+VOICE_CAP = 1200
+VOICE_MIN = 3
+SENT_FOLDERS = ["Sent", "Sent Items", "Sent Mail", "[Gmail]/Sent Mail", "INBOX.Sent"]
+GREETING = re.compile(r"^(hi|hello|hey|dear|namaste|namaskar|greetings|good (?:morning|afternoon|evening)|नमस्ते|नमस्कार|प्रिय)(?![\w'])((?:\s+[^\s,!:]+){0,3}?)\s*([,!:]?)$", re.I)
+SIGNOFF = re.compile(r"^(thanks(?: a lot| so much| again)?|thank you(?: very much| so much)?|many thanks|best(?: regards| wishes)?|kind regards|warm regards|"
+                     r"regards|with regards|cheers|sincerely|yours (?:sincerely|truly|faithfully)|yours|take care|talk soon|dhanyabad|dhanyawad|धन्यवाद|शुभकामना)\s*([,!.]?)$", re.I)
+SIGNED_NAME = re.compile(r"^[^\W\d_]+\.?(?: [^\W\d_]+\.?){0,2}$")
+QUOTE_START = re.compile(r"^(?:On .{5,200} wrote:|-{2,} ?(?:Original|Forwarded) [Mm]essage ?-{2,}|_{10,}|From: .+)\s*$")
+ADDRESS = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+|\b(?:https?://|www\.)\S+", re.I)
+CONTRACTION = re.compile(r"\b\w+['’](?:s|t|re|ve|ll|d|m)\b", re.I)
+EMOJI = re.compile("[\U0001F300-\U0001FAFF☀-➿]")
+ROMAN_NEPALI = re.compile(r"\b(?:cha|chha|chaina|hola|hajur|tapai|tapain|ramro|bhayo|garnu|garchu|huncha|dhanyabad|namaste|pathaunu|bholi|aaja)\b", re.I)
+MAIL_WORDS = re.compile(r"\b(?:e-?mails?|mail|inbox|himalaya|repl(?:y|ies)|draft(?:s|ing)?|newsletter|cover letter|letter to)\b", re.I)
+
+
+def mail_text(raw):
+    """The user's own words in a sent message: no header block, nothing quoted, no signature block."""
+    lines = raw.replace("\r\n", "\n").split("\n")
+    if lines and re.match(r"^[A-Za-z][A-Za-z-]*:\s", lines[0]):  # a header block came with it
+        cut = next((i for i, l in enumerate(lines) if not l.strip()), len(lines))
+        lines = lines[cut:]
+    out = []
+    for l in lines:
+        if QUOTE_START.match(l.strip()) or l.rstrip() == "--":
+            break
+        if l.lstrip().startswith((">", "<#")):
+            continue
+        out.append(l.rstrip())
+    return "\n".join(out).strip()
+
+
+def sent_mail(n, folder=None):
+    """The text of up to n sent messages, and the folder they came from."""
+    names = [folder] if folder else [f for f in dict.fromkeys([settings().get("sent")] + SENT_FOLDERS) if f]
+    for name in names:
+        r = himalaya("envelope", "list", "--folder", name, "--json", "--page-size", str(n))
+        try:
+            found = json.loads(r.stdout) if r.returncode == 0 else []
+        except ValueError:
+            found = []
+        found = found.get("envelopes", found) if isinstance(found, dict) else found
+        if not found:
+            continue
+        texts = []
+        for e in found[:n]:
+            mid = str(e.get("id", ""))
+            r = himalaya("message", "read", "--folder", name, "--preview", "--no-headers", mid)
+            if r.returncode:  # an older himalaya without those flags
+                r = himalaya("message", "read", "--folder", name, mid)
+            text = mail_text(r.stdout) if r.returncode == 0 else ""
+            if text:
+                texts.append(text)
+        return texts, name
+    return [], None
+
+
+def _median(values):
+    values = sorted(values)
+    return values[len(values) // 2] if values else 0
+
+
+def voice_features(texts):
+    """Counted, not guessed: greeting, sign-off, signed name, length, tone markers, scripts."""
+    from collections import Counter
+    greet, sign, names, words, sentences = Counter(), Counter(), Counter(), [], []
+    marks = Counter()
+    for text in texts:
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        if not lines:
+            continue
+        body = list(lines)
+        m = GREETING.match(lines[0])
+        if m:
+            word = m.group(1).lower()
+            word = word if not word.isascii() else word.capitalize()
+            greet[word + (" <name>" if m.group(2).strip() else "") + m.group(3)] += 1
+            body = body[1:]
+            if word == "Dear":
+                marks["dear"] += 1
+        else:
+            greet[""] += 1
+        for i in range(max(0, len(lines) - 4), len(lines)):
+            m = SIGNOFF.match(lines[i])
+            if not m:
+                continue
+            phrase = m.group(1).lower()
+            sign[(phrase if not phrase.isascii() else phrase.capitalize()) + m.group(2)] += 1
+            if re.match(r"(?:.*regards|sincerely|yours)", phrase):
+                marks["formal close"] += 1
+            if i + 1 < len(lines) and len(lines[i + 1]) <= 30 and SIGNED_NAME.match(lines[i + 1]):
+                names[lines[i + 1]] += 1
+            body = [l for l in body if l not in lines[i:]]
+            break
+        else:
+            sign[""] += 1
+        prose = " ".join(body)
+        words.append(len(prose.split()))
+        sentences.append(len([s for s in re.split(r"[.!?।]+(?:\s|$)", prose) if s.strip()]))
+        letters = [c for c in prose if c.isalpha()]
+        deva = sum(1 for c in letters if "ऀ" <= c <= "ॿ")
+        if letters and deva / len(letters) > 0.3:
+            marks["devanagari"] += 1
+        elif len(ROMAN_NEPALI.findall(prose)) >= 2:
+            marks["roman nepali"] += 1
+        else:
+            marks["latin"] += 1
+        for name, hit in (("contractions", CONTRACTION.search(prose)), ("exclamation marks", "!" in prose), ("emoji", EMOJI.search(prose)),
+                          ("please", re.search(r"\b(?:please|kindly)\b", prose, re.I)), ("bullet lists", any(re.match(r"[-*•] ", l) for l in body))):
+            if hit:
+                marks[name] += 1
+    return {"messages": len(words), "greetings": greet.most_common(3), "signoffs": sign.most_common(3), "names": names.most_common(1),
+            "words": _median(words), "sentences": _median(sentences), "marks": dict(marks)}
+
+
+def voice_note(f, learned, folder):
+    n = f["messages"]
+
+    def often(count):  # in a third of the mail or more
+        return count * 3 >= n
+    lines = ["# How I write mail", f"Counted from {n} of my sent messages ({folder}) on {learned}; `pa voice learn` refreshes it. A guide for drafts, not a rule."]
+    top, count = f["greetings"][0]
+    others = [g for g, c in f["greetings"][1:] if c * 5 >= n]
+    lines.append("- Greeting: " + (f'"{top}"' if top else "none, straight to the point") + f" ({count} of {n})"
+                 + ("; also " + ", ".join(f'"{g}"' if g else "none" for g in others) if others else ""))
+    top, count = f["signoffs"][0]
+    name = f["names"][0][0] if f["names"] and f["names"][0][1] * 2 >= max(1, n - dict(f["signoffs"]).get("", 0)) else ""
+    others = [g for g, c in f["signoffs"][1:] if c * 5 >= n]
+    lines.append("- Sign-off: " + (f'"{top}"' + (f', then "{name}" on its own line' if name else "") if top else "none") + f" ({count} of {n})"
+                 + ("; also " + ", ".join(f'"{g}"' if g else "none" for g in others) if others else ""))
+    size = "very short" if f["words"] < 40 else "short" if f["words"] < 100 else "medium" if f["words"] < 250 else "long"
+    lines.append(f"- Length: {size}, about {f['words']} words in {max(1, f['sentences'])} sentence{'s' if f['sentences'] != 1 else ''}")
+    m = f["marks"]
+    casual = [k for k in ("contractions", "exclamation marks", "emoji") if often(m.get(k, 0))]
+    formal = [k for k in ("dear", "formal close") if often(m.get(k, 0))]
+    tone = "formal" if formal and not casual else "casual" if casual and not formal else "plain" if not casual else "mixed"
+    detail = [k for k in casual] + (['opens with "Dear"'] if "dear" in formal else []) + (["closes with regards"] if "formal close" in formal else [])
+    detail += [k for k in ("please", "bullet lists") if often(m.get(k, 0))]
+    absent = [k for k in ("contractions", "exclamation marks") if not m.get(k)]
+    lines.append(f"- Tone: {tone}" + (" (" + ", ".join(detail) + ")" if detail else "") + ("; no " + " or ".join(absent) if absent else ""))
+    langs = [(label, m.get(k, 0)) for k, label in (("latin", "English"), ("devanagari", "Nepali/Hindi in Devanagari"), ("roman nepali", "Nepali in Roman script")) if m.get(k)]
+    langs.sort(key=lambda x: -x[1])
+    lines.append("- Language: " + "; ".join(f"{label} ({c} of {n})" for label, c in langs))
+    return "\n".join(lines) + "\n"
+
+
+def voice_unsafe(text):
+    """Why this text can't go in the voice note, or None: an address, a link, or anything memory would refuse."""
+    if ADDRESS.search(text):
+        return "it contains an address or a link"
+    import importlib.machinery
+    return importlib.machinery.SourceFileLoader("sakura_memory", os.path.join(ROOT, "bin", "sakura-memory")).load_module().flagged(text)
+
+
+def phrase_voice(note):
+    """An optional model pass: one sentence describing the style. It sees the counted note, never the mail."""
+    cmd = shlex_split(os.environ["SAKURA_CONSULT"]) if os.environ.get("SAKURA_CONSULT") else [os.path.join(ROOT, "bin", "consult")]
+    prompt = ("These are counted features of how someone writes email. In one sentence of at most 40 words, describe the style "
+              "so that a drafter can imitate it. Use only what is listed; add no names, addresses or examples.\n\n" + note)
+    try:
+        r = subprocess.run(cmd + ["prose"], input=prompt, capture_output=True, text=True, timeout=240)
+    except (OSError, subprocess.TimeoutExpired):
+        return None, "the model didn't answer"
+    lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip() and not l.startswith("[consult:")]
+    if r.returncode or not lines:
+        return None, "the model didn't answer"
+    sentence = " ".join(lines)
+    if len(sentence) > 320:
+        return None, "its sentence was too long"
+    why = voice_unsafe(sentence)
+    return (None, why) if why else (sentence, None)
+
+
+def voice_text():
+    """The note drafting reads, or "" when nothing has been learned. Checked again on the way out: the file can be edited."""
+    try:
+        with open(path("voice.md"), encoding="utf-8") as f:
+            note = f.read(VOICE_CAP)
+    except OSError:
+        return ""
+    return "" if voice_unsafe(note) else note.strip()
+
+
+def voice_block():
+    note = voice_text()
+    return ("\n\n<voice>\nHow the user writes mail, counted from their own sent mail. Draft in this voice: their greeting, their sign-off, "
+            "their length and tone. It's a guide; what they ask for now wins.\n" + note + "\n</voice>") if note else ""
+
+
+def voice_signoff():
+    """The learned sign-off as lines to end a message with, or ""."""
+    f = load("voice.json", {})
+    try:
+        top = f["signoffs"][0][0]
+        name = f["names"][0][0] if f.get("names") else ""
+    except (KeyError, IndexError, TypeError):
+        return ""
+    if not top or voice_unsafe(f"{top} {name}"):
+        return ""
+    return top + ("\n" + name if name else "")
+
+
+def cmd_voice(args):
+    action = args[0] if args else "show"
+    if action == "learn":
+        rest, n, folder, model = list(args[1:]), 40, None, False
+        while rest:
+            a = rest.pop(0)
+            if a == "--n" and rest:
+                n = max(1, min(200, int(rest.pop(0))))
+            elif a == "--folder" and rest:
+                folder = rest.pop(0)
+            elif a == "--model":
+                model = True
+            else:
+                sys.exit("usage: pa voice learn [--n 40] [--folder NAME] [--model]")
+        if not shutil.which("himalaya"):
+            sys.exit("pa: email isn't set up. See: sakura-mail-setup")
+        texts, used = sent_mail(n, folder)
+        if len(texts) < VOICE_MIN:
+            sys.exit(f"pa: I found {len(texts)} sent message{'s' if len(texts) != 1 else ''} with text"
+                     + (f" in {used}" if used else f" (looked in {', '.join([folder] if folder else SENT_FOLDERS)})")
+                     + f", and it takes {VOICE_MIN} to learn from. Name the folder: pa voice learn --folder \"Sent Items\"")
+        feats = voice_features(texts)
+        note = voice_note(feats, now().date().isoformat(), used)
+        why = voice_unsafe(note)
+        if why:
+            sys.exit(f"pa: not written: {why}.")
+        said = ""
+        if model:
+            sentence, why = phrase_voice(note)
+            if sentence and len(note) + len(sentence) + 20 <= VOICE_CAP:
+                note += f"- In a sentence: {sentence}\n"
+            else:
+                said = f"The model's sentence was left out ({why or 'no room'}); the counted note stands.\n"
+        note = note[:VOICE_CAP]
+        os.makedirs(DIR, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=DIR, prefix=".tmp-")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(note)
+        os.replace(tmp, path("voice.md"))
+        save("voice.json", feats)
+        print(note, end="")
+        print(f"{said}Saved to {path('voice.md')}. Drafts, `pa ask` and mail jobs read it from now on; edit it if it's wrong, `pa voice forget` removes it.")
+    elif action == "forget":
+        for name in ("voice.md", "voice.json"):
+            try:
+                os.remove(path(name))
+            except OSError:
+                pass
+        print("Forgotten. Drafts go back to a plain voice.")
+    elif action == "show":
+        note = voice_text()
+        print(note if note else "No voice learned yet. `pa voice learn` reads your sent mail (on this machine) and writes a short style note.")
+    else:
+        sys.exit("usage: pa voice [learn [--n 40] [--folder NAME] [--model] | forget]")
 
 
 # ── To-do, time, log ──────────────────────────────────────────────────────────
@@ -1359,19 +1634,24 @@ PREAMBLE = """You're acting as the user's personal assistant. `pa` does most of 
 `pa --help` has the rest. Do it, and say in a line or two what you set up and how to undo it.
 
 The request: """
-DIRECT = {"remind", "list", "cancel", "brief", "roles", "standup", "todo", "clock", "log", "watch", "job", "autoreply", "settings", "mail", "offer", "yes", "no", "cron", "mail-at", "test"}
+DIRECT = {"voice", "remind", "list", "cancel", "brief", "roles", "standup", "todo", "clock", "log", "watch", "job", "autoreply", "settings", "mail", "offer", "yes", "no", "cron", "mail-at", "test"}
 
 
 def cmd_ask(args):
     """`?pa`: a plain command runs straight away, anything else goes to Sakura."""
-    text = " ".join(args).strip()
+    show = args[:1] == ["--print"]  # print the brief and stop
+    text = " ".join(args[1:] if show else args).strip()
     if not text:
         return cmd_brief([])
     first = text.split()[0].lower()
     if first in DIRECT:
         return main(shlex_split(text))
+    brief = PREAMBLE + text + (voice_block() if MAIL_WORDS.search(text) else "")
+    if show:
+        print(brief)
+        return
     launch = os.path.join(ROOT, "bin", "sakura-launch")
-    os.execv(launch, [launch, PREAMBLE + text])
+    os.execv(launch, [launch, brief])
 
 
 def shlex_split(text):
@@ -1395,7 +1675,7 @@ def main(argv):
         return
     table = {"remind": cmd_remind, "list": cmd_list, "cancel": cmd_cancel, "job": cmd_job, "watch": cmd_watch, "tick": cmd_tick, "_job": cmd_job_run, "pending": cmd_pending,
              "autoreply": cmd_autoreply, "todo": cmd_todo, "clock": cmd_clock, "log": cmd_log, "brief": cmd_brief, "roles": cmd_roles, "standup": cmd_standup, "ask": cmd_ask,
-             "set": cmd_set, "unset": lambda a: cmd_set(a, add=False), "offer": cmd_offer, "yes": cmd_yes, "mail": cmd_mail, "cron": cmd_cron, "mail-at": cmd_mail_at, "test": cmd_test, "no": lambda a: cmd_yes(a, accept=False),
+             "voice": cmd_voice, "set": cmd_set, "unset": lambda a: cmd_set(a, add=False), "offer": cmd_offer, "yes": cmd_yes, "mail": cmd_mail, "cron": cmd_cron, "mail-at": cmd_mail_at, "test": cmd_test, "no": lambda a: cmd_yes(a, accept=False),
              "listen": lambda a: cmd_listen_install(a) if "--install" in a else cmd_listen(a)}
     if cmd not in table:
         sys.exit(f"pa: no command {cmd}. See: pa --help. For anything else: pa ask \"...\"")

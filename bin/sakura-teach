@@ -4,16 +4,30 @@
 Point at what you just did in the shell, and Sakura turns it into a tool it keeps (`sakura-tool keep`, so the tool has
 to pass a check before it's kept) or, when it's something to do on a schedule, a `pa job`. The shell key passes your
 recent commands; say in words which ones, or what the tool should be called and do.
+  sakura-teach retro [words]   (`?teach retro`) work from your last Sakura session instead of the shell history: the
+                   commands that ran there and succeeded, in order, from the record on disk. Failed and refused commands,
+                   lookups (ls, cat, git status…) and anything that looks like a secret are left out. No model picks them.
+  --session FILE   with retro: that session file, not the newest interactive one
   --history FILE   the recent shell commands, one per line (`-` for stdin; the key passes them this way)
   --last N         how many of them to show Sakura (default 25)
   --print          print the brief and stop
   --exec           one-shot, no TUI; prints the answer (evals, scripts)
   --json           with --exec, print the run as JSON events
 """
+import glob
+import importlib.machinery
+import json
 import os
 import re
 import sys
 
+HERE = os.path.dirname(os.path.realpath(__file__))
+SESSIONS = os.path.expanduser(os.environ.get("SAKURA_SESSIONS_DIR") or os.path.join(os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura")), "sessions"))
+# A command that only looks: on its own (no pipe, redirect or chain) it's not part of a procedure.
+LOOK = re.compile(r"^\s*(?:cat|head|tail|less|more|bat|view_file|which|type|file|stat|wc|echo|printf|env|whoami|hostname|date|tree|man|"
+                  r"command -v|git (?:status|log|diff|show|branch)|sakura-\S+|\S+ (?:--help|-h|--version))\b[^|;&<>]*$")
+RETRO_MAX = 40
+OWN_BRIEF = ("Make what I just did repeatable", "Make what I did in my last Sakura session repeatable")
 NOISE = re.compile(r"^\s*(?:\?|ls|cd|clear|exit|history|pwd|sakura-\S+|fg|bg|jobs)\b|^\s*$")
 
 
@@ -33,11 +47,81 @@ def read_history(path, last):
     return lines[-last:]
 
 
-def brief(commands, words):
+def session_meta(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if d.get("type") == "session_meta":
+                    return dict(d.get("payload") or {}, _stamp=d.get("timestamp") or "")
+    except OSError:
+        pass
+    return None
+
+
+def session_commands(path):
+    """(asks, commands, left out) of one session: what ran and exited 0, in order, without the noise."""
+    recap = importlib.machinery.SourceFileLoader("sakura_recap", os.path.join(HERE, "sakura-recap")).load_module()
+    memory = importlib.machinery.SourceFileLoader("sakura_memory", os.path.join(HERE, "sakura-memory")).load_module()
+    asks, commands, left = [], [], 0
+    turns = recap.parse(path)
+    turns.sort(key=lambda t: t["start"] or "")
+    for t in turns:
+        if t["asked"]:
+            asks.append(t["asked"])
+        for c in t["commands"]:
+            cmd = c["cmd"].strip()
+            if c["refused"] or c["exit"] != 0:  # failed, refused, or never finished: not something to repeat
+                left += 1
+            elif NOISE.match(cmd) or LOOK.match(cmd):
+                continue
+            elif memory.SECRET.search(cmd) or memory.CREDENTIAL.search(cmd):
+                left += 1
+            elif not (commands and commands[-1] == cmd):
+                commands.append(cmd)
+    return asks, commands[-RETRO_MAX:], left
+
+
+def last_session(only=None):
+    """The newest interactive session that ran something worth repeating: (meta, asks, commands, left out), or None."""
+    paths = [only] if only else sorted(glob.glob(os.path.join(SESSIONS, "**", "*.jsonl"), recursive=True), reverse=True)
+    found = []
+    for path in paths:
+        meta = session_meta(path)
+        if not meta or str(meta.get("source", "")).lower() == "exec" or meta.get("originator") == "codex_exec":
+            continue  # a worker or a one-shot run isn't the user's session
+        try:
+            stamp = str(meta.get("timestamp") or meta["_stamp"] or "") or str(os.path.getmtime(path))
+        except OSError:
+            continue
+        found.append((os.path.dirname(path), stamp, path, meta))
+    # day folders newest first, then by when the session started
+    for _, stamp, path, meta in sorted(found, key=lambda f: (f[0], f[1]), reverse=True):
+        asks, commands, left = session_commands(path)
+        if asks and asks[0].startswith(OWN_BRIEF):
+            continue  # a ?teach session is not something to teach from
+        if commands:
+            return dict(meta, when=stamp[:16].replace("T", " ")), asks, commands, left
+    return None
+
+
+def brief(commands, words, retro=None):
     parts = ["Make what I just did repeatable, so I never do it by hand again."]
+    if retro is not None:
+        parts = ["Make what I did in my last Sakura session repeatable, so I never do it by hand again."]
     if words:
         parts.append(f"From me: {words}")
-    if commands:
+    if retro:
+        meta, asks, left = retro
+        parts += ["", f"The session ({meta.get('when', '?')}, in {meta.get('cwd', '?')}). What I asked there:"] + [f"- {a}" for a in asks[-8:]]
+        parts += ["", "The commands that ran there and succeeded, in order (from the record; " +
+                  (f"{left} that failed, were refused or held a secret are left out" if left else "nothing failed") + "):", "```"] + commands + ["```"]
+    elif retro is not None:
+        parts += ["", "No earlier session with commands that worked is on record, so work from what I said above."]
+    elif commands:
         parts += ["", "My recent shell commands, oldest first (the ones that matter are usually the last few):", "```"] + commands + ["```"]
     else:
         parts += ["", "No shell history came through, so work from what I said above."]
@@ -62,10 +146,15 @@ def brief(commands, words):
 
 def main(argv):
     mode, json_out, history, last, words = "tui", False, None, 25, []
+    retro, session = False, None
     it = iter(argv)
     for a in it:
         if a == "--history":
             history = next(it, None)
+        elif a == "--session":
+            session = next(it, None)
+        elif a == "retro" and not words and not retro:
+            retro = True
         elif a == "--last":
             last = int(next(it, "25"))
         elif a == "--json":
@@ -77,13 +166,24 @@ def main(argv):
             return 0
         else:
             words.append(a)
-    commands = read_history(history, last) if history else []
+    commands = read_history(history, last) if history else []  # read even for retro: the key pipes it in, and stdin must drain
     if history == "-" and mode == "tui":
         try:  # the TUI needs the terminal back after the history came through stdin
             os.dup2(os.open("/dev/tty", os.O_RDONLY), 0)
         except OSError:
             pass
-    text = brief(commands, " ".join(words).strip())
+    if retro:
+        got = last_session(session)
+        if got:
+            text = brief(got[2], " ".join(words).strip(), retro=(got[0], got[1], got[3]))
+        else:
+            text = brief([], " ".join(words).strip(), retro=())
+            if mode == "print" or not words:
+                print("sakura-teach: no earlier session with commands that worked is on record" + (f" in {session}" if session else f" under {SESSIONS}") + ".", file=sys.stderr)
+                if not words:
+                    return 1
+    else:
+        text = brief(commands, " ".join(words).strip())
     if mode == "print":
         print(text)
         return 0

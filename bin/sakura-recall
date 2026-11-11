@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
-"""sakura-recall "<words>" [n] — search past Sakura conversations. No model involved, so it costs nothing to run.
+"""sakura-recall "<words>" [n] — search your past: conversations, shell history, decisions, memory, documents and mail. No model involved, so it costs nothing to run.
 
 Prints up to n sessions (default 3). The best one comes with the surrounding conversation, the others with one line.
-Only interactive sessions are searched: one-shot runs (workers, evals) aren't conversations. Also searched: the shell's
-history (~/.bash_history, ~/.zsh_history), the decisions log (sakura-decide) and the memory stores, each marked by source.
+Only interactive sessions are searched: one-shot runs (workers, evals) aren't conversations. Also searched, each hit
+marked by its source: the shell's history (~/.bash_history, ~/.zsh_history), the decisions log (sakura-decide), the
+memory stores, your indexed documents ([document], through `rag search`, cited as file:line; only when an index exists,
+and nothing new is indexed) and your mail ([mail], through himalaya's search on your own account, cited by the id
+`himalaya message read ID` opens; only when an account is configured). A source that isn't set up is skipped silently.
+  --only SOURCES   a comma list of: sessions shell decisions memory docs mail
+  --no-mail        everything but mail (no connection to the mail server)
+  --no-docs        everything but documents
+Nothing is sent anywhere: the mail search asks your own mail server, as reading mail does.
 """
+import importlib.machinery
 import json
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
 import sys
 
 SESSIONS = os.path.expanduser(os.environ.get("SAKURA_SESSIONS_DIR") or "~/.sakura/sessions")
@@ -59,9 +69,14 @@ EXTRA = {
     os.path.expanduser("~/.bash_history"): "shell",
     os.path.expanduser("~/.zsh_history"): "shell",
     os.path.join(os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura")), "decisions.jsonl"): "decision",
-    os.path.join(os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura")), "memory", "user.md"): "memory",
-    os.path.join(os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura")), "memory", "notes.md"): "memory",
 }
+# The memory stores are USER.md and MEMORY.md in sakura-memory's directory.
+MEMORY_DIR = os.path.expanduser(os.environ.get("SAKURA_MEMORY_DIR") or os.path.join(os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura")), "memory"))
+for _name in ("USER.md", "MEMORY.md"):
+    EXTRA[os.path.join(MEMORY_DIR, _name)] = "memory"
+HERE = os.path.dirname(os.path.realpath(__file__))
+SOURCES = ("sessions", "shell", "decisions", "memory", "docs", "mail")
+KIND_SOURCE = {"shell": "shell", "decision": "decisions", "memory": "memory"}
 
 
 def read_extra(path, kind):
@@ -72,7 +87,9 @@ def read_extra(path, kind):
         return []
     out, seen = [], set()
     for line in reversed(lines):
-        line = re.sub(r"^: \d+:\d;", "", line).strip()  # zsh extended history
+        line = re.sub(r"^: \d+:\d+;", "", line).strip()  # zsh extended history
+        if kind == "memory":
+            line = re.sub(r"^- ", "", line)
         if kind == "decision":
             try:
                 d = json.loads(line)
@@ -125,13 +142,15 @@ def refresh(db):
     db.commit()
 
 
-def search(db, words, n):
+def search(db, words, n, wanted=SOURCES):
     terms = [f'"{w}"' for w in re.findall(r"\w[\w.-]*", words, re.U)]
     if not terms:
         return []
+    skip = [p for p, kind in EXTRA.items() if KIND_SOURCE[kind] not in wanted]
     for joiner in (" ", " OR "):  # every word if possible, else any
         rows = db.execute("select path, seq, started, cwd, snippet(msgs, 0, '', '', '…', 24) from msgs where msgs match ? order by rank limit 200",
                           (joiner.join(terms),)).fetchall()
+        rows = [r for r in rows if r[0] not in skip and (r[0] in EXTRA or "sessions" in wanted)]
         if rows:
             break
     best = {}
@@ -140,24 +159,119 @@ def search(db, words, n):
     return list(best.values())[:n]
 
 
+def search_docs(words, n):
+    """[(file:line, snippet)] from the user's document index, through `rag search`. Empty when there's no index."""
+    index = os.path.expanduser(os.environ.get("SAKURA_RAG_DB") or "~/.local/share/rag/index.db")
+    if not os.path.isfile(index):
+        return []
+    try:
+        r = subprocess.run([os.path.join(HERE, "rag"), "search", words, "-k", str(n)], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if r.returncode:
+        return []
+    hits = []
+    for block in re.split(r"^## ", r.stdout, flags=re.M)[1:]:
+        head, _, body = block.partition("\n")
+        hits.append((head.strip(), " ".join(body.split())[:300]))
+    return hits
+
+
+def mail_account():
+    """(configured, account name or None): himalaya on PATH with a config, and the account `pa set account` chose."""
+    conf = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "himalaya", "config.toml")
+    if not shutil.which("himalaya") or not os.path.isfile(conf):
+        return False, None
+    try:
+        pa = os.path.expanduser(os.environ.get("SAKURA_PA_DIR") or "~/.sakura/pa")
+        with open(os.path.join(pa, "settings.json"), encoding="utf-8") as f:
+            return True, json.load(f).get("account")
+    except (OSError, ValueError):
+        return True, None
+
+
+def search_mail(words, n):
+    """[(id, date, from, subject)] from the user's own mailbox: every word in the subject or the body."""
+    ok, account = mail_account()
+    terms = re.findall(r"\w[\w.-]*", words, re.U)[:6]
+    if not ok or not terms:
+        return []
+    query = []
+    for i, w in enumerate(terms):
+        query += (["and"] if i else []) + ["(subject", w, "or", "body", w + ")"]
+    cmd = ["himalaya", "envelope", "list", "--json", "--page-size", str(n)] + (["--account", account] if account else []) + query
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=45, stdin=subprocess.DEVNULL)
+        found = json.loads(r.stdout) if r.returncode == 0 else []
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return []
+    found = found.get("envelopes", found) if isinstance(found, dict) else found
+    hits = []
+    for e in found[:n] if isinstance(found, list) else []:
+        if not isinstance(e, dict):
+            continue
+        f = e.get("from")
+        f = f[0] if isinstance(f, list) and f else f
+        who = (f.get("name") or f.get("addr") or f.get("email") or "") if isinstance(f, dict) else str(f or "")
+        hits.append((str(e.get("id", "")), str(e.get("date", ""))[:10], who, " ".join(str(e.get("subject") or "").split())[:120]))
+    return hits
+
+
+def note_memory_use(facts):
+    """A fact that recall returned was used: sakura-memory's 90-day flag reads this."""
+    try:
+        importlib.machinery.SourceFileLoader("sakura_memory", os.path.join(HERE, "sakura-memory")).load_module().mark_used(facts)
+    except Exception:
+        pass
+
+
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+    args = sys.argv[1:]
+    if not args or "-h" in args or "--help" in args:
         print(__doc__)
         return
-    n = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 3
-    db = connect()
-    refresh(db)
-    hits = search(db, sys.argv[1], n)
-    if not hits:
-        print(f"nothing in past sessions matches: {sys.argv[1]}")
+    wanted = set(SOURCES)
+    if "--only" in args:
+        i = args.index("--only")
+        named = {{"session": "sessions", "decision": "decisions", "doc": "docs", "documents": "docs", "history": "shell"}.get(w, w)
+                 for w in (args[i + 1] if i + 1 < len(args) else "").replace(",", " ").split()}
+        if not named or named - set(SOURCES):
+            sys.exit("sakura-recall: --only takes a comma list of: " + " ".join(SOURCES))
+        wanted = named
+        del args[i:i + 2]
+    for flag, source in (("--no-mail", "mail"), ("--no-docs", "docs")):
+        if flag in args:
+            wanted.discard(source)
+            args.remove(flag)
+    if not args:
+        sys.exit('usage: sakura-recall "<words>" [n] [--only SOURCES] [--no-mail] [--no-docs]')
+    words = args[0]
+    n = int(args[1]) if len(args) > 1 and args[1].isdigit() else 3
+    hits = []
+    if wanted & {"sessions", "shell", "decisions", "memory"}:
+        db = connect()
+        refresh(db)
+        hits = search(db, words, n, wanted)
+    docs = search_docs(words, min(n, 3)) if "docs" in wanted else []
+    mail = search_mail(words, min(n, 5)) if "mail" in wanted else []
+    if not hits and not docs and not mail:
+        print(f"nothing in past sessions matches: {words}")
         return
     print("From past sessions. Things may have changed since, so check anything you act on.")
-    for i, (path, seq, started, cwd, snip) in enumerate(hits):
+    for where, text in docs:
+        print(f"\n[document] {where}\n  {text}")
+    for mid, date, who, subject in mail:
+        print(f"\n[mail] {date}  {who}: {subject}\n  read it: himalaya message read {mid}")
+    first = True
+    for path, seq, started, cwd, snip in hits:
         if path in EXTRA:
             rows = db.execute("select body from msgs where path=? and cast(seq as int) between ? and ? order by cast(seq as int)",
                               (path, int(seq) - 1, int(seq) + 1)).fetchall()
             print(f"\n[{EXTRA[path]}] " + " | ".join(" ".join(r[0].split())[:160] for r in rows))
+            if EXTRA[path] == "memory":
+                note_memory_use([r[0] for r in db.execute("select body from msgs where path=? and cast(seq as int)=?", (path, int(seq)))])
             continue
+        i, first = (0 if first else 1), False
         print(f"\n[{started}] {cwd}")
         if i:
             print("  " + " ".join(snip.split()))
