@@ -6,6 +6,8 @@
   ledger list [YYYY-MM]               the rows, newest first (default: this month)
   ledger sum [YYYY-MM] [--by vendor|category]
   ledger csv                          the whole file (~/.sakura/ledger.csv), for a spreadsheet or dq
+  ledger export --hledger [YYYY-MM]   the rows as hledger entries (expenses:CATEGORY from assets:cash), for `money`:
+                                      ledger export --hledger >> "$(money journal)"   --from ACCOUNT pays from another account
   ledger fix ID date|vendor|amount|currency|category VALUE
 Each row: id, date, vendor, amount, currency, category, note, file. Receipt images are kept next to the ledger in
 ~/.sakura/ledger/, named by id, so the paper can go. Amounts in words you can check: the row prints after each add.
@@ -174,8 +176,50 @@ def fix(args):
     print(f"#{r['id']}  {r['date']}  {r['vendor']}  {r['amount']} {r['currency']}  {r['category']}")
 
 
+def export(args):
+    """Receipts as hledger entries: each a cash purchase unless --from says which account paid. Nothing is written
+    anywhere; the entries go to stdout, oldest first, each carrying its ledger id so a second export can be told apart."""
+    if "--hledger" not in args:
+        print("usage: ledger export --hledger [YYYY-MM] [--from ACCOUNT]", file=sys.stderr)
+        return 2
+    args = [a for a in args if a != "--hledger"]
+    source = "assets:cash"
+    if "--from" in args:
+        i = args.index("--from")
+        if i + 1 >= len(args) or not re.fullmatch(r"[a-z][\w:-]*", args[i + 1]):
+            print("ledger: --from needs an account like assets:bank:nabil", file=sys.stderr)
+            return 2
+        source = args[i + 1]
+        del args[i:i + 2]
+    month = args[0] if args else None
+    if month and not re.fullmatch(r"\d{4}-\d\d", month):
+        print("ledger: the month is YYYY-MM", file=sys.stderr)
+        return 2
+    n = 0
+    for r in sorted(rows(), key=lambda r: (r.get("date") or "", r.get("id") or "")):
+        date, amount = r.get("date") or "", (r.get("amount") or "").replace(",", "")
+        if not re.fullmatch(r"\d{4}-\d\d-\d\d", date) or (month and not date.startswith(month)):
+            continue
+        try:
+            value = float(amount)
+        except ValueError:
+            print(f"; skipped {r.get('id')}: the amount '{r.get('amount')}' isn't a number (ledger fix {r.get('id')} amount N)")
+            continue
+        category = re.sub(r"[^a-z0-9]+", "-", (r.get("category") or "").lower()).strip("-") or "unknown"
+        vendor = " ".join((r.get("vendor") or "receipt").replace("|", "/").replace(";", ",").split())
+        note = " ".join((r.get("note") or "").replace(";", ",").split())
+        cur = re.sub(r"[^A-Z]", "", (r.get("currency") or "NPR").upper()) or "NPR"
+        print(f"{date} {vendor}  ; ledger:{r.get('id')}" + (f", {note}" if note else ""))
+        print(f"    expenses:{category:<28} {value:>12.2f} {cur}")
+        print(f"    {source}\n")
+        n += 1
+    if not n:
+        print("; no receipts" + (f" in {month}" if month else ""), file=sys.stderr)
+    return 0
+
+
 def main(argv):
-    cmds = {"add": add, "list": listing, "sum": total, "fix": fix, "csv": lambda a: sys.stdout.write(open(FILE).read() if os.path.exists(FILE) else "")}
+    cmds = {"add": add, "list": listing, "sum": total, "fix": fix, "export": export, "csv": lambda a: sys.stdout.write(open(FILE).read() if os.path.exists(FILE) else "")}
     if not argv or argv[0] in ("-h", "--help") or argv[0] not in cmds:
         print(__doc__.strip())
         return 0 if argv[:1] in (["-h"], ["--help"]) else 2

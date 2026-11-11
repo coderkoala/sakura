@@ -2480,6 +2480,38 @@ def ragwords(tmp):
     }
 
 
+def ledgerexport(tmp):
+    """Receipts into the accounts: ledger export --hledger makes entries hledger itself accepts and adds up."""
+    home = os.path.join(tmp, "s")
+    env = {"SAKURA_HOME": home, "HOME": tmp}
+    l = os.path.join(BIN, "ledger")
+    for a in (["2026-11-03", "Bhatbhateni; Maharajgunj", "1250.50", "NPR", "groceries"], ["2026-11-05", "Nepal Oil", "2,000", "NPR", "Fuel & Travel"],
+              ["2026-10-30", "Old Shop", "99", "NPR", "misc"], ["2026-11-06", "Daraz", "15", "USD", ""]):
+        run([l, "add", "--manual", *a], env)
+    out = run([l, "export", "--hledger", "2026-11"], env)
+    everything = run([l, "export", "--hledger", "--from", "assets:bank:nabil"], env)
+    j = os.path.join(tmp, "j.ledger")
+    open(j, "w").write(out.stdout)
+    have = shutil.which("hledger")
+    bal = run(["hledger", "-f", j, "bal", "--flat", "-N"], env).stdout if have else ""
+    checked = run(["hledger", "-f", j, "check"], env) if have else None
+    bad = run([l, "export"], env)
+    res = {
+        "one entry per receipt of that month, oldest first, each with its ledger id": out.returncode == 0 and out.stdout.count("; ledger:") == 3
+        and out.stdout.index("Bhatbhateni") < out.stdout.index("Nepal Oil") and "Old Shop" not in out.stdout,
+        "the category becomes the account, and a vendor's semicolon can't start a comment": "expenses:fuel-travel" in out.stdout and "expenses:unknown" in out.stdout
+        and "Bhatbhateni, Maharajgunj  ; ledger:" in out.stdout,
+        "--from names the account that paid, across every month": everything.stdout.count("assets:bank:nabil") == 4 and "Old Shop" in everything.stdout,
+        "without --hledger it says how": bad.returncode == 2 and "usage" in bad.stderr,
+    }
+    if have:
+        res["hledger accepts the entries and the sums are the receipts'"] = checked.returncode == 0 and re.search(r"1250\.50 NPR\s+expenses:groceries", bal) is not None \
+            and re.search(r"2000\.00 NPR\s+expenses:fuel-travel", bal) is not None and re.search(r"-3250\.50 NPR", bal) is not None and "15.00 USD" in bal
+    else:
+        print("  SKIP  ledgerexport: hledger isn't installed, so the entries weren't parsed by it")
+    return res
+
+
 CASES = {
     "ports": ports,
     "space": space,
@@ -2508,6 +2540,7 @@ CASES = {
     "skill": skill,
     "engine": engine,
     "ragwords": ragwords,
+    "ledgerexport": ledgerexport,
 }
 
 
