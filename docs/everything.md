@@ -143,3 +143,14 @@ Each needs a deterministic eval before the roadmap table can claim it.
 6. `money` (hledger rules import) and `ledger export --hledger`.
 7. Skills kept as procedures (§9.1), the repo map (§9.2), the tool-call shim (§9.3) — the three that make the model itself better.
 8. The gateway with pairing (§9.7), last, because it's the one that can hurt if it's wrong.
+
+### Where the build order stands (2026-11-11)
+
+1. Built: `conv subs`, `conv denoise`, `conv stems` (`evals/archive.py`, `evals/formats.py`; real stem separation and `--model` denoise unproven where the evals ran).
+2. Built: `restore` (proven only where its models are present). SeedVR2 not attempted.
+3. Built: `faces` (`evals/archive.py`, 5/5 on a CPU). SigLIP 2 for places not built.
+4. Built: `conv redact|fields|fill|sign|verify`, and the paperwork on top as `paper` (`evals/paper.py`): ordinary letters and bills in English and Nepali, never an invented official form.
+5. Built: `translate`; `rag` and `?recall` now keep Devanagari words whole (they were being cut at every vowel sign). Nepali recall of the embedding model is unmeasured.
+6. Built: `money`; `paper register --hledger` hands issued invoices to it. `ledger export --hledger` not built.
+7. Built: `sakura-skill` (§9.1) and `sakura-shim` (§9.3, deterministic repairs, no second model). The repo map (§9.2): see the roadmap.
+8. Built: `sakura-gateway` (§9.7), default closed, proven against a fake homeserver and a fake signal-cli only.
