@@ -41,13 +41,25 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, sha TEXT, mtime REAL);
 CREATE TABLE IF NOT EXISTS chunks(id INTEGER PRIMARY KEY, path TEXT, line INTEGER, text TEXT, vec BLOB);
 CREATE INDEX IF NOT EXISTS chunks_path ON chunks(path);
-CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(text, content='chunks', content_rowid='id', tokenize='porter unicode61');
+CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(text, content='chunks', content_rowid='id', tokenize="porter unicode61 categories 'L* N* Co Mn Mc'");
 """
+# Mn and Mc are the vowel signs and other marks that Devanagari, Bengali, Tamil, Thai and Arabic words are written with.
+# Without them in the tokenizer a Nepali or Hindi word is cut at every sign (भाडा → भ, ड) and nothing can be found by it.
+# What a Nepali or Hindi noun carries on its end; a query word is also tried without it, and as a prefix.
+POSTPOSITIONS = ("हरूलाई", "हरुलाई", "हरूको", "हरुको", "हरूमा", "हरुमा", "हरू", "हरु", "लाई", "बाट", "देखि", "सम्म", "सँग", "संग", "प्रति", "द्वारा",
+                 "को", "का", "की", "ले", "मा", "में", "से", "ने", "पर", "तक")
 
 
 def connect():
     os.makedirs(os.path.dirname(DB), exist_ok=True)
     db = sqlite3.connect(DB)
+    old = db.execute("SELECT sql FROM sqlite_master WHERE name='fts'").fetchone()
+    if old and "categories" not in (old[0] or ""):
+        # an index made before the tokenizer kept marks: the passages are fine, only the word index is rebuilt
+        db.execute("DROP TABLE fts")
+        db.executescript(SCHEMA)
+        db.execute("INSERT INTO fts(fts) VALUES('rebuild')")
+        db.commit()
     db.executescript(SCHEMA)
     return db
 
@@ -196,9 +208,28 @@ def index(paths):
         print(f"note: the embedding model {MODEL} isn't available, so those files search by keywords only. Get it with: ollama pull {MODEL}")
 
 
+def query_words(q):
+    """The words of a question, marks kept with their letters (Python's \\w drops Devanagari vowel signs)."""
+    import unicodedata
+    out, cur = [], []
+    for ch in unicodedata.normalize("NFC", q):
+        if ch.isalnum() or ch == "_" or unicodedata.category(ch) in ("Mn", "Mc"):
+            cur.append(ch)
+        else:
+            out.append("".join(cur))
+            cur = []
+    out.append("".join(cur))
+    return [w for w in out if sum(1 for c in w if c.isalnum()) >= 2]
+
+
 def fts_query(q):
-    words = re.findall(r"\w{2,}", q)
-    return " OR ".join('"' + w + '"' for w in words)
+    terms = []
+    for w in query_words(q):
+        terms.append('"' + w + '"')
+        if any("\u0900" <= c <= "\u097f" for c in w):
+            stem = next((w[:-len(p)] for p in POSTPOSITIONS if w.endswith(p) and sum(1 for c in w[:-len(p)] if c.isalnum()) >= 2), w)
+            terms.append('"' + stem + '" *')  # भाडाको finds भाडा, and भाडा finds भाडाको
+    return " OR ".join(dict.fromkeys(terms))
 
 
 def search(q, k=6):

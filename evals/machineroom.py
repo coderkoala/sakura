@@ -2422,6 +2422,49 @@ def engine(tmp):
     }
 
 
+def ragwords(tmp):
+    """rag's keyword side on Nepali and Hindi: a word is found whole, with or without what it carries on its end, and an
+    index made before the fix mends itself. No embedding model (Ollama is pointed at a dead port), so words are all there is."""
+    import sqlite3
+
+    docs = os.path.join(tmp, "docs")
+    os.makedirs(docs)
+    open(os.path.join(docs, "bhada.md"), "w").write("घरभाडा सम्झौता: मासिक भाडा पन्ध्र हजार रुपैयाँ हो। सम्झौता दुई वर्षको लागि हो।\n")
+    open(os.path.join(docs, "pasal.md"), "w").write("किराना पसलको हिसाब: चामल, दाल, तेल। ग्राहकहरूलाई उधारो दिइँदैन।\n")
+    open(os.path.join(docs, "hindi.md"), "w").write("The lease runs two years. किराया पंद्रह हज़ार रुपये है। मकान मालिक से बात हुई।\n")
+    open(os.path.join(docs, "english.md"), "w").write("The cafe's wifi password rotates on Mondays. Running costs were reviewed.\n")
+    db = os.path.join(tmp, "rag.db")
+    env = {"SAKURA_RAG_DB": db, "HOME": tmp, "OLLAMA_API_BASE": "http://127.0.0.1:9", "SAKURA_HOME": os.path.join(tmp, "s")}
+    r = os.path.join(BIN, "rag")
+    idx = run([r, "index", docs], env)
+
+    def hits(q):
+        out = run([r, "search", q], env).stdout
+        return [os.path.basename(m.split(":")[0]) for m in re.findall(r"^## (\S+)", out, re.M)]
+
+    got = {q: hits(q) for q in ("भाडा", "भाडाको", "सम्झौताहरू", "चामल", "ग्राहक", "किराया", "मालिक", "पसल", "running cost", "दाल", "हात्ती")}
+    # an index from before: the same passages under the old tokenizer
+    old = os.path.join(tmp, "old.db")
+    con = sqlite3.connect(old)
+    con.executescript("CREATE TABLE files(path TEXT PRIMARY KEY, sha TEXT, mtime REAL); CREATE TABLE chunks(id INTEGER PRIMARY KEY, path TEXT, line INTEGER, text TEXT, vec BLOB);"
+                      "CREATE INDEX chunks_path ON chunks(path); CREATE VIRTUAL TABLE fts USING fts5(text, content='chunks', content_rowid='id', tokenize='porter unicode61');")
+    con.execute("INSERT INTO chunks(path, line, text) VALUES ('/x/bhada.md', 1, 'मासिक भाडा पन्ध्र हजार रुपैयाँ हो')")
+    con.execute("INSERT INTO fts(rowid, text) SELECT id, text FROM chunks")
+    con.commit()
+    before = con.execute("SELECT count(*) FROM fts WHERE fts MATCH '\"भाडा\"'").fetchone()[0]
+    con.close()
+    mended = run([r, "search", "भाडा"], dict(env, SAKURA_RAG_DB=old)).stdout
+    return {
+        "a Nepali word is found whole": idx.returncode == 0 and got["भाडा"][:1] == ["bhada.md"] and got["चामल"] == ["pasal.md"] and got["दाल"] == ["pasal.md"],
+        "asked with को or हरू on its end, it still finds the bare word": got["भाडाको"][:1] == ["bhada.md"] and got["सम्झौताहरू"] == ["bhada.md"],
+        "asked bare, it finds the word that carries an ending": got["ग्राहक"] == ["pasal.md"] and got["पसल"] == ["pasal.md"],
+        "Hindi words too, in a file that mixes scripts": got["किराया"] == ["hindi.md"] and got["मालिक"] == ["hindi.md"],
+        "English still stems": got["running cost"][:1] == ["english.md"],
+        "a word that's in no file finds nothing": got["हात्ती"] == [],
+        "an index made before the fix is mended on first use, passages kept": "bhada.md" in mended and before in (0, 1),
+    }
+
+
 CASES = {
     "ports": ports,
     "space": space,
@@ -2449,6 +2492,7 @@ CASES = {
     "lean": lean,
     "skill": skill,
     "engine": engine,
+    "ragwords": ragwords,
 }
 
 
