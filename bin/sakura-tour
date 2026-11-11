@@ -104,7 +104,17 @@ def git_facts(root):
     return {"log": log, "churn": churn.strip(), "authors": authors.strip(), "first": first, "count": count, "branch": branch}
 
 
-def gather(root):
+def code_map(root, question):
+    """The ranked map of files and definitions from sakura-map (no model), aimed at the question; "" when there's none."""
+    cmd = [os.path.join(os.path.dirname(os.path.realpath(__file__)), "sakura-map"), root, "--budget", "1500"]
+    try:
+        r = subprocess.run(cmd + (["--for", question] if question else []), capture_output=True, text=True, timeout=30)
+    except (subprocess.SubprocessError, OSError):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def gather(root, question=""):
     langs, manifests, entries, total, top = walk(root)
     parts = [f"Repository: {root}", f"Files: {total}{'+' if total > LIMIT_FILES else ''}; top-level: {', '.join(top[:30]) or '(flat)'}"]
     if langs:
@@ -128,6 +138,9 @@ def gather(root):
             parts.append("Most changed files (last 400 commits), count then path:\n" + g["churn"])
         if g["log"]:
             parts.append("Recent commits:\n" + g["log"])
+    m = code_map(root, question)
+    if m:
+        parts.append("The map (sakura-map: the most-referenced files, and their most-used definitions as `line: signature`):\n" + m)
     for name in DOCS:
         text = head(os.path.join(root, name), lines=60, chars=3000)
         if text.strip():
@@ -176,7 +189,7 @@ def main(argv):
     if words and os.path.isdir(os.path.expanduser(words[0])):
         root = os.path.realpath(os.path.expanduser(words.pop(0)))
     question = " ".join(words).strip()
-    facts = gather(root)
+    facts = gather(root, question)
     if mode == "print":
         print(facts)
         return 0
