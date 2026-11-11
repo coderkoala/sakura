@@ -1,0 +1,12 @@
+[Unit]
+Description=Sakura gateway: reminders out, yes/no in (Matrix or Signal). Outbound only.
+After=network-online.target
+Wants=network-online.target
+[Service]
+Environment=SAKURA_HOME=__SAKURA_HOME__
+Environment=PATH=__PATH__
+ExecStart=__SAKURA_DIR__/bin/sakura-gateway run
+Restart=on-failure
+RestartSec=30
+[Install]
+WantedBy=default.target

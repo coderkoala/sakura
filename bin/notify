@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# notify "title" "body" — desktop notification, plus ntfy push when NTFY_TOPIC is set.
+# notify "title" "body" — desktop notification, plus ntfy push when NTFY_TOPIC is set, plus your phone over Matrix or
+# Signal when `sakura-gateway` is paired (redacted and capped there; nothing is sent that way until you pair).
 case "${1:-}" in -h|--help) sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"; exit 0 ;; esac
 title="${1:-Notice}"; body="${2:-}"
 command -v notify-send >/dev/null 2>&1 && notify-send -- "$title" "$body"
 if [ -n "${NTFY_TOPIC:-}" ]; then
     curl -fsS -H "Title: $title" -d "$body" "${NTFY_SERVER:-https://ntfy.sh}/$NTFY_TOPIC" >/dev/null 2>&1 || true
+fi
+# The gateway is a sink only once it has a paired peer; it decides the rest (paused, redaction) itself.
+if [ -f "${SAKURA_HOME:-$HOME/.sakura}/gateway/peer.json" ]; then
+    timeout 20 "$(dirname "$(readlink -f "$0")")/sakura-gateway" deliver "$title" "$body" >/dev/null 2>&1 || true
 fi

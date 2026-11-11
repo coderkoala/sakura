@@ -1,0 +1,948 @@
+#!/usr/bin/env python3
+"""sakura-gateway — reminders, night reports and offers on your phone over Matrix or Signal, and a yes/no back. Closed until you set it up and pair. No model.
+
+  sakura-gateway setup matrix https://matrix.example.org @sakura:example.org    the bot account on YOUR homeserver; the access
+                               token is read from stdin or a prompt (or --token-file FILE), stored 0600, never printed
+  sakura-gateway setup signal +15550100          through signal-cli, with an account already registered or linked there
+  sakura-gateway pair          prints a one-time code and waits. Send the code from your own account, in a direct chat with the
+                               bot (Matrix: invite it to a new room with encryption OFF). That sender and that room become the
+                               only peer. The code lasts 10 minutes, works once, and 5 wrong tries lock pairing for 15 minutes.
+  sakura-gateway run           the gateway, in the foreground: delivers, and answers the paired peer. Refuses unless paired.
+  sakura-gateway install       the same as a user service (systemd/sakura-gateway.service), enabled now.   --remove takes it out
+  sakura-gateway status        transport, peer, paused or not, what was accepted and dropped. It listens on nothing.
+  sakura-gateway log           what was accepted, dropped and why, newest last.   -n N   --json
+  sakura-gateway pause         stop delivering and stop answering (the peer's `stop` does this too)
+  sakura-gateway resume        only from here, never from the phone
+  sakura-gateway unpair        forget the peer; nothing is delivered or accepted until you pair again
+  sakura-gateway reset         unpair and delete the setup and the token
+  sakura-gateway deliver "title" "body"          what `notify` calls: one message to the peer, if paired and not paused
+
+What reaches the phone: everything `notify` sends (pa reminders, the night report, guardian findings, offers), with anything
+shaped like a secret replaced by [redacted], data-carrying links removed, and cut at 1000 characters.
+
+What the phone can say, and nothing else. It is matched word for word; no model and no shell ever sees it:
+  yes ID | no ID               answer an open offer Sakura made (exactly `pa yes ID` / `pa no ID`); an expired offer is refused
+  list                         open offers and today's reminders
+  remind <when>, <what>        exactly `pa remind`: remind in 20 minutes, call mum
+  status | stop | help         stop pauses the gateway until `sakura-gateway resume` is run on this machine
+Anything else gets the same fixed line listing these. There is no "ask Sakura anything" from the phone: free text that reaches
+an agent is the hole every gateway of this kind has had, so it isn't here.
+
+Who can say it: the paired sender, in the paired chat. Everyone else is dropped and counted, and never answered, not even
+with "who are you". A Matrix room with more than two members is refused, and if the paired room grows the gateway pauses.
+Each message is handled once (its id is kept), anything from before the gateway was looking is ignored, and a message more
+than 15 minutes old is dropped rather than acted on late.
+
+The network: outbound only. No listening socket of any kind, TCP or unix; `pause`, `resume` and `deliver` work through files.
+Matrix requests go to the one homeserver named at setup, over https (plain http only to localhost or a private address),
+with the token in a header, and a redirect is refused rather than followed. Signal goes through signal-cli and nowhere else.
+
+Read this before choosing Matrix: this is the client-server API from the standard library, with NO end-to-end encryption.
+The homeserver can read every reminder and every reply, which is why it should be your own, and an encrypted room can't be
+read at all (pairing says so). Signal through signal-cli is end-to-end encrypted. On Signal anyone who knows the number can
+message it; they are dropped the same way, but while a pairing code is open their messages count as wrong tries.
+
+State is in $SAKURA_HOME/gateway (default ~/.sakura/gateway), mode 0700; the log holds verbs and reasons, never message text.
+"""
+import fcntl
+import getpass
+import hashlib
+import hmac
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import secrets
+import shutil
+import ssl
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from datetime import datetime
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+HOME = os.path.expanduser(os.environ.get("SAKURA_HOME") or "~/.sakura")
+DIR = os.path.join(HOME, "gateway")
+PA_DIR = os.path.expanduser(os.environ.get("SAKURA_PA_DIR") or "~/.sakura/pa")
+sys.path.insert(0, os.path.join(ROOT, "mcp", "sakura-web"))
+sys.path.insert(0, os.path.join(ROOT, "hooks"))
+
+CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # 32 symbols, none that read as another
+CODE_LEN = 10                                       # 50 bits; 5 tries allowed
+CODE_TTL = 600
+MAX_ATTEMPTS = 5
+LOCKOUT = 900
+MAX_AGE = 900          # a message older than this is dropped, not acted on late
+SKEW = 120             # how far the server's clock may be behind ours for a pairing message
+MAX_OUT = 1000
+MAX_IN = 500
+KEEP_IDS = 2000
+KEEP_LOG = 2000
+POLL = 30
+
+HELP = ("I only know: yes ID | no ID | list | remind <when>, <what> | status | stop | help. "
+        "Nothing else is read or run.")
+ID_RE = r"[0-9A-Za-z]{1,12}"
+YESNO = re.compile(rf"^(yes|no)\s+#?({ID_RE})$", re.I)
+CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f​-‏‪-‮⁠-⁯﻿\U000e0000-\U000e007f]")
+OFFER_TAIL = re.compile(rf"\s+reply: yes {ID_RE}$")
+
+
+class Refused(Exception):
+    """Something this gateway won't do. The message is for the user at the terminal, never for the peer."""
+
+
+# ── State ─────────────────────────────────────────────────────────────────────
+
+def path(name):
+    return os.path.join(DIR, name)
+
+
+def ensure_dir():
+    os.makedirs(DIR, mode=0o700, exist_ok=True)
+    os.chmod(DIR, 0o700)
+
+
+def load(name, default=None):
+    try:
+        with open(path(name), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def save(name, data):
+    ensure_dir()
+    fd, tmp = tempfile.mkstemp(dir=DIR, prefix=".tmp-")  # mkstemp makes it 0600
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=1)
+    os.replace(tmp, path(name))
+
+
+def forget(*names):
+    for n in names:
+        try:
+            os.remove(path(n))
+        except OSError:
+            pass
+
+
+def clean(text, cap=80):
+    """A string from outside, safe to keep in the log and show in a terminal."""
+    return CONTROL.sub("", str(text)).replace("\n", " ")[:cap]
+
+
+def log(what, why="", **more):
+    """One line per decision. Verbs and reasons only: message text is never written here."""
+    ensure_dir()
+    entry = {"t": datetime.now().replace(microsecond=0).isoformat(), "what": what}
+    if why:
+        entry["why"] = why
+    entry.update({k: clean(v) for k, v in more.items() if v not in (None, "")})
+    p = path("log.jsonl")
+    fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.write(json.dumps(entry) + "\n")
+    try:
+        if os.path.getsize(p) > 400_000:
+            with open(p, encoding="utf-8") as f:
+                lines = f.readlines()[-KEEP_LOG:]
+            fd, tmp = tempfile.mkstemp(dir=DIR, prefix=".tmp-")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            os.replace(tmp, p)
+    except OSError:
+        pass
+    stats = load("stats.json", {}) or {}
+    key = what if not why or what != "dropped" else f"dropped: {why}"
+    stats[key] = stats.get(key, 0) + 1
+    save("stats.json", stats)
+
+
+def config():
+    return load("config.json")
+
+
+def peer():
+    return load("peer.json")
+
+
+def paused():
+    return os.path.exists(path("paused"))
+
+
+def pause(why):
+    ensure_dir()
+    if not paused():
+        with os.fdopen(os.open(path("paused"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+            f.write(why + "\n")
+        log("paused", why)
+
+
+class OneAtATime:
+    """`run` and `pair` both read the incoming stream; two readers would each see half of it."""
+
+    def __enter__(self):
+        ensure_dir()
+        self.f = os.fdopen(os.open(path(".lock"), os.O_WRONLY | os.O_CREAT, 0o600), "w")
+        try:
+            fcntl.flock(self.f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            sys.exit("sakura-gateway: already running here (a `run` or a `pair`). Stop that one first: systemctl --user stop sakura-gateway")
+        return self
+
+    def __exit__(self, *_):
+        self.f.close()
+
+
+# ── What goes out ─────────────────────────────────────────────────────────────
+
+def _memory():
+    """sakura-memory's own idea of what a secret looks like, so there is one definition."""
+    p = os.path.join(ROOT, "bin", "sakura-memory")
+    loader = importlib.machinery.SourceFileLoader("sakura_memory", p)
+    spec = importlib.util.spec_from_loader("sakura_memory", loader)
+    mod = importlib.util.module_from_spec(spec)
+    sys.dont_write_bytecode = True
+    loader.exec_module(mod)
+    return mod
+
+
+def outbound(text, token=None):
+    """Text fit to leave the machine: no control characters, no secret-shaped values, no link that carries data to a
+    host that isn't on the egress allowlist, and not long. If the secret check can't be loaded, nothing is sent."""
+    text = CONTROL.sub("", str(text)).strip()
+    tail = ""
+    m = OFFER_TAIL.search(text)
+    if m:  # the offer id is not a secret, and "…login reply: yes ab12" must stay answerable
+        text, tail = text[:m.start()], m.group(0)
+    mem = _memory()
+    if token and len(token) >= 8:
+        text = text.replace(token, "[redacted]")
+    text = mem.SECRET.sub("[redacted]", text)
+    text = mem.CREDENTIAL.sub("[redacted]", text)
+    try:
+        import egress_guard
+        import injection
+        allow = egress_guard._load_allow()
+        for url in injection.exfil_sinks(text, strict=True):
+            if not egress_guard.allowed(egress_guard.host_of(url), allow, set()):
+                text = text.replace(url, "[link removed]")
+    except Exception:
+        text = re.sub(r"https?://\S*[?&]\S+", "[link removed]", text)  # without the guard, no link with a query leaves
+    room = MAX_OUT - len(tail)
+    if len(text) > room:
+        text = text[:room - 1] + "…"
+    return text + tail
+
+
+# ── Transports ────────────────────────────────────────────────────────────────
+# One small interface: check() at setup, poll(since, wait) → (events, since), send(room, text), members(room),
+# join(room), leave(room). An event is {id, sender, room, ts (seconds), kind, text}.
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_a, **_k):
+        return None  # the token goes to one host; a 3xx becomes an error
+
+
+def _is_local(host):
+    try:
+        import egress_guard
+        return egress_guard._is_local(host)
+    except Exception:
+        return host in ("localhost", "127.0.0.1", "::1")
+
+
+class Matrix:
+    name = "matrix"
+
+    def __init__(self, conf, token):
+        self.base = conf["homeserver"].rstrip("/")
+        self.user = conf["account"]
+        self.token = token
+        u = urllib.parse.urlsplit(self.base)
+        self.host = (u.hostname or "").lower()
+        if u.scheme not in ("https", "http") or not self.host or u.username or u.query or u.fragment:
+            raise Refused(f"that isn't a homeserver address: {clean(self.base)}")
+        if u.scheme == "http" and not _is_local(self.host):
+            raise Refused("plain http is only for a homeserver on this machine or your own network. Use https://")
+        handlers = [NoRedirect(), urllib.request.HTTPSHandler(context=ssl.create_default_context())]
+        if _is_local(self.host):
+            handlers.append(urllib.request.ProxyHandler({}))
+        self.opener = urllib.request.build_opener(*handlers)
+
+    def _call(self, method, route, body=None, query=None, timeout=20):
+        url = f"{self.base}/_matrix/client/v3{route}" + ("?" + urllib.parse.urlencode(query) if query else "")
+        if (urllib.parse.urlsplit(url).hostname or "").lower() != self.host:
+            raise Refused("a request to a host other than the homeserver")
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method, headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"})
+        try:
+            with self.opener.open(req, timeout=timeout) as r:
+                return json.loads(r.read(4_000_000) or b"{}")
+        except urllib.error.HTTPError as e:
+            raise OSError(f"the homeserver said {e.code}") from None
+        except ValueError:
+            raise OSError("the homeserver's answer wasn't JSON") from None
+
+    @staticmethod
+    def _q(s):
+        return urllib.parse.quote(s, safe="")
+
+    def check(self):
+        me = self._call("GET", "/account/whoami").get("user_id")
+        if me != self.user:
+            raise Refused(f"that token belongs to {clean(me)}, not {clean(self.user)}")
+
+    def poll(self, since, wait):
+        q = {"timeout": str(int(wait * 1000) if since else 0)}
+        if since:
+            q["since"] = since
+        r = self._call("GET", "/sync", query=q, timeout=wait + 30)
+        rooms = r.get("rooms") or {}
+        events = []
+        for room, body in (rooms.get("invite") or {}).items():
+            inviter = next((e.get("sender") for e in (body.get("invite_state") or {}).get("events", [])
+                            if e.get("type") == "m.room.member" and e.get("state_key") == self.user), "")
+            events.append({"id": f"invite:{room}", "sender": inviter or "", "room": room, "ts": time.time(), "kind": "invite", "text": None})
+        for room, body in (rooms.get("join") or {}).items():
+            for e in (body.get("timeline") or {}).get("events", []):
+                if not isinstance(e, dict) or not e.get("event_id"):
+                    continue
+                ev = {"id": str(e["event_id"]), "sender": str(e.get("sender") or ""), "room": room,
+                      "ts": (e.get("origin_server_ts") or 0) / 1000, "kind": "other", "text": None}
+                content = e.get("content") if isinstance(e.get("content"), dict) else {}
+                if e.get("type") == "m.room.member":
+                    ev["kind"] = "member"
+                elif e.get("type") == "m.room.encrypted":
+                    ev["kind"] = "encrypted"
+                elif e.get("type") == "m.room.message":
+                    if content.get("m.relates_to", {}).get("rel_type") == "m.replace" or "m.new_content" in content:
+                        ev["kind"] = "edit"
+                    elif content.get("msgtype") == "m.text" and isinstance(content.get("body"), str):
+                        ev["kind"], ev["text"] = "message", content["body"]
+                events.append(ev)
+        return events, r.get("next_batch") or since
+
+    def members(self, room):
+        r = self._call("GET", f"/rooms/{self._q(room)}/members")
+        return sum(1 for e in r.get("chunk", []) if (e.get("content") or {}).get("membership") in ("join", "invite"))
+
+    def join(self, room):
+        self._call("POST", f"/rooms/{self._q(room)}/join", body={})
+
+    def leave(self, room):
+        self._call("POST", f"/rooms/{self._q(room)}/leave", body={})
+
+    def send(self, room, text):
+        self._call("PUT", f"/rooms/{self._q(room)}/send/m.room.message/{uuid.uuid4().hex}", body={"msgtype": "m.text", "body": text})
+
+
+class Signal:
+    """signal-cli, one short `receive` at a time. No daemon, no socket: its JSON goes over a pipe."""
+    name = "signal"
+
+    def __init__(self, conf, _token=None):
+        self.user = conf["account"]
+        self.cli = shutil.which("signal-cli")
+        if not self.cli:
+            raise Refused("signal-cli isn't installed. It needs Java: https://github.com/AsamK/signal-cli, then `signal-cli -a +NUMBER register` or `link`")
+
+    def check(self):
+        r = subprocess.run([self.cli, "-a", self.user, "--output=json", "receive", "--timeout", "1"], capture_output=True, text=True, timeout=90, stdin=subprocess.DEVNULL)
+        if r.returncode != 0:
+            raise Refused(f"signal-cli can't use {clean(self.user)}: {clean(r.stderr.strip().splitlines()[-1] if r.stderr.strip() else 'no reason given', 200)}")
+
+    def poll(self, since, wait):
+        wait = max(1, min(int(wait), 5))  # short, so a `deliver` waiting on signal-cli's own lock gets its turn
+        r = subprocess.run([self.cli, "-a", self.user, "--output=json", "receive", "--timeout", str(wait)], capture_output=True, text=True, timeout=wait + 90, stdin=subprocess.DEVNULL)
+        if r.returncode != 0:
+            raise OSError("signal-cli receive failed")
+        events = []
+        for line in r.stdout.splitlines():
+            try:
+                env = json.loads(line).get("envelope") or {}
+            except (ValueError, AttributeError):
+                continue
+            data = env.get("dataMessage")
+            sender = env.get("sourceNumber") or env.get("source") or env.get("sourceUuid")
+            if not isinstance(data, dict) or not sender:
+                continue  # receipts, typing, sync from your own devices
+            ts = data.get("timestamp") or env.get("timestamp") or 0
+            ev = {"id": f"{sender}:{ts}", "sender": str(sender), "room": str(sender), "ts": ts / 1000, "kind": "other", "text": None}
+            if data.get("groupInfo") or data.get("groupV2"):
+                ev["kind"] = "group"
+            elif isinstance(data.get("message"), str):
+                ev["kind"], ev["text"] = "message", data["message"]
+            events.append(ev)
+        time.sleep(1)
+        return events, "signal"
+
+    def members(self, _room):
+        return 2
+
+    def join(self, _room):
+        pass
+
+    def leave(self, _room):
+        pass
+
+    def send(self, room, text):
+        r = subprocess.run([self.cli, "-a", self.user, "send", "--message-from-stdin", room], input=text, capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            raise OSError("signal-cli send failed")
+
+
+def read_token():
+    try:
+        with open(path("token"), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def transport():
+    conf = config()
+    if not conf:
+        sys.exit("sakura-gateway: not set up. Nothing runs until: sakura-gateway setup matrix|signal …, then sakura-gateway pair")
+    try:
+        if conf["transport"] == "matrix":
+            token = read_token()
+            if not token:
+                sys.exit("sakura-gateway: the token file is gone. Run setup again.")
+            return Matrix(conf, token)
+        return Signal(conf)
+    except Refused as e:
+        sys.exit(f"sakura-gateway: {e}")
+
+
+# ── Setup ─────────────────────────────────────────────────────────────────────
+
+def cmd_setup(args):
+    if len(args) >= 3 and args[0] == "matrix":
+        home, account = args[1], args[2]
+        if not re.fullmatch(r"@[^\s:@]+:[^\s@]+", account):
+            sys.exit("sakura-gateway: the account looks like @sakura:example.org")
+        if "--token-file" in args:
+            try:
+                with open(args[args.index("--token-file") + 1], encoding="utf-8") as f:
+                    token = f.read().strip()
+            except (OSError, IndexError):
+                sys.exit("sakura-gateway: can't read that --token-file")
+        elif sys.stdin.isatty():
+            token = getpass.getpass("Access token for the bot account (not shown): ").strip()
+        else:
+            token = sys.stdin.readline().strip()
+        if not token or re.search(r"\s", token):
+            sys.exit("sakura-gateway: no token given. Pipe it in, or use --token-file FILE. Never put it on the command line.")
+        conf = {"transport": "matrix", "homeserver": home.rstrip("/"), "account": account}
+        try:
+            Matrix(conf, token).check()
+        except Refused as e:
+            sys.exit(f"sakura-gateway: {e}")
+        except OSError as e:
+            sys.exit(f"sakura-gateway: couldn't reach the homeserver with that token ({e}). Nothing was saved.")
+    elif len(args) >= 2 and args[0] == "signal":
+        if not re.fullmatch(r"\+\d{6,15}", args[1]):
+            sys.exit("sakura-gateway: the Signal account is its number, like +15550100")
+        conf, token = {"transport": "signal", "account": args[1]}, None
+        try:
+            Signal(conf).check()
+        except Refused as e:
+            sys.exit(f"sakura-gateway: {e}")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            sys.exit(f"sakura-gateway: signal-cli didn't answer ({e}). Nothing was saved.")
+    else:
+        sys.exit("usage: sakura-gateway setup matrix https://HOMESERVER @BOT:SERVER   (token on stdin)\n       sakura-gateway setup signal +NUMBER")
+    forget("peer.json", "pairing.json", "sync.json", "paused", "token")  # a new account is a new pairing
+    ensure_dir()
+    if token:
+        fd = os.open(path("token"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(token + "\n")
+        os.chmod(path("token"), 0o600)
+    save("config.json", conf)
+    log("setup", conf["transport"])
+    print(f"Set up for {conf['transport']} as {conf['account']}. Nothing is delivered or accepted yet. Next: sakura-gateway pair")
+    if conf["transport"] == "matrix":
+        print("Matrix here has no end-to-end encryption: the homeserver can read what's sent. Use your own, and a room with encryption off.")
+
+
+# ── Pairing ───────────────────────────────────────────────────────────────────
+
+def code_hash(salt, code):
+    return hashlib.sha256((salt + re.sub(r"[\s-]", "", code).upper()).encode()).hexdigest()
+
+
+def ttl():
+    try:
+        return max(1, min(CODE_TTL, int(os.environ.get("SAKURA_GATEWAY_PAIR_TTL") or CODE_TTL)))  # can be shortened, never lengthened
+    except ValueError:
+        return CODE_TTL
+
+
+def poll_wait():
+    try:
+        return max(1, min(POLL, int(os.environ.get("SAKURA_GATEWAY_POLL") or POLL)))
+    except ValueError:
+        return POLL
+
+
+def cmd_pair(_args):
+    t = transport()
+    if peer():
+        sys.exit("sakura-gateway: already paired. `sakura-gateway unpair` first if you mean to change the peer.")
+    pending = load("pairing.json") or {}
+    if pending.get("locked_until", 0) > time.time():
+        sys.exit(f"sakura-gateway: pairing is locked after {MAX_ATTEMPTS} wrong codes. Try again in {int((pending['locked_until'] - time.time()) / 60) + 1} minutes.")
+    with OneAtATime():
+        code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LEN))
+        salt = secrets.token_hex(8)
+        issued = time.time()
+        pending = {"salt": salt, "hash": code_hash(salt, code), "issued": issued, "expires": issued + ttl(), "attempts": 0}
+        save("pairing.json", pending)
+        log("pairing opened")
+        print(f"code: {code[:5]}-{code[5:]}")
+        where = "invite the bot to a new direct room with encryption off, then send the code there" if t.name == "matrix" else "send the code to the gateway's number"
+        print(f"From your own account, {where}. It works once, for {ttl() // 60 or 1} minutes. Waiting…", flush=True)
+        sync = load("sync.json") or {}
+        since, seen = sync.get("since"), set(sync.get("seen", []))
+        refused_rooms = set()
+        try:
+            if t.name == "matrix" and not since:
+                events, since = t.poll(None, 0)  # what was there before: only invites count
+                events = [e for e in events if e["kind"] == "invite"]
+            else:
+                events = []
+            while True:
+                for ev in events:
+                    done = pair_event(t, ev, pending, seen, refused_rooms)
+                    if done is not None:
+                        save("sync.json", {"since": since, "seen": sorted(seen)[-KEEP_IDS:]})
+                        return done
+                save("sync.json", {"since": since, "seen": sorted(seen)[-KEEP_IDS:]})
+                left = pending["expires"] - time.time()
+                if left <= 0:
+                    forget("pairing.json")
+                    log("pairing closed", "the code expired")
+                    sys.exit("sakura-gateway: the code expired with nobody paired. Run `sakura-gateway pair` for a new one.")
+                try:
+                    events, since = t.poll(since, min(poll_wait(), max(1, left)))
+                except (OSError, subprocess.TimeoutExpired) as e:
+                    print(f"  (couldn't reach {t.name}: {e}; trying again)", flush=True)
+                    events = []
+                    time.sleep(3)
+        except KeyboardInterrupt:
+            forget("pairing.json")
+            log("pairing closed", "cancelled")
+            sys.exit("\nsakura-gateway: pairing cancelled; the code is void.")
+
+
+def pair_event(t, ev, pending, seen, refused_rooms):
+    """None to keep waiting, 0 when paired; exits when locked. Says nothing to anyone but the one who had the code."""
+    if ev["sender"] == t.user:
+        return None
+    if ev["kind"] == "invite":
+        if ev["room"] in refused_rooms:
+            return None
+        try:
+            t.join(ev["room"])
+            n = t.members(ev["room"])
+            if n != 2:
+                refused_rooms.add(ev["room"])
+                t.leave(ev["room"])
+                log("refused room", f"{n} members")
+                print(f"  refused a room with {n} members: the chat must be you and the bot, nobody else.", flush=True)
+        except OSError as e:
+            print(f"  couldn't join an invited room ({e})", flush=True)
+        return None
+    if ev["id"] in seen:
+        return None
+    seen.add(ev["id"])
+    if ev["kind"] == "encrypted":
+        print("  a message arrived in an encrypted room. This gateway can't read those: make a new room with encryption OFF and send the code there.", flush=True)
+        return None
+    if ev["kind"] == "group":
+        log("dropped", "group chat")
+        return None
+    if ev["kind"] != "message":
+        return None
+    if ev["ts"] < pending["issued"] - SKEW:
+        log("dropped", "older than the code")
+        return None
+    try:
+        n = t.members(ev["room"])
+    except OSError:
+        return None
+    if n != 2:
+        if ev["room"] not in refused_rooms:
+            refused_rooms.add(ev["room"])
+            log("refused room", f"{n} members")
+            print(f"  ignored a room with {n} members: the chat must be you and the bot, nobody else.", flush=True)
+        return None
+    if time.time() > pending["expires"]:
+        forget("pairing.json")
+        log("pairing closed", "the code expired")
+        sys.exit("sakura-gateway: the code expired with nobody paired. Run `sakura-gateway pair` for a new one.")
+    if len(ev["text"]) <= 64 and hmac.compare_digest(code_hash(pending["salt"], ev["text"].strip()), pending["hash"]):
+        forget("pairing.json", "paused")  # single use
+        save("peer.json", {"sender": ev["sender"], "room": ev["room"], "since": datetime.now().replace(microsecond=0).isoformat()})
+        log("paired", sender=ev["sender"])
+        try:
+            t.send(ev["room"], "Paired with Sakura. " + HELP)
+        except OSError:
+            pass
+        print(f"Paired with {clean(ev['sender'])}. Start it: sakura-gateway run   (or as a service: sakura-gateway install)")
+        return 0
+    pending["attempts"] += 1
+    if pending["attempts"] >= MAX_ATTEMPTS:
+        save("pairing.json", {"locked_until": time.time() + LOCKOUT})
+        log("pairing locked", f"{MAX_ATTEMPTS} wrong codes")
+        sys.exit(f"sakura-gateway: {MAX_ATTEMPTS} wrong codes. The code is void and pairing is locked for {LOCKOUT // 60} minutes.")
+    save("pairing.json", pending)
+    log("dropped", "wrong pairing code")
+    return None
+
+
+def cmd_unpair(_args):
+    was = peer()
+    forget("peer.json", "pairing.json", "sync.json")
+    if was:
+        log("unpaired")
+    print("Unpaired. Nothing is delivered or accepted until `sakura-gateway pair`." if was else "Not paired.")
+
+
+def cmd_reset(_args):
+    forget("peer.json", "pairing.json", "sync.json", "token", "config.json", "paused")
+    log("reset")
+    print("Unpaired, and the setup and token are deleted.")
+
+
+# ── Commands from the peer ────────────────────────────────────────────────────
+
+def pa(*args, timeout=1900):
+    return subprocess.run([os.path.join(ROOT, "bin", "pa"), *args], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+
+
+def pa_file(name):
+    try:
+        with open(os.path.join(PA_DIR, name), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def pa_today():
+    forced = os.environ.get("SAKURA_PA_NOW")
+    return (datetime.fromisoformat(forced) if forced else datetime.now()).date().isoformat()
+
+
+def open_offers():
+    return [o for o in pa_file("offers.json") if isinstance(o, dict) and not o.get("done") and o.get("expires", 0) > time.time()]
+
+
+def parse(text):
+    """(verb, argument) from the closed grammar, or (None, None). This is the whole of what a message can mean."""
+    text = " ".join(CONTROL.sub("", text).split())
+    if len(text) > MAX_IN:
+        return None, None
+    low = text.lower()
+    if low in ("list", "status", "stop", "help"):
+        return low, None
+    m = YESNO.match(text)
+    if m:
+        return m.group(1).lower(), m.group(2)
+    if low.startswith("remind "):
+        rest = text[7:].strip()
+        if rest and not rest.startswith("-") and rest.split()[0].lower() not in ("cancel", "list"):
+            return "remind", rest
+    return None, None
+
+
+def answer(verb, arg):
+    """Do one parsed command and return the reply. Arguments reach `pa` as an argv list, never through a shell."""
+    if verb == "help":
+        return HELP
+    if verb == "stop":
+        pause("the peer said stop")
+        return "Paused. Nothing more is sent or accepted until `sakura-gateway resume` is run on the machine."
+    if verb == "status":
+        stats = load("stats.json", {}) or {}
+        dropped = sum(n for k, n in stats.items() if k.startswith("dropped"))
+        return f"Running. {len(open_offers())} open offers, {stats.get('accepted', 0)} commands accepted, {dropped} messages dropped."
+    if verb == "list":
+        lines = [f"offer {o['id']}: {o.get('text', '')}  reply: yes {o['id']}" for o in open_offers()]
+        today = pa_today()
+        lines += [f"{i['at'][11:16]} {i.get('text', '')}" for i in sorted(pa_file("schedule.json"), key=lambda i: str(i.get("at")))
+                  if isinstance(i, dict) and i.get("kind") == "reminder" and str(i.get("at", "")).startswith(today)]
+        return "\n".join(lines) or "No open offers and no reminders today."
+    if verb in ("yes", "no"):
+        o = next((x for x in pa_file("offers.json") if isinstance(x, dict) and x.get("id") == arg and not x.get("done")), None)
+        if not o:
+            return f"No open offer {arg}."
+        if o.get("expires", 0) < time.time():
+            return f"Offer {arg} expired. Nothing was run."
+        try:
+            r = pa(verb, arg)
+        except subprocess.TimeoutExpired:
+            return f"{verb} {arg}: still running after half an hour; stopped waiting."
+        if verb == "no":
+            return f"Skipped {arg}." if r.returncode == 0 else f"No open offer {arg}."
+        return f"Did {arg}." if r.returncode == 0 else f"Couldn't do {arg}; see the machine."  # pa sends the outcome itself
+    if verb == "remind":
+        r = pa("remind", arg, timeout=30)
+        out = (r.stdout if r.returncode == 0 else r.stderr).strip().splitlines()
+        return out[-1] if out else "Couldn't set that reminder."
+    return HELP
+
+
+def scan_flags(text):
+    """What the injection scanner makes of it. For the log only: the grammar is what protects, not this."""
+    try:
+        import injection
+        return sorted({f["category"] for f in injection.scan(text)})
+    except Exception:
+        return []
+
+
+def handle(t, ev, p, seen, fresh):
+    """One incoming event, once. Returns False when the gateway should stop looking (the room grew)."""
+    if ev["sender"] == t.user or ev["kind"] == "invite":
+        return True  # our own messages, and invites: nobody new gets in after pairing
+    if ev["id"] in seen:
+        log("dropped", "seen before")
+        return True
+    seen.add(ev["id"])
+    save("sync.json", {"since": fresh["since_before"], "seen": sorted(seen)[-KEEP_IDS:]})  # recorded before anything is done: at most once
+    if ev["room"] != p["room"] or ev["sender"] != p["sender"]:
+        if ev["kind"] == "member" and ev["room"] == p["room"]:
+            return room_still_private(t, p)
+        if ev["kind"] in ("message", "encrypted", "edit", "group"):
+            log("dropped", "not the paired peer", sender=ev["sender"])
+        return True
+    if ev["kind"] == "member":
+        return room_still_private(t, p)
+    if paused():
+        log("dropped", "paused")
+        return True
+    if ev["kind"] != "message":
+        log("dropped", {"encrypted": "encrypted message, can't be read", "edit": "an edit, not a new message"}.get(ev["kind"], "not a text message"))
+        return True
+    if fresh["first"]:
+        log("dropped", "from before the gateway was looking")
+        return True
+    if ev["ts"] < time.time() - MAX_AGE:
+        log("dropped", "too old to act on")
+        return True
+    verb, arg = parse(ev["text"])
+    flags = scan_flags(ev["text"])
+    if verb is None:
+        log("refused", "not in the grammar", flagged=", ".join(flags))
+        reply = HELP
+    else:
+        log("accepted", verb=verb, flagged=", ".join(flags))
+        try:
+            reply = answer(verb, arg)
+        except Exception as e:  # a broken pa must not take the gateway down, or tell the peer how it broke
+            log("failed", type(e).__name__, verb=verb)
+            reply = "That didn't work; see the machine."
+    try:
+        if t.members(p["room"]) != 2:
+            pause("the paired room has more than two members")
+            return False
+        t.send(p["room"], outbound(reply, getattr(t, "token", None)))
+    except OSError as e:
+        log("reply failed", str(e))
+    return True
+
+
+def room_still_private(t, p):
+    try:
+        if t.members(p["room"]) != 2:
+            pause("the paired room has more than two members")
+            return False
+    except OSError:
+        pass
+    return True
+
+
+def cmd_run(_args):
+    t = transport()
+    if not peer():
+        sys.exit("sakura-gateway: not paired, so there is nothing to run. `sakura-gateway pair` first.")
+    with OneAtATime():
+        log("started", t.name)
+        failures = 0
+        try:
+            while True:
+                p = peer()
+                if not p:
+                    log("stopped", "unpaired")
+                    return 0
+                sync = load("sync.json") or {}
+                since, seen = sync.get("since"), set(sync.get("seen", []))
+                first = t.name == "matrix" and not since
+                try:
+                    events, new_since = t.poll(since, poll_wait())
+                    failures = 0
+                except (OSError, subprocess.TimeoutExpired) as e:
+                    failures += 1
+                    if failures in (1, 10, 100):
+                        log("can't reach " + t.name, str(e))
+                    time.sleep(min(300, 5 * failures))
+                    continue
+                fresh = {"first": first, "since_before": since}
+                for ev in events:
+                    if not peer() or not handle(t, ev, p, seen, fresh):
+                        break
+                save("sync.json", {"since": new_since, "seen": sorted(seen)[-KEEP_IDS:]})
+        except KeyboardInterrupt:
+            log("stopped")
+            return 0
+
+
+# ── Delivering ────────────────────────────────────────────────────────────────
+
+def cmd_deliver(args):
+    """Called by `notify`. Silent, and exit 0 when there is simply nobody to tell."""
+    if not args:
+        sys.exit('usage: sakura-gateway deliver "title" "body"')
+    p, conf = peer(), config()
+    if not p or not conf:
+        return 0
+    if paused():
+        log("not delivered", "paused")
+        return 0
+    try:
+        t = Matrix(conf, read_token() or "") if conf["transport"] == "matrix" else Signal(conf)
+        title, body = args[0], " ".join(args[1:])
+        text = outbound(f"{title}: {body}" if body else title, getattr(t, "token", None))
+        if t.members(p["room"]) != 2:
+            pause("the paired room has more than two members")
+            return 1
+        t.send(p["room"], text)
+    except (Refused, OSError, subprocess.TimeoutExpired) as e:
+        log("not delivered", str(e))
+        return 1
+    log("delivered")
+    return 0
+
+
+# ── Local control ─────────────────────────────────────────────────────────────
+
+def cmd_pause(_args):
+    pause("paused from this machine")
+    print("Paused. `sakura-gateway resume` to carry on.")
+
+
+def cmd_resume(_args):
+    was = paused()
+    forget("paused")
+    if was:
+        log("resumed")
+    print("Resumed." if was else "It wasn't paused.")
+
+
+def cmd_status(_args):
+    conf, p = config(), peer()
+    if not conf:
+        print("Closed: not set up. Nothing runs, listens or sends. Start with: sakura-gateway setup matrix|signal …")
+        return 0
+    where = f" on {urllib.parse.urlsplit(conf['homeserver']).hostname}" if conf.get("homeserver") else ""
+    print(f"transport  {conf['transport']} as {conf['account']}{where}")
+    if conf["transport"] == "matrix":
+        print("           no end-to-end encryption: the homeserver can read what's sent")
+    print(f"peer       {clean(p['sender'])} since {p['since'][:16].replace('T', ' ')}" if p else "peer       none: closed until `sakura-gateway pair`")
+    if paused():
+        print(f"paused     {open(path('paused')).read().strip()}; `sakura-gateway resume` to carry on")
+    try:
+        f = os.fdopen(os.open(path(".lock"), os.O_WRONLY | os.O_CREAT, 0o600), "w")
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        f.close()
+        print("running    no" + ("  (sakura-gateway run, or sakura-gateway install)" if p else ""))
+    except OSError:
+        print("running    yes")
+    print("listening  on nothing: outbound connections only")
+    stats = load("stats.json", {}) or {}
+    for k in sorted(stats):
+        if k.startswith(("accepted", "refused", "dropped", "delivered", "not delivered")):
+            print(f"{stats[k]:9d}  {k}")
+    return 0
+
+
+def cmd_log(args):
+    n = 30
+    if "-n" in args:
+        try:
+            n = int(args[args.index("-n") + 1])
+        except (ValueError, IndexError):
+            sys.exit("usage: sakura-gateway log [-n N] [--json]")
+    try:
+        with open(path("log.jsonl"), encoding="utf-8") as f:
+            lines = f.readlines()[-n:]
+    except OSError:
+        print("Nothing logged yet.")
+        return 0
+    for line in lines:
+        if "--json" in args:
+            print(line, end="")
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        extra = "  ".join(f"{k}={clean(v)}" for k, v in e.items() if k not in ("t", "what", "why"))
+        print(f"{e['t'][:16].replace('T', ' ')}  {e['what']}" + (f": {e['why']}" if e.get("why") else "") + (f"  {extra}" if extra else ""))
+    return 0
+
+
+def cmd_install(args):
+    units = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "systemd", "user")
+    unit = os.path.join(units, "sakura-gateway.service")
+    if "--remove" in args:
+        subprocess.run(["systemctl", "--user", "disable", "--now", "sakura-gateway.service"], capture_output=True)
+        try:
+            os.remove(unit)
+        except OSError:
+            pass
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+        print("The gateway service is removed. The pairing is kept; `sakura-gateway unpair` forgets it.")
+        return 0
+    if not peer():
+        sys.exit("sakura-gateway: not paired, so there is nothing to run as a service. `sakura-gateway pair` first.")
+    if not shutil.which("systemctl"):
+        sys.exit("sakura-gateway: no systemctl here. Run it yourself: sakura-gateway run")
+    with open(os.path.join(ROOT, "systemd", "sakura-gateway.service"), encoding="utf-8") as f:
+        text = f.read().replace("__SAKURA_DIR__", ROOT).replace("__SAKURA_HOME__", HOME).replace("__PATH__", os.environ.get("PATH", "/usr/bin:/bin"))
+    os.makedirs(units, exist_ok=True)
+    with open(unit, "w", encoding="utf-8") as f:
+        f.write(text)
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    r = subprocess.run(["systemctl", "--user", "enable", "--now", "sakura-gateway.service"], capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit(f"sakura-gateway: the unit is written to {unit} but systemd wouldn't start it: {r.stderr.strip()[:200]}")
+    print("The gateway runs as a user service now (systemctl --user status sakura-gateway). `sakura-gateway install --remove` takes it out.")
+    return 0
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help") or "--help" in argv[1:2]:
+        print(__doc__)
+        return 0
+    table = {"setup": cmd_setup, "pair": cmd_pair, "unpair": cmd_unpair, "reset": cmd_reset, "run": cmd_run, "deliver": cmd_deliver, "pause": cmd_pause,
+             "resume": cmd_resume, "status": cmd_status, "log": cmd_log, "install": cmd_install}
+    if argv[0] not in table:
+        sys.exit(f"sakura-gateway: no command {argv[0]}. See: sakura-gateway --help")
+    return table[argv[0]](argv[1:]) or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

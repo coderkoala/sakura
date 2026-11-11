@@ -124,6 +124,32 @@ script written earlier in the session and then run, `curl -K config`, `xargs`); 
 that matters. It is narrowed by workers running with no network at all unless the job says so, and closed only by a
 network sandbox on the main agent, which is the roadmap's next step.
 
+### The phone: `sakura-gateway`
+
+A messaging gateway is the same three dangers with a door to the outside added, and the usual way it goes wrong is a
+listener on the internet and free text handed to an agent. `sakura-gateway` (Matrix or Signal) has neither
+(`evals/gateway.py`, 81 checks against a fake homeserver and a fake `signal-cli`):
+
+- **Closed until paired.** Nothing runs or sends before `setup` and `pair`. Pairing is a one-time code (50 bits, ten
+  minutes, single use, five wrong tries lock it) sent from your account in a two-member chat; that sender and that chat
+  are the only peer. Everyone else is dropped and counted and never answered.
+- **No listener.** Outbound connections only, to the one homeserver named at setup (https, no redirects, token in a
+  header), or through `signal-cli`. There is no TCP port and no unix socket to find.
+- **A closed grammar, not a prompt.** `yes ID`, `no ID`, `list`, `remind …`, `status`, `stop`, `help`. It is matched by
+  a regex and passed to `pa` as an argv list: no model reads the message and no shell does. A yes can only run a command
+  Sakura itself offered (`pa offer`), once, before it expires. The injection scanner runs on incoming text for the log
+  only; the grammar is what protects.
+- **Once, and not late.** Every event id is kept and handled once; what was there before the gateway looked is ignored;
+  a message more than 15 minutes old is dropped.
+- **What goes out is cut down.** Secret-shaped text is replaced using `sakura-memory`'s own check, data-carrying links to
+  hosts off the egress allowlist are removed, and a message is capped at 1000 characters.
+
+Its limits: Matrix here is the client-server API with no end-to-end encryption, so the homeserver reads everything (use
+your own; Signal through `signal-cli` is end-to-end encrypted). It has been proven against fakes, not against Synapse or
+a real Signal account. And it does not defend against the agent on this machine: a session that can run shell commands
+can run `sakura-gateway setup` or write the pairing file, the same as it can edit any file of yours. That door is the
+shell's approval, not the gateway's.
+
 ### Where this leaves the three dangers
 
 - **Private data + untrusted content + egress in one place** is still the risky combination — Sakura is
