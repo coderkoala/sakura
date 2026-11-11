@@ -50,13 +50,21 @@ if [ ! -s "$assets/sakura-linux-x86_64.tar.gz" ]; then
     say "  fetching from $last"
     run gh release download "$last" -D "$assets" --clobber
 fi
-if [ $go = 1 ]; then (cd "$assets" && sha256sum -c sakura-linux-x86_64.tar.gz.sha256 >/dev/null) && say "  sha256 OK"; fi
+# Every build that's there goes out: x86_64, the static x86_64-musl (any glibc) and aarch64 (tools/build-engine.sh makes each).
+files=()
+for f in "$assets"/sakura-linux-*.tar.gz; do
+    [ -s "$f" ] && [ -s "$f.sha256" ] || continue
+    if [ $go = 1 ]; then (cd "$assets" && sha256sum -c "$(basename "$f").sha256" >/dev/null) || { echo "release: $(basename "$f") fails its checksum" >&2; exit 1; }; fi
+    files+=("$f" "$f.sha256")
+done
+[ $go = 0 ] || [ ${#files[@]} -gt 0 ] || { echo "release: no engine assets in $assets" >&2; exit 1; }
+say "  ${#files[@]} files: $(for f in "${files[@]}"; do basename "$f"; done | grep -v sha256 | tr '\n' ' ')"
 
 say "== 6/7 publish"
 say "  run this as its own command (a compound trips the permission classifier):"
-say "  gh release create v$ver $assets/sakura-linux-x86_64.tar.gz $assets/sakura-linux-x86_64.tar.gz.sha256 --title \"Sakura $ver\" --notes-file $notes ${pre[*]}"
+say "  gh release create v$ver ${files[*]:-$assets/sakura-linux-x86_64.tar.gz $assets/sakura-linux-x86_64.tar.gz.sha256} --title \"Sakura $ver\" --notes-file $notes ${pre[*]}"
 if [ $go = 1 ] && [ "${SAKURA_RELEASE_PUBLISH:-0}" = 1 ]; then
-    gh release create "v$ver" "$assets/sakura-linux-x86_64.tar.gz" "$assets/sakura-linux-x86_64.tar.gz.sha256" --title "Sakura $ver" --notes-file "$notes" "${pre[@]}"
+    gh release create "v$ver" "${files[@]}" --title "Sakura $ver" --notes-file "$notes" "${pre[@]}"
 fi
 
 say "== 7/7 the dotfiles pin"

@@ -67,27 +67,31 @@ done
 # The engine, from this version's release, so a machine doesn't need 20 GB of RAM and half an hour to compile it. A failure
 # here keeps whatever binary is already there. Set SAKURA_NO_BINARY=1 to skip this, as when you build your own.
 install_binary() {
-    local version tag url tmp asset="sakura-linux-$(uname -m).tar.gz"
+    local version tag url tmp asset got="" base="sakura-linux-$(uname -m)"
     version="$(cat "$ROOT/VERSION")"
     tag="v$version"
     [ "${SAKURA_NO_BINARY:-0}" != 1 ] || return 0
     [ "$(cat "$SAKURA_HOME/binary-version" 2>/dev/null)" != "$version" ] || return 0
     url="${SAKURA_RELEASE_URL:-https://github.com/coderkoala/sakura/releases/download/$tag}"
     tmp="$(mktemp -d)"
-    if ! curl -fsSL --max-time 900 -o "$tmp/$asset" "$url/$asset" || ! curl -fsSL --max-time 60 -o "$tmp/$asset.sha256" "$url/$asset.sha256"; then
-        echo "  couldn't download the engine for $tag; keeping the current one. To build it instead, see $ROOT/patches/README.md"
-        rm -rf "$tmp"
-        return 0
-    fi
-    if ! (cd "$tmp" && sha256sum -c --quiet "$asset.sha256" >/dev/null 2>&1) || ! tar -xzf "$tmp/$asset" -C "$tmp" sakura; then
-        echo "  the engine download failed its checksum; not installing it. To build it instead, see $ROOT/patches/README.md"
-        rm -rf "$tmp"
-        return 0
-    fi
-    chmod 755 "$tmp/sakura"
-    # Too new a system library is the likely failure on an older distro, so prove it runs before replacing anything.
-    if ! "$tmp/sakura" --version >/dev/null 2>&1; then
-        echo "  the prebuilt engine won't run on this system, usually an older glibc; keeping the current one. To build it, see $ROOT/patches/README.md"
+    # The build for this CPU first; if it won't run here (an older glibc, usually), the static one, which needs no
+    # system library at all. Each is checked against its checksum and proven to run before anything is replaced.
+    for asset in "$base.tar.gz" "$base-musl.tar.gz"; do
+        rm -f "$tmp/sakura"
+        if ! curl -fsSL --max-time 900 -o "$tmp/$asset" "$url/$asset" 2>/dev/null || ! curl -fsSL --max-time 60 -o "$tmp/$asset.sha256" "$url/$asset.sha256" 2>/dev/null; then
+            [ "$asset" = "$base.tar.gz" ] && echo "  no $asset in the $tag release"
+            continue
+        fi
+        if ! (cd "$tmp" && sha256sum -c --quiet "$asset.sha256" >/dev/null 2>&1) || ! tar -xzf "$tmp/$asset" -C "$tmp" sakura; then
+            echo "  $asset failed its checksum; not installing it"
+            continue
+        fi
+        chmod 755 "$tmp/sakura"
+        if "$tmp/sakura" --version >/dev/null 2>&1; then got="$asset"; break; fi
+        echo "  $asset won't run on this system (usually an older glibc)"
+    done
+    if [ -z "$got" ]; then
+        echo "  no prebuilt engine for $tag runs here; keeping the current one. To build it: $ROOT/tools/build-engine.sh (see $ROOT/patches/README.md)"
         rm -rf "$tmp"
         return 0
     fi
@@ -95,7 +99,7 @@ install_binary() {
     mv -f "$tmp/sakura" "$HOME/.local/bin/sakura.new" && mv -f "$HOME/.local/bin/sakura.new" "$HOME/.local/bin/sakura"
     printf '%s\n' "$version" >"$SAKURA_HOME/binary-version"
     rm -rf "$tmp"
-    echo "  engine: $tag installed from the release"
+    echo "  engine: $tag installed from the release ($got)"
 }
 install_binary
 

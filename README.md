@@ -208,7 +208,7 @@ python3 evals/formats.py          # conv: books (epub, mobi, azw3, fb2), denoise
 python3 evals/memoryflows.py      # reflection, consolidation, 90-day flags, ?teach retro, the mail voice, ?recall over mail and documents: 69 checks, model stubbed
 python3 evals/shim.py             # sakura-shim against a fake model server replaying mangled tool calls, streamed and not: 51 checks
 python3 evals/guardian.py         # the guardian: disk projection from planted samples, certificates, late and unrestored backups, the weekly nag: 29 checks
-python3 evals/machineroom.py      # ports, space, drift, when, conv (incl. redact/fill/sign), vid, dupes, shelve, money, sakura-doctor, sakura-notes, sakura-what, vault (Bitwarden, KeePassXC, 1Password), sakura-complete, sakura-last, sakura-model pick, sakura-suggest, sakura-lean, sakura-skill, host-scoped memory: 177 checks
+python3 evals/machineroom.py      # ports, space, drift, when, conv (incl. redact/fill/sign), vid, dupes, shelve, money, sakura-doctor, sakura-notes, sakura-what, vault (Bitwarden, KeePassXC, 1Password), sakura-complete, sakura-last, sakura-model pick, sakura-suggest, sakura-lean, sakura-skill, the engine download, host-scoped memory: 186 checks
 python3 evals/archive.py          # faces, restore, conv subs, translate: planted faces and a spoken sentence; SKIP where the model isn't on this machine
 python3 evals/toolpick.py         # does the model reach for the toolkit from a plain sentence? 15 asks graded by which commands ran (needs the driver) against planted state and a local server
 evals/in-box.sh fix.py            # any of them inside a throwaway container; the driver stays on the host

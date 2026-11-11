@@ -1,6 +1,6 @@
 # Engine patch
 
-The `sakura` binary is Open Interpreter (a Rust fork of Codex) plus `engine.patch`. `install.sh` downloads the matching build from this version's GitHub release (Linux x86_64) and verifies its checksum, so you only need this page to build it yourself, with `SAKURA_NO_BINARY=1`. To build it:
+The `sakura` binary is Open Interpreter (a Rust fork of Codex) plus `engine.patch`. `install.sh` downloads the matching build from this version's GitHub release (Linux x86_64) and verifies its checksum, so you only need this page to build it yourself, with `SAKURA_NO_BINARY=1`. The short way is `tools/build-engine.sh [TARGET]` (`x86_64-unknown-linux-musl` for a static binary that runs on any glibc, `aarch64-unknown-linux-musl` for ARM; `--check` only proves the patch applies), which makes the asset `install.sh` looks for. By hand:
 
     git clone https://github.com/OpenInterpreter/open-interpreter sakura-src && cd sakura-src
     git checkout "$(cat <this repo>/patches/ENGINE_BASE)"

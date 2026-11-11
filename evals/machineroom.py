@@ -2360,6 +2360,68 @@ def skill(tmp):
     }
 
 
+def engine(tmp):
+    """The engine download: the build for this CPU, then the static one when that won't run here; checksums hold; a bad
+    release changes nothing. Graded with a local "release" of stand-in binaries, through install.sh's own function."""
+    root = os.path.dirname(BIN)
+    text = open(os.path.join(root, "install.sh")).read()
+    fn = text[text.index("install_binary() {"):text.index("\ninstall_binary\n")]
+    arch = os.uname().machine
+
+    def release(name, files):
+        d = os.path.join(tmp, name)
+        os.makedirs(d)
+        for asset, script, good_sum in files:
+            work = os.path.join(d, "w")
+            os.makedirs(work, exist_ok=True)
+            with open(os.path.join(work, "sakura"), "w") as f:
+                f.write(script)
+            os.chmod(os.path.join(work, "sakura"), 0o755)
+            run(["tar", "-czf", os.path.join(d, asset), "-C", work, "sakura"])
+            digest = run(["sha256sum", asset], cwd=d).stdout if good_sum else "0" * 64 + f"  {asset}\n"
+            open(os.path.join(d, asset + ".sha256"), "w").write(digest)
+        return d
+
+    def install(rel, home, prior=None):
+        os.makedirs(os.path.join(home, ".local", "bin"), exist_ok=True)
+        os.makedirs(os.path.join(home, ".sakura"), exist_ok=True)
+        if prior:
+            with open(os.path.join(home, ".local", "bin", "sakura"), "w") as f:
+                f.write(prior)
+        script = f'set -u\nROOT={root!r}\nSAKURA_HOME="$HOME/.sakura"\n{fn}\ninstall_binary\n'
+        r = run(["bash", "-c", script], {"HOME": home, "SAKURA_RELEASE_URL": "file://" + rel})
+        p = os.path.join(home, ".local", "bin", "sakura")
+        return r.stdout, open(p).read() if os.path.exists(p) else None, os.path.exists(os.path.join(home, ".sakura", "binary-version"))
+
+    ok = "#!/bin/sh\necho sakura {}\n"
+    broken = "#!/bin/sh\necho 'version GLIBC_2.39 not found' >&2\nexit 1\n"
+    both = release("both", [(f"sakura-linux-{arch}.tar.gz", ok.format("glibc"), True), (f"sakura-linux-{arch}-musl.tar.gz", ok.format("static"), True)])
+    old_glibc = release("old", [(f"sakura-linux-{arch}.tar.gz", broken, True), (f"sakura-linux-{arch}-musl.tar.gz", ok.format("static"), True)])
+    arm_only = release("static-only", [(f"sakura-linux-{arch}-musl.tar.gz", ok.format("static"), True)])
+    tampered = release("bad", [(f"sakura-linux-{arch}.tar.gz", ok.format("glibc"), False), (f"sakura-linux-{arch}-musl.tar.gz", ok.format("static"), False)])
+    nothing_runs = release("none", [(f"sakura-linux-{arch}.tar.gz", broken, True), (f"sakura-linux-{arch}-musl.tar.gz", broken, True)])
+    o1, b1, v1 = install(both, os.path.join(tmp, "h1"))
+    o2, b2, v2 = install(old_glibc, os.path.join(tmp, "h2"), prior="#!/bin/sh\necho previous\n")
+    prev = os.path.join(tmp, "h2", ".local", "bin", "sakura.prev")
+    o3, b3, v3 = install(arm_only, os.path.join(tmp, "h3"))
+    o4, b4, v4 = install(tampered, os.path.join(tmp, "h4"), prior="#!/bin/sh\necho previous\n")
+    o5, b5, v5 = install(nothing_runs, os.path.join(tmp, "h5"), prior="#!/bin/sh\necho previous\n")
+    o6, b6, _ = install(old_glibc, os.path.join(tmp, "h1"))  # same version already installed: nothing is fetched
+    check = run([os.path.join(root, "tools", "build-engine.sh"), "nonsense-target"])
+    rel = open(os.path.join(BIN, "sakura-release")).read()
+    return {
+        "the build for this CPU is installed when it runs": "glibc" in (b1 or "") and v1 and f"sakura-linux-{arch}.tar.gz)" in o1,
+        "on an older glibc the static build is installed instead, and it says so": "static" in (b2 or "") and v2 and "won't run on this system" in o2 and "-musl.tar.gz)" in o2,
+        "the engine that was there is kept as sakura.prev": os.path.exists(prev) and "previous" in open(prev).read(),
+        "a release with only the static build still installs": "static" in (b3 or "") and v3,
+        "a failed checksum installs nothing and keeps the current engine": "previous" in (b4 or "") and not v4 and "checksum" in o4,
+        "when neither runs, nothing changes and it names the build script": "previous" in (b5 or "") and not v5 and "tools/build-engine.sh" in o5,
+        "a version already installed isn't fetched again": o6 == "" and "glibc" in (b6 or ""),
+        "the build script refuses a target it has no asset name for": check.returncode == 2 and "no asset name" in check.stderr,
+        "the release publishes every build that's there, each against its checksum": 'for f in "$assets"/sakura-linux-*.tar.gz' in rel and 'sha256sum -c "$(basename "$f").sha256"' in rel,
+    }
+
+
 CASES = {
     "ports": ports,
     "space": space,
@@ -2386,6 +2448,7 @@ CASES = {
     "suggest": suggest,
     "lean": lean,
     "skill": skill,
+    "engine": engine,
 }
 
 
