@@ -86,6 +86,35 @@ if the model is fooled. It runs on every shell command (`PreToolUse`) and on eve
   `data:` URI pointing at an untrusted host is blocked, because rendered somewhere it would leak with
   no click. The model is told to remove it and report the attempt.
 
+### Every way out, accounted for
+
+A POST is one door. The rule is the same at each of the others, read on that door's own terms (`other_channels` in
+`hooks/egress_guard.py`; each row is a check in `evals/injection.py`):
+
+| Way out | Asks when | Never asks for |
+| --- | --- | --- |
+| `curl`/`wget`/`fetch_url`/httpie/`requests`/`urlopen`, and `ftp://`, `sftp://`, `scp://`, `ws://` URLs | a body, an upload, a substitution or a payload-shaped query goes to an untrusted host | a plain read |
+| `scp`, `rsync`, `sftp -b` | the destination is `host:path` on an untrusted host | a download (`host:path` as the source), local paths |
+| `ssh`, `nc`/`ncat`/`telnet`, `socat`, `openssl s_client` | something is piped, redirected or substituted into a connection to an untrusted host | `ssh host cmd` with nothing fed in, a port check |
+| bash `/dev/tcp`, `/dev/udp` | it is written to | reading from it |
+| `dig`, `nslookup`, `host`, `ping` | the name is built from a command's output under an untrusted domain (data riding out as a DNS label) | a plain lookup |
+| `git push` | the target is a URL on an untrusted host, or a remote that this session added or whose host came from fetched content | a remote that was already there: it's yours |
+| `himalaya … --send`, `mail`, `mutt`, `sendmail`, `msmtp` | a recipient's address or domain was never named by you (the fetch allowlist does not count here) | a draft, reading mail |
+| sockets, `smtplib`, `ftplib` opened from code | the literal host is untrusted | |
+| the MCP `fetch_url` tool | no hook runs on that path, so the server itself refuses a payload-shaped URL to an untrusted host and sends the request to the shell, where it asks | reading |
+| the final answer | a data-bearing image or link, or a `data:` URI | plain cited URLs |
+
+"Untrusted" is the same everywhere: not on the allowlist, not a private or loopback address, not named by you in this
+conversation, and, for the machine-to-machine doors, not one of your own machines: every `Host` and `HostName` in
+`~/.ssh/config` is yours, and so is a name with no dot (the LAN). Cloud remotes set up through `drive add` are yours
+too: that login was typed by you.
+
+Not accounted for, and why: a program that takes its destination from a file or a variable the guard can't read (a
+script written earlier in the session and then run, `curl -K config`, `xargs`); text typed into a form through
+`sakura-browser type` on a page that then submits it; a kept tool that makes its own requests. The first is the gap
+that matters. It is narrowed by workers running with no network at all unless the job says so, and closed only by a
+network sandbox on the main agent, which is the roadmap's next step.
+
 ### Where this leaves the three dangers
 
 - **Private data + untrusted content + egress in one place** is still the risky combination — Sakura is
@@ -103,8 +132,9 @@ if the model is fooled. It runs on every shell command (`PreToolUse`) and on eve
 - Detection is **heuristic**. A novel phrasing can slip past the scanner; that only means a missing
   banner, not an open door, because the egress gate is a separate mechanic that doesn't depend on the
   content having been flagged.
-- The guard reasons about **shell commands and the answer**. A tool that reaches the network by some
-  path the guard doesn't model is outside it; the allowlist and the content scan still apply.
+- The guard reasons about **the text of shell commands, the MCP fetch and the answer** (the table above lists each
+  door). A destination it can't read from the command line (a script written and then run, a config file) is
+  outside it; the allowlist and the content scan still apply.
 - `permissionDecision: "ask"` relies on the approval overlay being wired (it is, by default). With
   approvals disabled at the engine level, the reason still reaches the model as a hard stop.
 

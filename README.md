@@ -202,7 +202,7 @@ python3 evals/teach.py            # ?teach, graded by sakura-tool's gate and run
 python3 evals/abilities.py        # 60 checks: look, ledger, schema, procwatch, dq, offers, cron, drive, docpack, fleet, tbl, logs, worktrees
 python3 evals/gpu.py              # sakura-gpu, 40 deterministic checks
 python3 evals/torrent.py          # torrent, 19 deterministic checks
-python3 evals/injection.py        # the trust boundary: injection detection + egress approval, 25 checks against a local site and planted transcripts
+python3 evals/injection.py        # the trust boundary: injection detection + egress approval on every way out (http, scp, ssh, nc, DNS, git push, mail, the MCP path), 43 checks against a local site and planted transcripts
 python3 evals/guardian.py         # the guardian: disk projection from planted samples, certificates, late and unrestored backups, the weekly nag: 29 checks
 python3 evals/machineroom.py      # ports, space, drift, when, conv (incl. redact/fill/sign), vid, dupes, shelve, money, sakura-doctor, sakura-notes, sakura-what, vault (Bitwarden, KeePassXC, 1Password), sakura-complete, sakura-last, sakura-model pick, sakura-suggest, sakura-lean, host-scoped memory: 163 checks
 python3 evals/archive.py          # faces, restore, conv subs, translate: planted faces and a spoken sentence; SKIP where the model isn't on this machine
