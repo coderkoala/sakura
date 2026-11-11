@@ -16,7 +16,13 @@ case "${1:-get}" in
         echo "clip: nothing on the clipboard, or no wl-paste/xclip" >&2; exit 1 ;;
     set)
         # xclip first: wl-copy blocks until the terminal has focus, which a script never has. Both end up on the one clipboard.
-        if x11; then timeout 3 xclip -selection clipboard -i >/dev/null 2>&1; elif wl wl-copy; then timeout 3 wl-copy </dev/stdin >/dev/null 2>&1; else echo "clip: no xclip/wl-copy for this display" >&2; exit 1; fi ;;
+        # Read all of stdin first: the 3 s limit is for a clipboard that doesn't answer, not for a slow command in front of the pipe.
+        buf="$(mktemp)" || exit 1
+        trap 'rm -f -- "$buf"' EXIT
+        cat > "$buf"
+        if x11; then timeout 3 xclip -selection clipboard -i < "$buf" >/dev/null 2>&1; elif wl wl-copy; then timeout 3 wl-copy < "$buf" >/dev/null 2>&1; else echo "clip: no xclip/wl-copy for this display" >&2; exit 1; fi
+        rc=$?
+        [ "$rc" -eq 0 ] || { echo "clip: the clipboard didn't take it (exit $rc)" >&2; exit 1; } ;;
     image)
         out="${2:?clip image FILE}"
         if wl wl-paste; then timeout 3 wl-paste --type image/png > "$out" 2>/dev/null; else timeout 3 xclip -selection clipboard -t image/png -o > "$out" 2>/dev/null; fi

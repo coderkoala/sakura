@@ -3,16 +3,20 @@
 # shift did, what's due. No model. Shown once a day at the first `?` (shell/sakura.bash), or any time by name.
 #   sakura-morning          print it
 #   sakura-morning --once   print it only if it hasn't been shown today (what the shell calls)
+# SAKURA_PA_NOW=2026-11-07T08:00:00 fixes the day, for it and for the brief inside it (evals).
 set -u
 case "${1:-}" in -h|--help) sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"; exit 0 ;; esac
 stamp="${SAKURA_HOME:-$HOME/.sakura}/morning-shown"
+now="${SAKURA_PA_NOW:-now}"
+today="$(date -d "$now" +%F)" || { echo "sakura-morning: SAKURA_PA_NOW isn't a date: $now" >&2; exit 2; }
+yesterday="$(date -d "$today -1 day" +%F)"
 if [ "${1:-}" = --once ]; then
-    [ "$(cat "$stamp" 2>/dev/null)" = "$(date +%F)" ] && exit 0
-    mkdir -p "$(dirname "$stamp")" && date +%F > "$stamp"
+    [ "$(cat "$stamp" 2>/dev/null)" = "$today" ] && exit 0
+    mkdir -p "$(dirname "$stamp")" && echo "$today" > "$stamp"
 fi
 bold=$'\e[1m'; dim=$'\e[2m'; off=$'\e[0m'
 [ -t 1 ] || { bold=""; dim=""; off=""; }
-echo "${bold}$(date '+%A %-d %B'), $(hostname)${off}"
+echo "${bold}$(date -d "$now" '+%A %-d %B'), $(hostname)${off}"
 if command -v sakura-guardian >/dev/null 2>&1; then
     out="$(sakura-guardian 2>/dev/null)"
     case "$out" in "nothing to worry about") echo "${dim}guardian: nothing to worry about${off}" ;; *) echo "$out" ;; esac
@@ -23,11 +27,12 @@ if command -v sakura-doctor >/dev/null 2>&1; then
 fi
 if command -v sakura-tonight >/dev/null 2>&1; then
     rep="$(sakura-tonight report 2>/dev/null)"
-    if [ -n "$rep" ] && [ "$(echo "$rep" | head -1 | grep -o '20[0-9-]*')" = "$(date -d yesterday +%F 2>/dev/null)" -o "$(echo "$rep" | head -1 | grep -o '20[0-9-]*')" = "$(date +%F)" ]; then
+    repday="$(echo "$rep" | head -1 | grep -o '20[0-9-]*')"
+    if [ -n "$rep" ] && { [ "$repday" = "$yesterday" ] || [ "$repday" = "$today" ]; }; then
         echo "${bold}night shift:${off} $(echo "$rep" | sed -n 3p)  ${dim}(?tonight report)${off}"
     fi
     q="$(sakura-tonight list 2>/dev/null | head -1)"
-    case "$q" in *" 0 queued") ;; *) echo "${dim}$q${off}" ;; esac
+    case "$q" in ""|*" 0 queued") ;; *) echo "${dim}$q${off}" ;; esac
 fi
 if command -v pa >/dev/null 2>&1; then
     pa brief 2>/dev/null | sed '/^$/N;/^\n$/D' | head -60

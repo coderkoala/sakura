@@ -94,7 +94,7 @@ def read_extra(path, kind):
             try:
                 d = json.loads(line)
                 line = f"{d.get('when', '')[:10]} {d.get('repo', '')}: {d.get('text', '')}"
-            except ValueError:
+            except (ValueError, AttributeError, TypeError):  # a damaged line, or JSON that isn't a decision
                 continue
         if len(line) < 4 or line in seen or line.startswith("?"):
             continue

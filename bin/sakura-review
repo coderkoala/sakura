@@ -10,6 +10,7 @@ it judges it, and reports only what it can point at.
 """
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -23,26 +24,45 @@ def sh(cmd, timeout=60):
         return ""
 
 
+def default_base():
+    """The repo's default branch. gh knows; without it (no GitHub remote, not logged in), what origin/HEAD points at,
+    else whichever of main and master exists here."""
+    b = sh("gh repo view --json defaultBranchRef -q .defaultBranchRef.name")
+    if b:
+        return b
+    b = sh("git symbolic-ref --quiet --short refs/remotes/origin/HEAD")
+    if b:
+        return b.split("/", 1)[-1]
+    for b in ("main", "master"):
+        if sh(f"git rev-parse --verify --quiet refs/heads/{b}") or sh(f"git rev-parse --verify --quiet refs/remotes/origin/{b}"):
+            return b
+    return "main"
+
+
 def gather(target, staged, post, words):
-    pr = None
+    # pr is the number, for the words; ref is what gh is given: the number here, or the URL up to it, so a PR in another
+    # repo is read from that repo and a pasted .../pull/12/files or .../pull/12#discussion still means PR 12.
+    pr = ref = None
+    url = re.search(r"/pull/(\d+)", target or "")
     if target and re.fullmatch(r"\d+", target):
-        pr = target
-    elif target and "/pull/" in target:
-        pr = target.rstrip("/").rsplit("/", 1)[-1]
+        pr = ref = target
+    elif url:
+        pr, ref = url.group(1), shlex.quote(target[:url.end()])
     if pr:
-        meta = sh(f"gh pr view {pr} --json title,body,author,baseRefName,headRefName,additions,deletions,changedFiles "
+        meta = sh(f"gh pr view {ref} --json title,body,author,baseRefName,headRefName,additions,deletions,changedFiles "
                   f"-q '\"# \" + .title + \"  (#{pr}, by \" + .author.login + \", \" + .headRefName + \" → \" + .baseRefName + \", +\" + (.additions|tostring) + \" -\" + (.deletions|tostring) + \", \" + (.changedFiles|tostring) + \" files)\\n\\n\" + (.body // \"\")'", 60)
-        diff = sh(f"gh pr diff {pr}", 120)
+        diff = sh(f"gh pr diff {ref}", 120)
         what = f"pull request #{pr}"
-        checkout = f"The code is in this checkout only if the branch is here; to read around a hunk, `gh pr checkout {pr}` is fine, or read the files on the PR's branch with `git show origin/BRANCH:FILE`."
+        checkout = f"The code is in this checkout only if the branch is here; to read around a hunk, `gh pr checkout {ref}` is fine, or read the files on the PR's branch with `git show origin/BRANCH:FILE`."
     else:
-        base = sh("gh repo view --json defaultBranchRef -q .defaultBranchRef.name") or "main"
+        base = default_base()
+        qb = shlex.quote(base)
         if staged:
             diff, what = sh("git --no-pager diff --staged"), "the staged changes"
         elif target and ".." in target:
-            diff, what = sh(f"git --no-pager diff {target}"), f"the range {target}"
+            diff, what = sh(f"git --no-pager diff {shlex.quote(target)}"), f"the range {target}"
         else:
-            mb = sh(f"git merge-base HEAD origin/{base}") or sh(f"git merge-base HEAD {base}") or base
+            mb = sh(f"git merge-base HEAD origin/{qb}") or sh(f"git merge-base HEAD {qb}") or qb
             diff, what = sh(f"git --no-pager diff {mb}") , f"this branch against {base} (committed and uncommitted)"
         meta = sh("git --no-pager log --oneline -8")
         checkout = "The code is in this directory: read around every hunk with view_file before judging it."
@@ -63,7 +83,7 @@ def gather(target, staged, post, words):
               "End with one line: merge, merge after fixes, or not yet.",
               ]
     if pr and post:
-        parts.append(f"Then post the findings as one comment: write them to a temp file and run `gh pr comment {pr} --body-file FILE`. Don't approve or request changes.")
+        parts.append(f"Then post the findings as one comment: write them to a temp file and run `gh pr comment {ref} --body-file FILE`. Don't approve or request changes.")
     elif pr:
         parts.append("Print the findings here; don't post anything to the PR.")
     return "\n".join(parts)

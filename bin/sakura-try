@@ -6,11 +6,10 @@
 # keep nothing. The directory is removed when the session ends. With no words it just drops you into the directory.
 set -u
 case "${1:-}" in -h|--help) sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"; exit 0 ;; esac
-lang=""; words=()
-for a in "$@"; do
-    case "$a" in python|py|node|js|ts|php|rust|go|bash|sh|ruby) [ -z "$lang" ] && { lang=$a; continue; } ;; esac
-    words+=("$a")
-done
+# Only the first word can be the language: "is go faster than rust" is a question, not a language and a shorter question.
+lang=""
+case "${1:-}" in python|py|node|js|ts|php|rust|go|bash|sh|ruby) lang=$1; shift ;; esac
+words=("$@")
 if [ -z "$lang" ]; then
     if [ -f composer.json ] || ls -- *.php >/dev/null 2>&1; then lang=php
     elif [ -f package.json ]; then lang=node
@@ -33,4 +32,6 @@ brief="Scratch question, in $lang: ${words[*]}
 
 You're in an empty throwaway directory ($dir). The repo it came from is $from (read-only for you here: look things up in it with rg -n and view_file if the question needs them, but change nothing there).
 Write the smallest snippet that answers the question, run it, and show me the output and what it proves. Try two or three variations if the first result is surprising. Nothing here is kept, so don't tidy up, install into the system, or write outside this directory. A library for one run: uv run --with PKG python3 x.py, or npx. Answer in a few lines."
-exec sakura-launch "$brief"
+# Not exec: the trap above has to run when the session ends, or the directory stays.
+sakura-launch "$brief"
+exit $?

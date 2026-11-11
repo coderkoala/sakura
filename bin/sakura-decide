@@ -27,10 +27,19 @@ def sh(cmd):
 
 
 def entries():
+    out = []
     try:
-        return [json.loads(l) for l in open(FILE, encoding="utf-8") if l.strip()]
+        with open(FILE, encoding="utf-8") as f:
+            for l in f:
+                try:  # a line cut short by a crash mustn't hide the rest
+                    e = json.loads(l)
+                except ValueError:
+                    continue
+                if isinstance(e, dict) and e.get("text"):
+                    out.append(e)
     except OSError:
-        return []
+        pass
+    return out
 
 
 def add(text):

@@ -12,7 +12,9 @@ voice="${SAKURA_VOICE:-en_US-lessac-medium}"
 if [ $# -gt 0 ]; then text="$*"; else text="$(cat)"; fi
 [ -n "$text" ] || exit 0
 vdir="${XDG_DATA_HOME:-$HOME/.local/share}/piper"
-if command -v piper >/dev/null 2>&1 || [ -x "$HOME/.local/bin/piper" ]; then
+# By path, so a piper in ~/.local/bin is used even when that isn't on PATH (a timer, a cron job).
+piper="$(command -v piper 2>/dev/null)" || { piper=""; [ -x "$HOME/.local/bin/piper" ] && piper="$HOME/.local/bin/piper"; }
+if [ -n "$piper" ]; then
     model="$vdir/$voice.onnx"
     if [ ! -f "$model" ]; then
         mkdir -p "$vdir"
@@ -21,10 +23,13 @@ if command -v piper >/dev/null 2>&1 || [ -x "$HOME/.local/bin/piper" ]; then
         curl -fsSL -o "$model" "$base/$voice.onnx" && curl -fsSL -o "$model.json" "$base/$voice.onnx.json" || { rm -f "$model" "$model.json"; echo "say: couldn't fetch the voice $voice" >&2; }
     fi
     if [ -f "$model" ]; then
-        if command -v pw-play >/dev/null 2>&1; then player=(pw-play --rate 22050 --format s16 --channels 1 -)
-        elif command -v paplay >/dev/null 2>&1; then player=(paplay --raw --rate=22050 --format=s16le --channels=1)
-        else player=(aplay -q -r 22050 -f S16_LE -c 1); fi
-        printf '%s\n' "$text" | piper --model "$model" --output-raw 2>/dev/null | "${player[@]}" && exit 0
+        # The voice says how fast it was sampled (low voices are 16000 Hz); played at the wrong rate it's a chipmunk.
+        rate="$(grep -o '"sample_rate"[^0-9]*[0-9]*' "$model.json" 2>/dev/null | grep -o '[0-9]*$' | head -1)"; rate="${rate:-22050}"
+        if command -v pw-play >/dev/null 2>&1; then player=(pw-play --rate "$rate" --format s16 --channels 1 -)
+        elif command -v paplay >/dev/null 2>&1; then player=(paplay --raw --rate="$rate" --format=s16le --channels=1)
+        else player=(aplay -q -r "$rate" -f S16_LE -c 1); fi
+        # pipefail: when piper fails the player still exits 0 on silence, and that mustn't count as spoken.
+        if (set -o pipefail; printf '%s\n' "$text" | "$piper" --model "$model" --output-raw 2>/dev/null | "${player[@]}"); then exit 0; fi
     fi
 fi
 if command -v spd-say >/dev/null 2>&1; then spd-say -w -- "$text" && exit 0; fi

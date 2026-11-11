@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""sakura-watch [-n SECONDS] [--explain] COMMAND... — rerun a command and show what changed between runs. The `?watch` key.
+"""sakura-watch [-n SECONDS] [--count N] [--explain] COMMAND... — rerun a command and show what changed between runs. The `?watch` key.
 
   ?watch -n 5 'df -h /'                      every 5 s (default 10), with the lines that changed highlighted
   ?watch 'ssh starlight systemctl --failed'  over ssh works the same
   ?watch --explain 'curl -s localhost:8080/health'   when the output changes, Sakura explains the change, once per change,
                                                       in a one-shot run; the loop goes on
-Ctrl-C stops it. Nothing is changed anywhere; it only runs the command you gave.
+  -n SECONDS    how often (default 10)
+  --count N     stop after N runs (scripts and tests); without it, Ctrl-C stops it
+  --explain     as above
+Options come before the command; everything from its first word on is the command (`?watch df -h /` runs `df -h /`).
+Nothing is changed anywhere; it only runs the command you gave.
 """
 import difflib
 import os
@@ -38,35 +42,48 @@ def explain(cmd, before, after):
 
 
 def main(argv):
-    every, want_explain, words = 10.0, False, []
+    every, count, want_explain, words = 10.0, 0, False, []
     it = iter(argv)
     for a in it:
-        if a == "-n":
-            every = float(next(it, "10"))
+        if a in ("-n", "--count"):
+            try:
+                v = float(next(it, ""))
+                if v < 0 or (a == "--count" and (v < 1 or v != int(v))):
+                    raise ValueError
+            except ValueError:
+                print(f"sakura-watch: {a} takes a number ({'runs' if a == '--count' else 'seconds'})", file=sys.stderr)
+                return 2
+            if a == "-n":
+                every = v
+            else:
+                count = int(v)
         elif a == "--explain":
             want_explain = True
         elif a in ("-h", "--help"):
             print(__doc__.strip())
             return 0
         else:
-            words.append(a)
+            # The command starts here, and its own options (df -h) are its own.
+            words = [a] + list(it)
     cmd = " ".join(words).strip()
     if not cmd:
         print(__doc__.strip())
         return 2
     tty = sys.stdout.isatty()
-    prev, note, changes = None, "", 0
+    prev, note, changes, runs = None, "", 0, 0
     try:
         while True:
             out = run(cmd)
+            runs += 1
             if tty:
                 sys.stdout.write(CLEAR)
             stamp = time.strftime("%H:%M:%S")
+            changed = prev is not None and prev != out
+            changes += changed  # counted before the header, so the run that shows a change also counts it
             print(f"{DIM if tty else ''}every {every:g}s  {stamp}  {cmd}  ({changes} change{'s' if changes != 1 else ''}){OFF if tty else ''}")
-            if prev is None or prev == out:
+            if not changed:
                 print(out)
             else:
-                changes += 1
                 before, after = prev.splitlines(), out.splitlines()
                 for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, before, after).get_opcodes():
                     if tag == "equal":
@@ -82,6 +99,8 @@ def main(argv):
                 print(f"\n{DIM if tty else ''}sakura:{OFF if tty else ''} {note}")
             prev = out
             sys.stdout.flush()
+            if count and runs >= count:
+                return 0
             time.sleep(every)
     except KeyboardInterrupt:
         print()

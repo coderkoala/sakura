@@ -34,7 +34,7 @@ def record(seconds, path):
     elif shutil.which("arecord"):
         cmd = ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", path]
     else:
-        sys.exit("hear: no recorder (pw-record, parecord or arecord)")
+        sys.exit("hear: no recorder (pw-record, parecord or arecord). Install one: sudo -A apt-get install -y pipewire-bin, or alsa-utils")
     p = subprocess.Popen(cmd, stderr=subprocess.DEVNULL)
     try:
         if seconds:
@@ -83,10 +83,19 @@ def main(argv):
     tmp = None
     if target and os.path.isfile(target):
         path = target
+    elif target and not target.isdigit():
+        # A mistyped file name used to start recording from the microphone instead.
+        sys.exit(f"hear: no such recording: {target}")
     else:
-        seconds = int(target) if target and target.isdigit() else 0
-        tmp = path = tempfile.mktemp(prefix="hear-", suffix=".wav", dir=os.path.expanduser("~/.cache"))
+        seconds = int(target) if target else 0
+        cache = os.path.expanduser("~/.cache")
+        os.makedirs(cache, exist_ok=True)
+        tmp = path = tempfile.mktemp(prefix="hear-", suffix=".wav", dir=cache)
         record(seconds, path)
+        if not os.path.exists(path) or not os.path.getsize(path):
+            if os.path.exists(path):
+                os.unlink(path)
+            sys.exit("hear: the recorder wrote nothing. Is a microphone connected and not muted?")
     try:
         text = transcribe(path, size)
     finally:

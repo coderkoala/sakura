@@ -696,7 +696,7 @@ def envelope_date(e):
 def sender_of(e):
     f = e.get("from")
     f = f[0] if isinstance(f, list) and f else f
-    return ((f or {}).get("email") or "").lower() if isinstance(f, dict) else str(f or "").lower()
+    return ((f or {}).get("email") or (f or {}).get("addr") or "").lower() if isinstance(f, dict) else str(f or "").lower()
 
 
 def why_not_reply(sender, raw, me, state, at):
@@ -1240,7 +1240,10 @@ def sec_mail(s):
     unread = [e for e in found if "seen" not in " ".join(map(str, e.get("flags", []))).lower()]
     rules = s.get("mail_rules", {})
     def hit(e, kind):
-        text = f"{sender_of(e)} {e.get('subject', '')}".lower()
+        f = e.get("from")
+        f = f[0] if isinstance(f, list) and f else f
+        name = f.get("name") or "" if isinstance(f, dict) else ""  # "Priya" has to match Priya Sharma <ps@corp>
+        text = f"{sender_of(e)} {name} {e.get('subject', '')}".lower()
         return any(p.lower() in text for p in rules.get(kind, []))
     unread = [e for e in unread if not hit(e, "mute")]
     urgent = [e for e in unread if hit(e, "urgent")]
