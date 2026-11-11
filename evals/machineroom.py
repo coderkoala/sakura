@@ -13,6 +13,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import shutil
 import socket
 import struct
@@ -2034,6 +2035,152 @@ def suggest(tmp):
         shutil.rmtree(base, ignore_errors=True)
 
 
+def lean(tmp):
+    """The short tool reference: what stays, what's delivered with which ask, once a session, and nothing unreachable."""
+    home = os.path.join(tmp, "sakura")
+    rt = os.path.join(tmp, "run")
+    os.makedirs(rt)
+    prof = os.path.join(tmp, "profile.md")
+    open(prof, "w").write("Prefers tabs.\n")
+    env = {"SAKURA_HOME": home, "XDG_RUNTIME_DIR": rt, "SAKURA_PROFILE": prof}
+    l = os.path.join(BIN, "sakura-lean")
+    hook = os.path.join(os.path.dirname(BIN), "hooks", "tool_reference.py")
+    full = open(
+        os.path.join(os.path.dirname(BIN), "AGENTS.md"), encoding="utf-8"
+    ).read()
+    short = run([l, "build"], env).stdout
+
+    def topics(ask):
+        return [
+            t["topic"]
+            for t in json.loads(run([l, "for", ask, "--json"], env).stdout or "[]")
+        ]
+
+    def fire(prompt, session="s1", event="UserPromptSubmit"):
+        out = run(
+            [sys.executable, hook],
+            env,
+            stdin=json.dumps(
+                {"prompt": prompt, "session_id": session, "hook_event_name": event}
+            ),
+        ).stdout
+        return (
+            json.loads(out)["hookSpecificOutput"]["additionalContext"]
+            if out.strip()
+            else ""
+        )
+
+    # ask → the command whose section must arrive (or already be in the short reference)
+    asks = {
+        "merge a.pdf and b.pdf into one pdf": "conv merge",
+        "turn notes.md into a Word document": "conv FILE --to",
+        "remove the phone number 9841-000000 from letter.pdf before I send it": "redact",
+        "sign contract.pdf with my own key": "sign",
+        "strip the location and camera data from these two photos before I share them": "strip",
+        "find duplicate files under photos/ (just show me, don't delete)": "dupes DIR",
+        "sort the photos in dump/ into folders by the year and month they were taken": "shelve DIR",
+        "import this bank statement nabil-2026-03.csv into my accounts": "money import",
+        "what's eating my disk? don't delete anything yet": "`space`",
+        "what's listening on port 8080": "`ports",
+        'when does this cron line run next: "0 3 * * 1"?': "`when",
+        "remind me tomorrow at 10": "pa remind",
+        "download this youtube video for keeps": "`vid URL`",
+        "import my bitwarden passwords": "vault import",
+        "my server logs errors": "logs X",
+        "is anything wrong with this box": "sakura-guardian",
+        "what did you do yesterday": "sakura-recap",
+        "back up my documents folder and prove it restores": "sakura-backup",
+        "here's a magnet link, get it": "torrent add",
+        "why is the gpu out of memory": "sakura-gpu doctor",
+        "put this file in my google drive folder": "drive put",
+        "what does this screenshot say": "look FILE",
+        "query this csv with sql": "dq ",
+    }
+    missed = []
+    quiet = [
+        p
+        for p in (
+            "hello",
+            "thanks, that works",
+            "refactor this function to be faster",
+            "write a python script that parses json",
+            "yes do it",
+        )
+        if fire(p, session="quiet")
+    ]
+    off_fire = fire("merge a.pdf and b.pdf into one pdf", session="off")
+    on = run([l, "on"], env)
+    installed_on = open(os.path.join(home, "AGENTS.md"), encoding="utf-8").read()
+    first = fire("merge a.pdf and b.pdf into one pdf")
+    second = fire("now split that pdf into pages")
+    other = fire("merge a.pdf and b.pdf into one pdf", session="s2")
+    fire("", event="SessionStart")
+    after_compaction = fire("merge these two pdfs")
+    two = fire("ocr this scanned pdf and email it to my accountant", session="s3")
+    known = [n for n in os.listdir(BIN) if os.access(os.path.join(BIN, n), os.X_OK)]
+    lost = [
+        n
+        for n in known
+        if re.search(rf"`{re.escape(n)}\b", full)
+        and not re.search(rf"`{re.escape(n)}\b", short)
+    ]
+    # with lean on, the asks must still be answered: rerun them now that the flag is set
+    for ask, needle in asks.items():
+        got = fire(ask, session="on-" + ask[:20])
+        if needle not in short and needle not in got:
+            missed.append(f"{ask!r} (wanted {needle!r}; got {topics(ask)})")
+    if missed:
+        print("   misses: " + "; ".join(missed))
+    off = run([l, "off"], env)
+    installed_off = open(os.path.join(home, "AGENTS.md"), encoding="utf-8").read()
+    return {
+        "off by default: the hook adds nothing, so the full reference is never doubled": off_fire
+        == ""
+        and not quiet
+        and not os.path.exists(os.path.join(home, "lean")),
+        "the short reference is under half the full one": 0
+        < len(short)
+        < 0.45 * len(full),
+        "it keeps the web, trust-boundary, install and memory sections whole": all(
+            sec in short
+            for sec in (
+                "## Web knowledge",
+                "## Trust boundary",
+                "## Root, installs, GUI",
+                "## Memory",
+                "sakura-memory add user|notes",
+                "UNTRUSTED CONTENT",
+            )
+        ),
+        "every command the full reference names is still named": lost == [],
+        "on writes the short reference with the user's profile kept": on.returncode == 0
+        and installed_on.startswith(short.rstrip("\n"))
+        and installed_on.rstrip().endswith("## About this user\n\nPrefers tabs."),
+        "an ask brings its own section: all %d, on" % len(asks): not missed,
+        "the pdf ask gets the conv section, with the no-upload rule": "conv merge"
+        in first
+        and "Never suggest a website" in first
+        and first.startswith("<reference>"),
+        "a section arrives once a session": second == "" and "conv merge" in other,
+        "a compaction or resume starts the count again": "conv merge"
+        in after_compaction,
+        "two topics at most for one message": two.count("\n## ") <= 2 and "conv" in two,
+        "small talk and plain coding asks bring nothing": [
+            p
+            for p in (
+                "hello",
+                "thanks, that works",
+                "refactor this function to be faster",
+                "yes do it",
+            )
+            if fire(p, session="q2")
+        ]
+        == [],
+        "off puts the full reference back, profile kept": off.returncode == 0
+        and installed_off == full + "\n## About this user\n\nPrefers tabs.\n",
+    }
+
+
 CASES = {
     "ports": ports,
     "space": space,
@@ -2058,6 +2205,7 @@ CASES = {
     "vaultcsv": vaultcsv,
     "models": models,
     "suggest": suggest,
+    "lean": lean,
 }
 
 

@@ -7,6 +7,11 @@
             "type": "command",
             "command": "python3 __SAKURA_DIR__/hooks/session_context.py",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python3 __SAKURA_DIR__/hooks/tool_reference.py",
+            "timeout": 5
           }
         ]
       }
@@ -34,6 +39,11 @@
             "type": "command",
             "command": "python3 __SAKURA_DIR__/hooks/recall_context.py",
             "timeout": 25
+          },
+          {
+            "type": "command",
+            "command": "python3 __SAKURA_DIR__/hooks/tool_reference.py",
+            "timeout": 10
           }
         ]
       }

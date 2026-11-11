@@ -25,7 +25,7 @@ link() {
 # re-rendering resets that and keeps it out of version control.
 render() {
     if [ -L "$2" ]; then rm -f "$2"; fi
-    sed "s#__SAKURA_DIR__#$ROOT#g" "$1" > "$2"
+    sed "s#__SAKURA_DIR__#$ROOT#g" "$1" >"$2"
     chmod 0644 "$2"
 }
 render "$ROOT/config.toml" "$SAKURA_HOME/config.toml"
@@ -48,9 +48,13 @@ PY
 fi
 if [ -L "$SAKURA_HOME/AGENTS.md" ]; then rm -f "$SAKURA_HOME/AGENTS.md"; fi
 {
-    cat "$ROOT/AGENTS.md"
-    if [ -r "$PROFILE" ]; then printf '\n## About this user\n\n'; cat "$PROFILE"; fi
-} > "$SAKURA_HOME/AGENTS.md"
+    # `sakura-lean on` chose the short reference (topics arrive with the message that needs them); keep that choice.
+    if [ -e "$SAKURA_HOME/lean" ]; then "$ROOT/bin/sakura-lean" build; else cat "$ROOT/AGENTS.md"; fi
+    if [ -r "$PROFILE" ]; then
+        printf '\n## About this user\n\n'
+        cat "$PROFILE"
+    fi
+} >"$SAKURA_HOME/AGENTS.md"
 link "$ROOT/rules" "$SAKURA_HOME/rules"
 link "$ROOT/skills" "$HOME/.agents/skills"
 # every command in bin/ (a hand-kept list here drifted twice; sakura-doctor reports anything that ends up unlinked)
@@ -70,21 +74,24 @@ install_binary() {
     tmp="$(mktemp -d)"
     if ! curl -fsSL --max-time 900 -o "$tmp/$asset" "$url/$asset" || ! curl -fsSL --max-time 60 -o "$tmp/$asset.sha256" "$url/$asset.sha256"; then
         echo "  couldn't download the engine for $tag; keeping the current one. To build it instead, see $ROOT/patches/README.md"
-        rm -rf "$tmp"; return 0
+        rm -rf "$tmp"
+        return 0
     fi
     if ! (cd "$tmp" && sha256sum -c --quiet "$asset.sha256" >/dev/null 2>&1) || ! tar -xzf "$tmp/$asset" -C "$tmp" sakura; then
         echo "  the engine download failed its checksum; not installing it. To build it instead, see $ROOT/patches/README.md"
-        rm -rf "$tmp"; return 0
+        rm -rf "$tmp"
+        return 0
     fi
     chmod 755 "$tmp/sakura"
     # Too new a system library is the likely failure on an older distro, so prove it runs before replacing anything.
     if ! "$tmp/sakura" --version >/dev/null 2>&1; then
         echo "  the prebuilt engine won't run on this system, usually an older glibc; keeping the current one. To build it, see $ROOT/patches/README.md"
-        rm -rf "$tmp"; return 0
+        rm -rf "$tmp"
+        return 0
     fi
     if [ -e "$HOME/.local/bin/sakura" ]; then cp -f "$(readlink -f "$HOME/.local/bin/sakura")" "$HOME/.local/bin/sakura.prev" 2>/dev/null || true; fi
     mv -f "$tmp/sakura" "$HOME/.local/bin/sakura.new" && mv -f "$HOME/.local/bin/sakura.new" "$HOME/.local/bin/sakura"
-    printf '%s\n' "$version" > "$SAKURA_HOME/binary-version"
+    printf '%s\n' "$version" >"$SAKURA_HOME/binary-version"
     rm -rf "$tmp"
     echo "  engine: $tag installed from the release"
 }
@@ -92,7 +99,10 @@ install_binary
 
 echo "Sakura $(cat "$ROOT/VERSION") installed to $SAKURA_HOME."
 missing=0
-need() { missing=1; echo "  needed: $*"; }
+need() {
+    missing=1
+    echo "  needed: $*"
+}
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) need "add ~/.local/bin to your PATH" ;; esac
 command -v python3 >/dev/null || need "install python3"
 command -v git >/dev/null || need "install git"

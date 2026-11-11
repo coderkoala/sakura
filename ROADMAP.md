@@ -36,7 +36,7 @@ Measured on one machine with an 8 GB GPU, driver Ornith 1.5 35B-A3B since 0.9.5 
 2. **Real-world passes.** Scripted as checklists in `docs/real-world.md` (mail against a real provider, a real CAPTCHA with a human, a second device end to end), with a results table. Each needs an account, a screen or a machine, so a person runs them; OAuth-only mail providers are the open item.
 3. **`pa` across devices.** Reminders that follow you, firing once, not on all seven. Repeating calendar events. Reminders that work while logged out.
 4. **Runs in more places.** A build for older glibc and for ARM, and a real run on a 6 GB card.
-5. **Fewer tokens.** Measured 2026-11-08 with the driver's tokenizer: `prompts/base.md` 1,874, `AGENTS.md` 2,824 (it grew with tonight's tools), `coordinator.md` 642, plus the engine's own text and the skills list. Every token removed is more room to work; AGENTS.md's tool reference is the place to cut, by topic, behind an intent-driven injection (abilities item 17).
+5. **Fewer tokens.** Measured 2026-11-08 with the driver's tokenizer: `prompts/base.md` 1,874, `AGENTS.md` 2,824 (it grew with tonight's tools), `coordinator.md` 642, plus the engine's own text and the skills list. Every token removed is more room to work; AGENTS.md's tool reference is the place to cut, by topic, behind an intent-driven injection (abilities item 17). Built 2026-11-11 as `sakura-lean` (off by default): the short reference is 63% smaller (6,300 characters against 16,800), the web, trust-boundary, install and memory sections stay whole, every other topic is one line naming its commands, and `hooks/tool_reference.py` puts a topic's section beside the message that's about it, matched from the manuals with no model, at most two a message, once a session (12 checks: 23 plain asks each bring their section, small talk brings nothing). It changes what the model reads, so it stays off until `evals/run.py` and `evals/toolpick.py` pass with it on the driver.
 
 ## Then: the moments
 
@@ -92,7 +92,7 @@ Not more harnesses: things it couldn't do before. Built means it runs and was sm
 14. **Worktree workers:** each worker in its own `git worktree`, so two lanes are safe.
 15. **Morning page:** brief, guardian, last night's report and the calendar on one screen at the day's first `?`.
 16. **Mail that acts:** triage rules learned from you; calendar invites accepted or declined.
-17. **Not built yet: lazy skills and per-topic tool reference, a 2b router for classification, so the 9b and the driver wake only for real work.** It changes the prompt, so it waits for a full eval pass.
+17. **Per-topic tool reference: built as `sakura-lean`, off by default** (see "Fewer tokens" above; matched from the manuals, so no 2b router was needed for it). Not built: a 2b router so the 9b and the driver wake only for real work. Turning lean on by default waits for a full eval pass on the driver.
 18. **Receipts and forms:** OCR into a ledger; tax paperwork in नेपाली and English from templates.
 
 ## Memory workflows, next (2026-11-09 brainstorm)

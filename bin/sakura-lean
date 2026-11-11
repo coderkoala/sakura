@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""sakura-lean — a shorter tool reference in every session: the sections each turn needs, one line per topic, and a topic's full section beside the message that's about it. No model.
+
+  sakura-lean status        on or off, and what it saves: the full reference, the short one, each topic's size
+  sakura-lean on            write the short reference to ~/.sakura/AGENTS.md (your profile kept) and let the hook deliver topics
+  sakura-lean off           put the full reference back
+  sakura-lean build         print the short reference
+  sakura-lean for "ask"     which topics that ask would bring in, and why (--json)
+Off by default: it changes what the model reads, so turn it on after `evals/run.py` passes with it on your driver.
+AGENTS.md is 2,800 tokens of an 8 GB model's context on every turn, most of it about tools the turn won't touch. With
+this on, the always-needed sections stay (finding a command, the web, the trust boundary, installs, memory, skills) and
+the rest becomes one line each naming its commands. When a message is about a topic (matched from the tools' own
+manuals, the way `sakura-what` does it), hooks/tool_reference.py puts that section next to the message: at most two a
+message, each once a session. Nothing is lost either way: `sakura-what TOOL` prints any manual.
+"""
+import importlib.machinery
+import json
+import os
+import re
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+HOME = os.path.expanduser(os.environ.get("SAKURA_HOME") or "~/.sakura")
+FLAG = os.path.join(HOME, "lean")
+PROFILE = os.path.expanduser(os.environ.get("SAKURA_PROFILE") or "~/.config/sakura/profile.md")
+ALWAYS = ("Finding the command", "Web knowledge", "Trust boundary", "Root, installs, GUI", "Memory", "Skills")
+MIN_SCORE = 8.0      # sakura-what's score for "this ask is about that command"; a passing mention scores 1 to 5
+MAX_TOPICS = 2
+FILES = re.compile(r"(?<![\w/])[\w.-]+\.(?:pdf|docx?|xlsx?|pptx?|od[tsp]|epub|mobi|jpe?g|png|heic|webp|gif|mp[34]|mkv|mov|avi|wav|flac|m4a|zip|7z|rar|srt)\b"
+                   r"|\b(?:pdfs?|word (?:document|file)|docx|spreadsheet|powerpoint|epub)\b", re.I)
+INTRO = ("How to work is in Sakura's base instructions. This is the short tool reference: the sections every turn needs, then one "
+         "line per topic. A topic's full section arrives beside the user's message when the message is about it; until then "
+         "`sakura-what TOOL` prints any command's manual and `sakura-what \"what you want\"` names the command.")
+
+
+def full_text():
+    with open(os.path.join(ROOT, "AGENTS.md"), encoding="utf-8") as f:
+        return f.read()
+
+
+def sections(text=None):
+    """(title line, [(title, body)]) of AGENTS.md: every `## ` section, in order."""
+    text = full_text() if text is None else text
+    parts = re.split(r"^## ", text, flags=re.M)
+    out = []
+    for sec in parts[1:]:
+        title, _, body = sec.partition("\n")
+        out.append((title.strip(), body.strip("\n")))
+    return parts[0].split("\n", 1)[0].strip(), out
+
+
+def commands():
+    return sorted(n for n in os.listdir(os.path.join(ROOT, "bin")) if os.access(os.path.join(ROOT, "bin", n), os.X_OK))
+
+
+def named_in(body, known):
+    """The commands a section talks about, with how often: the first word of each `code` span and of each line of a
+    fenced block, when it's one of ours (or a program the section documents)."""
+    counts = {}
+    spans = [m.group(1) for m in re.finditer(r"(?<!`)`([A-Za-z][\w.-]*)", re.sub(r"```.*?```", "", body, flags=re.S))]
+    for block in re.findall(r"```\w*\n(.*?)```", body, flags=re.S):
+        spans += [ln.split()[0] for ln in block.splitlines() if ln.strip()]
+    for n in spans:
+        if n in known or n in ("himalaya",):
+            counts[n] = counts.get(n, 0) + 1
+    return counts
+
+
+def owners(secs, known):
+    """{command: the section that says most about it} (the first, on a tie), so `restore NAME` under Backups doesn't
+    claim the photo restorer."""
+    best = {}
+    for title, body in secs:
+        for n, c in named_in(body, known).items():
+            if n not in best or c > best[n][1]:
+                best[n] = (title, c)
+    return {n: t for n, (t, _) in best.items()}
+
+
+def is_always(title):
+    return title.startswith(ALWAYS)
+
+
+def build():
+    head, secs = sections()
+    known = set(commands())
+    out = [head + " (short form)", "", INTRO, ""]
+    index = []
+    owner = owners(secs, known)
+    for title, body in secs:
+        if is_always(title):
+            out += [f"## {title}", "", body, ""]
+        else:
+            names = [n for n in named_in(body, known) if owner[n] == title]
+            index.append(f"- {title}: " + (", ".join(f"`{n}`" for n in names) if names else "see `sakura-what`"))
+    out += ["## Every other topic, one line each", ""] + index
+    return "\n".join(out).rstrip("\n") + "\n"
+
+
+def what_module():
+    return importlib.machinery.SourceFileLoader("sakura_what", os.path.join(ROOT, "bin", "sakura-what")).load_module()
+
+
+def topics_for(ask):
+    """[(title, body, why)]: the on-demand sections this ask is about, best first, at most MAX_TOPICS."""
+    _, secs = sections()
+    known = set(commands())
+    owner = owners(secs, known)
+    bodies = dict(secs)
+    what = what_module()
+    ranked = sorted(((what.score(ask, n, h)[0], n) for n, h in what.tools()), reverse=True)
+    out, top = [], ranked[0][0] if ranked else 0
+    # A document, picture, recording or archive named in the ask is conv's business whatever the verb is ("remove the
+    # phone number from letter.pdf"), and that section carries the never-upload rule.
+    named = FILES.search(ask)
+    if named and owner.get("conv") and not is_always(owner["conv"]):
+        out.append((owner["conv"], bodies[owner["conv"]], f"a file is named: {named.group(0).strip()}"))
+    for s, n in ranked[:6]:
+        if s < MIN_SCORE or s < 0.75 * top:
+            break
+        title = owner.get(n)
+        if not title or is_always(title) or any(t == title for t, _, _ in out):
+            continue
+        out.append((title, bodies[title], f"{n} ({s:.0f})"))
+        if len(out) == MAX_TOPICS:
+            break
+    return out
+
+
+def is_on():
+    return os.path.exists(FLAG)
+
+
+def installed(lean):
+    """What install.sh writes to ~/.sakura/AGENTS.md: the reference, then the user's profile when there is one."""
+    text = build() if lean else full_text()
+    try:
+        with open(PROFILE, encoding="utf-8") as f:
+            text += "\n## About this user\n\n" + f.read()
+    except OSError:
+        pass
+    return text
+
+
+def switch(on):
+    os.makedirs(HOME, exist_ok=True)
+    target = os.path.join(HOME, "AGENTS.md")
+    if os.path.islink(target):
+        os.remove(target)
+    with open(target + ".tmp", "w", encoding="utf-8") as f:
+        f.write(installed(on))
+    os.replace(target + ".tmp", target)
+    if on:
+        open(FLAG, "w").close()
+    elif os.path.exists(FLAG):
+        os.remove(FLAG)
+
+
+def status():
+    full, lean = full_text(), build()
+    _, secs = sections()
+    print(f"sakura-lean is {'on' if is_on() else 'off'}")
+    print(f"  the full reference   {len(full):>6} characters (about {len(full) // 4} tokens), read on every turn")
+    print(f"  the short reference  {len(lean):>6} characters (about {len(lean) // 4} tokens): {100 - 100 * len(lean) // len(full)}% less")
+    print("  delivered when a message is about them:")
+    for title, body in secs:
+        if not is_always(title):
+            print(f"    {len(body) + len(title) + 4:>5}  {title}")
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "status":
+        status()
+    elif cmd == "build":
+        sys.stdout.write(build())
+    elif cmd in ("on", "off"):
+        switch(cmd == "on")
+        if cmd == "on":
+            print("on: new sessions read the short reference, and a topic's section arrives with the message that needs it.\n"
+                  "Check it on your driver: python3 evals/run.py   ·   back to the full reference: sakura-lean off")
+        else:
+            print("off: new sessions read the full reference again")
+    elif cmd == "for":
+        as_json = "--json" in rest
+        ask = " ".join(x for x in rest if x != "--json")
+        if not ask:
+            sys.exit('usage: sakura-lean for "what the user asks"')
+        found = topics_for(ask)
+        if as_json:
+            print(json.dumps([{"topic": t, "why": why, "characters": len(b)} for t, b, why in found], indent=1))
+        elif not found:
+            print("no topic: the short reference alone")
+        else:
+            for t, b, why in found:
+                print(f"{t}  ({len(b)} characters; matched {why})")
+    else:
+        sys.exit("usage: sakura-lean status | on | off | build | for \"ask\"")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
