@@ -231,6 +231,11 @@ def when_from(expr, base=None):
         elif day_part == "tomorrow":
             day = base + timedelta(days=1)
         else:
+            # Only words that name a day may reach `date -d`: it reads "first day" as tomorrow and "second" as a unit, so
+            # "tomorrow 10am first day of school" lost its first two words and moved a day.
+            ok = rf"today|tomorrow|next|this|week|month|year|of|the|{'|'.join(DAYS)}|{'|'.join(DAY_SHORT)}|(?:{'|'.join(MONTHS)})[a-z]*\.?|\d{{1,2}}(?:st|nd|rd|th)?|\d{{4}}|\d{{4}}-\d{{2}}-\d{{2}}"
+            if not all(re.fullmatch(ok, w) for w in day_part.split()):
+                return None
             day = _day_from(day_part, base) or _gnu_date(day_part)
             if not day:
                 return None
