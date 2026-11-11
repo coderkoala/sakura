@@ -38,6 +38,12 @@ RESTORE_DAYS = 90
 SKIP_FS = ("tmpfs", "devtmpfs", "squashfs", "overlay", "efivarfs", "fuse", "nsfs", "proc", "sysfs", "cgroup", "autofs", "tracefs", "ramfs")
 
 
+def now():
+    """The time, or SAKURA_GUARDIAN_NOW (epoch seconds) so the evals are exact."""
+    forced = os.environ.get("SAKURA_GUARDIAN_NOW")
+    return float(forced) if forced else time.time()
+
+
 def sh(cmd, timeout=20):
     try:
         return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout).stdout
@@ -70,6 +76,9 @@ def human(n):
 # ── Disks ─────────────────────────────────────────────────────────────────────
 
 def mounts():
+    planted = os.environ.get("SAKURA_GUARDIAN_MOUNTS")  # the evals' disks: a JSON list of {mount, total, used, avail}
+    if planted:
+        return load(planted, [])
     out = []
     try:
         with open("/proc/mounts", encoding="utf-8") as f:
@@ -95,7 +104,7 @@ def mounts():
 def record_sample(disks):
     os.makedirs(DIR, exist_ok=True)
     with open(SAMPLES, "a", encoding="utf-8") as f:
-        f.write(json.dumps({"t": int(time.time()), "d": {m["mount"]: m["used"] for m in disks}}) + "\n")
+        f.write(json.dumps({"t": int(now()), "d": {m["mount"]: m["used"] for m in disks}}) + "\n")
     # Keep about four months of daily samples.
     try:
         lines = open(SAMPLES, encoding="utf-8").read().splitlines()
@@ -107,28 +116,30 @@ def record_sample(disks):
 
 
 def days_to_full(mount, disk):
-    """Days until this mount is full at the rate of the last fortnight's samples, or None when there's too little data."""
-    pts = []
+    """Days until this mount is full at the rate of the last fortnight's samples, or None when there's too little data.
+
+    The rate is the median of the slopes between every pair of samples (Theil-Sen), not a least-squares line: one big
+    download yesterday is a step, not a trend, and a line through it predicts a full disk that isn't coming."""
+    pts = {}
     try:
         for line in open(SAMPLES, encoding="utf-8"):
             try:
                 s = json.loads(line)
             except ValueError:
                 continue
-            if mount in s.get("d", {}) and s["t"] > time.time() - 14 * 86400:
-                pts.append((s["t"], s["d"][mount]))
+            if mount in s.get("d", {}) and now() - 14 * 86400 < s["t"] <= now():
+                pts[s["t"]] = s["d"][mount]
     except OSError:
         return None
-    pts.append((time.time(), disk["used"]))
-    pts = sorted(set(pts))
+    pts[now()] = disk["used"]
+    pts = sorted(pts.items())
     if len(pts) < 3 or pts[-1][0] - pts[0][0] < 2 * 86400:
         return None
-    n = len(pts)
-    mx, my = sum(p[0] for p in pts) / n, sum(p[1] for p in pts) / n
-    sxx = sum((p[0] - mx) ** 2 for p in pts)
-    if not sxx:
+    slopes = sorted((b[1] - a[1]) / (b[0] - a[0]) for i, a in enumerate(pts) for b in pts[i + 1:] if b[0] - a[0] >= 3600)
+    if not slopes:
         return None
-    rate = sum((p[0] - mx) * (p[1] - my) for p in pts) / sxx  # bytes per second
+    mid = len(slopes) // 2
+    rate = slopes[mid] if len(slopes) % 2 else (slopes[mid - 1] + slopes[mid]) / 2  # bytes per second
     if rate <= 0:
         return None
     return disk["avail"] / rate / 86400
@@ -200,7 +211,7 @@ def check_certs(findings, all_):
             end = dt.datetime.strptime(m.group(1).strip(), "%b %d %H:%M:%S %Y %Z")
         except ValueError:
             continue
-        left = (end - dt.datetime.utcnow()).days
+        left = (end - dt.datetime.fromtimestamp(now(), dt.timezone.utc).replace(tzinfo=None)).days
         subj = re.search(r"CN\s*=\s*([^,/\n]+)", out)
         name = subj.group(1).strip() if subj else os.path.basename(os.path.dirname(path))
         line = f"certificate {name} ends in {left} days ({path})"
@@ -264,7 +275,7 @@ def check_backups(findings, all_):
         if not os.path.exists(path):
             findings.append(("backup", f"backup {name}: {path} isn't there"))
             continue
-        age = (time.time() - newest_in(path)) / 86400
+        age = (now() - newest_in(path)) / 86400
         every = b.get("every", 2)
         line = f"backup {name}: last changed {age:.1f} days ago"
         if age > every:
@@ -272,7 +283,7 @@ def check_backups(findings, all_):
         else:
             all_.append(("backup", line))
         restored = b.get("restored")
-        since = (time.time() - restored) / 86400 if restored else None
+        since = (now() - restored) / 86400 if restored else None
         if since is None:
             findings.append(("backup", f"backup {name} has never been test-restored. A backup that was never restored is a hope, not a backup: "
                                        f"restore one file somewhere else, then `sakura-guardian restored {name}`."))
@@ -317,11 +328,11 @@ def cmd_show(args):
 def cmd_tick(_):
     findings, _ = run_checks(record=True)
     seen = load(SEEN, {})
-    now = time.time()
-    new = [t for _, t in findings if now - seen.get(t, 0) > 6 * 86400]  # say it once a week, not every day
+    at = now()
+    new = [t for _, t in findings if at - seen.get(t, 0) > 6 * 86400]  # say it once a week, not every day
     for t in new:
-        seen[t] = now
-    save(SEEN, {k: v for k, v in seen.items() if now - v < 30 * 86400})
+        seen[t] = at
+    save(SEEN, {k: v for k, v in seen.items() if at - v < 30 * 86400})
     if new:
         try:
             subprocess.run([os.path.join(ROOT, "bin", "notify"), "Sakura guardian", "; ".join(new)[:400]], capture_output=True, timeout=15)
@@ -369,7 +380,7 @@ def cmd_restored(args):
     conf = load(CONF, {})
     if not args or args[0] not in conf.get("backups", {}):
         sys.exit("usage: sakura-guardian restored NAME (one of: " + ", ".join(conf.get("backups", {})) + ")")
-    conf["backups"][args[0]]["restored"] = time.time()
+    conf["backups"][args[0]]["restored"] = now()
     save(CONF, conf)
     print(f"noted: {args[0]} test-restored today")
     return 0
