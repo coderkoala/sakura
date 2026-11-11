@@ -8,10 +8,10 @@
 #   ?undo put back everything Sakura's last turn changed (again: redo)
 #   ?recap what Sakura did today, from the record (yesterday, week, 3d, a date; --full)
 #   ?receipts  the same, every command (the audit trail)
-#   ?recall <words>  search past conversations
+#   ?recall <words>  search past conversations, shell history, decisions, memory, documents and mail
 #   ?tour [PATH] [question]  any codebase in five minutes, cited
 #   ?tonight <<'JOB' ... JOB   queue work for the night shift; ?tonight list / report
-#   ?teach [words]  turn what you just did in the shell into a kept tool or a scheduled job
+#   ?teach [words]  turn what you just did in the shell into a kept tool or a scheduled job;  ?teach retro  from your last Sakura session
 #   ?learn <topic>  a mentor's explanation, at your level
 #   ?guard  what's about to hurt: disks, certs, failed units, backups
 #   ?pr [words]  a pull request from this branch, body from the diff;  ?review [PR|range] [--post]  findings, ranked
@@ -43,6 +43,7 @@
 #   money import bank.csv | month | where "KFC" | rule "KFC" expenses:food   statements into plain-text accounting (hledger)
 #   dupes DIR... [--link|--rm --go]  the same file by content, across drives;  shelve DIR --into LIB [--go]  photos/videos into YEAR/YEAR-MM by date taken
 #   sakura-skill keep NAME steps.md --about "when" | import ~/.claude/skills   know-how kept as a skill; imports are scanned first
+#   sakura-shim on|off|status   repairs tool calls the model wrote as text, between ? and the model server (127.0.0.1 only)
 #   sakura-lean on|off|status   a tool reference 63% shorter on every turn; a topic's section arrives with the message about it
 #   sakura-doctor [--fix]  is this install whole: every command, hook and config checked, what's missing
 #   ?last [N] | ?last --here   what was I doing: the last turn's directory, ask and answer, from the record (cd's there)
@@ -131,7 +132,7 @@ if command -v sakura-launch >/dev/null 2>&1; then
         complete -F _sakura_host_comp '?on' sakura-on logs 2>/dev/null
         complete -W 'list cancel at report run' '?tonight' sakura-tonight 2>/dev/null
         complete -W 'on off tick backup restored forget --all --json' '?guard' sakura-guardian 2>/dev/null
-        complete -W 'remind list cancel brief standup roles todo clock log watch job autoreply mail offer yes no listen pending' pa 2>/dev/null
+        complete -W 'remind list cancel brief standup roles todo clock log watch job autoreply mail voice offer yes no listen pending' pa 2>/dev/null
         # every other command: subcommands and flags learned from the manuals (hosts and the keys included)
         command -v sakura-complete >/dev/null 2>&1 && eval "$(sakura-complete 2>/dev/null)"
         # Whatever came due while no notification could reach you.

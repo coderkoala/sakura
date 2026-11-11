@@ -1,0 +1,714 @@
+#!/usr/bin/env python3
+"""sakura-shim — repairs tool calls a local model wrote as text, between Sakura and the model server. No second model.
+
+  sakura-shim status          on or off, whether it's running, and what it has repaired so far (by kind and tool)
+  sakura-shim on | off        have `?` talk to the model through it (off by default); off also stops it
+  sakura-shim run [--port 8092] [--upstream http://127.0.0.1:11434]   run it in the foreground (what `ensure` starts)
+  sakura-shim ensure --upstream URL   start it in the background unless it's already up for that upstream (sakura-launch calls this)
+  sakura-shim repair FILE     try the repair on one saved chat response and print the result (FILE: the JSON; --tools FILE: the request's tools)
+A small model on an 8 GB card sometimes means a tool call and writes it as prose: `<tool_call>{…}` with a trailing
+comma, a ```json block, `<function=name>{…}</function>`, `[TOOL_CALLS] […]`, `[tool_call: exec_command for 'ls']`,
+or a proper call whose arguments aren't valid JSON. The engine then shows the text and nothing runs. This sits on the
+OpenAI-compatible endpoint (/v1/chat/completions, streamed or not) and turns those back into the call that was meant.
+It never invents one: the name must be a tool the request offered, the arguments must parse after repairs that only
+fix syntax (quotes, trailing commas, raw newlines, missing closing braces) and must carry every required parameter,
+and a reply cut off by the length limit is left alone, since half a command is not the command. Prose passes through
+untouched and still streams. It listens on 127.0.0.1 only and logs what it repaired (kind and tool name, never the
+content) to ~/.sakura/shim.log.
+"""
+import ast
+import http.client
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+HOME = os.path.expanduser(os.environ.get("SAKURA_HOME") or "~/.sakura")
+FLAG = os.path.join(HOME, "shim")
+LOG = os.path.join(HOME, "shim.log")
+PORT = int(os.environ.get("SAKURA_SHIM_PORT") or 8092)
+OPENERS = ("<tool_call", "<|tool_call|>", "<function=", "[TOOL_CALLS]", "[tool_call:")
+ARG_KEYS = ("arguments", "parameters", "args", "input")
+
+
+# ── Repair: text → the call that was meant ───────────────────────────────────
+
+def escape_raw_controls(s):
+    """Newlines and tabs typed raw inside a JSON string, escaped. Returns None if the text ends inside a string."""
+    out, in_str, esc = [], False, False
+    for c in s:
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            elif c == "\n":
+                c = "\\n"
+            elif c == "\r":
+                c = "\\r"
+            elif c == "\t":
+                c = "\\t"
+        elif c == '"':
+            in_str = True
+        out.append(c)
+    return None if in_str else "".join(out)
+
+
+def close_brackets(s):
+    """Append the closing braces a cut-short object is missing. None when a bracket is closed that was never opened."""
+    stack, in_str, esc = [], False, False
+    for c in s:
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c in "{[":
+            stack.append("}" if c == "{" else "]")
+        elif c in "}]":
+            if not stack or stack.pop() != c:
+                return None
+    return s + "".join(reversed(stack))
+
+
+def loose_json(text):
+    """(value, repaired?) for JSON with the mistakes small models make, or (None, False). Syntax only: nothing is guessed."""
+    if not isinstance(text, str):
+        return (text, False) if isinstance(text, (dict, list)) else (None, False)
+    s = text.strip()
+    if not s:
+        return None, False
+    try:
+        return json.loads(s), False
+    except ValueError:
+        pass
+    s = re.sub(r"^```(?:json|JSON)?\s*\n?|\n?```\s*$", "", s).strip()
+    s = s.translate({0x201c: '"', 0x201d: '"', 0x2018: "'", 0x2019: "'"})
+    steps = [s]
+    fixed = escape_raw_controls(s)
+    if fixed is None:
+        return None, False  # it stops inside a string: the value itself is incomplete
+    steps.append(fixed)
+    steps.append(re.sub(r",\s*([}\]])", r"\1", fixed))
+    closed = close_brackets(steps[-1])
+    if closed:
+        steps.append(re.sub(r",\s*([}\]])", r"\1", closed))
+    for cand in steps:
+        try:
+            return json.loads(cand), True
+        except ValueError:
+            pass
+    for cand in steps[::-1]:
+        try:  # single quotes, True/False/None: a Python literal, not JSON
+            v = ast.literal_eval(cand)
+            if isinstance(v, (dict, list)):
+                json.dumps(v)
+                return v, True
+        except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+            pass
+    return None, False
+
+
+def tool_table(tools):
+    """{name: (required params, known params)} from the request's tools."""
+    out = {}
+    for t in tools or []:
+        f = t.get("function") if isinstance(t, dict) and isinstance(t.get("function"), dict) else t
+        if not isinstance(f, dict) or not f.get("name"):
+            continue
+        params = f.get("parameters") if isinstance(f.get("parameters"), dict) else {}
+        props = params.get("properties") if isinstance(params.get("properties"), dict) else {}
+        out[f["name"]] = (list(params.get("required") or []), props)
+    return out
+
+
+def match_tool(name, table):
+    if not isinstance(name, str):
+        return None
+    name = name.strip()
+    if name in table:
+        return name
+    short = name.split(".")[-1].split(":")[-1]
+    hits = [t for t in table if t.lower() == short.lower()]
+    return hits[0] if len(hits) == 1 else None
+
+
+def as_call(obj, table):
+    """(name, args) if this object is a call to a tool on offer with every required parameter, else None."""
+    if not isinstance(obj, dict):
+        return None
+    if isinstance(obj.get("function"), dict):
+        obj = obj["function"]
+    name = match_tool(obj.get("name") or obj.get("tool") or obj.get("tool_name") or (obj.get("function") if isinstance(obj.get("function"), str) else None), table)
+    if not name:
+        return None
+    args = next((obj[k] for k in ARG_KEYS if k in obj), None)
+    if isinstance(args, str):
+        args, _ = loose_json(args)
+    if args is None and not table[name][0]:
+        args = {}
+    if not isinstance(args, dict):
+        return None
+    if any(r not in args for r in table[name][0]):
+        return None
+    return name, args
+
+
+def calls_in(text, table):
+    """([(name, args)], the prose before the first call, kind) when the text is tool calls written out, else None.
+    Every call found has to be valid: one that isn't means the model was talking, not calling."""
+    if not text or not table:
+        return None
+    found, kind, first = [], None, None
+
+    def take(objs, start, k):
+        nonlocal kind, first
+        got = [as_call(o, table) for o in objs]
+        if not got or any(g is None for g in got):
+            return False
+        found.extend(got)
+        kind = kind or k
+        first = start if first is None else min(first, start)
+        return True
+
+    tagged = list(re.finditer(r"<\|?tool_call\|?>\s*(.*?)\s*(?:<\|?/tool_call\|?>|</tool_call>|\Z)", text, re.S))
+    for m in tagged:
+        v, _ = loose_json(m.group(1))
+        if not take(v if isinstance(v, list) else [v], m.start(), "tool_call tag"):
+            return None
+    if not found:
+        fn = list(re.finditer(r"<function=([\w.:-]+)>\s*(.*?)\s*(?:</function>|\Z)", text, re.S))
+        for m in fn:
+            v, _ = loose_json(m.group(2) or "{}")
+            if not take([{"name": m.group(1), "arguments": v if v is not None else None}], m.start(), "function tag"):
+                return None
+    if not found:
+        m = re.search(r"\[TOOL_CALLS\]\s*(.+)\Z", text, re.S)
+        if m:
+            v, _ = loose_json(m.group(1))
+            if not take(v if isinstance(v, list) else [v], m.start(), "TOOL_CALLS"):
+                return None
+    if not found:
+        said = list(re.finditer(r"\[tool_call:\s*([\w.:-]+)((?:[^\]'\"]|'[^']*'|\"[^\"]*\")*)\]", text))
+        for m in said:
+            name = match_tool(m.group(1), table)
+            if not name:
+                return None
+            required, props = table[name]
+            args = {}
+            for key, q1, q2 in re.findall(r"\b(?:for|with|and)\s+(?:(\w+)\s+)?(?:'([^']*)'|\"([^\"]*)\")", m.group(2)):
+                value = q1 or q2
+                if key and key in props:
+                    args[key] = value
+                elif len(required) == 1 and required[0] not in args:
+                    args[required[0]] = value
+                else:
+                    return None
+            if not take([{"name": name, "arguments": args}], m.start(), "tool_call sentence"):
+                return None
+    if not found:
+        whole = text.strip()
+        if whole.startswith(("{", "[", "```")):
+            v, _ = loose_json(whole)
+            if v is not None and take(v if isinstance(v, list) else [v], len(text) - len(text.lstrip()), "bare json"):
+                pass
+    if not found:
+        return None
+    return found, text[:first].rstrip(), kind
+
+
+def note(kind, tools):
+    try:
+        os.makedirs(HOME, exist_ok=True)
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"t": int(time.time()), "kind": kind, "tools": tools}) + "\n")
+    except OSError:
+        pass
+
+
+def wire_calls(calls, start=0):
+    return [{"index": start + i, "id": f"call_shim_{int(time.time() * 1000) % 10 ** 9}_{start + i}", "type": "function",
+             "function": {"name": n, "arguments": json.dumps(a, ensure_ascii=False)}} for i, (n, a) in enumerate(calls)]
+
+
+def repair_args(calls, table):
+    """Fix the arguments of proper tool calls in place. Returns the names repaired."""
+    done = []
+    for c in calls or []:
+        f = c.get("function") if isinstance(c, dict) else None
+        if not isinstance(f, dict):
+            continue
+        raw = f.get("arguments")
+        if isinstance(raw, dict):
+            f["arguments"] = json.dumps(raw, ensure_ascii=False)
+            done.append(f.get("name"))
+            continue
+        if not isinstance(raw, str):
+            continue
+        try:
+            json.loads(raw or "{}")
+            continue
+        except ValueError:
+            pass
+        v, _ = loose_json(raw)
+        name = match_tool(f.get("name"), table)
+        if isinstance(v, dict) and name and all(r in v for r in table[name][0]):
+            f["arguments"] = json.dumps(v, ensure_ascii=False)
+            f["name"] = name
+            done.append(name)
+    return done
+
+
+def repair_message(resp, tools):
+    """A chat completion (not streamed), repaired in place. Returns True if anything changed."""
+    table = tool_table(tools)
+    changed = False
+    for ch in resp.get("choices") or []:
+        msg = ch.get("message") if isinstance(ch, dict) else None
+        if not isinstance(msg, dict) or ch.get("finish_reason") == "length":
+            continue
+        if msg.get("tool_calls"):
+            fixed = repair_args(msg["tool_calls"], table)
+            if fixed:
+                note("arguments", fixed)
+                changed = True
+            continue
+        got = calls_in(msg.get("content") if isinstance(msg.get("content"), str) else "", table)
+        if got:
+            calls, before, kind = got
+            msg["tool_calls"] = [{k: v for k, v in c.items() if k != "index"} for c in wire_calls(calls)]
+            msg["content"] = before or None
+            ch["finish_reason"] = "tool_calls"
+            note(kind, [n for n, _ in calls])
+            changed = True
+    return changed
+
+
+class StreamRepair:
+    """Feed it the upstream's SSE events one at a time; it yields the events to send on. Prose goes straight through;
+    anything that could be the start of a written-out tool call is held until the reply ends, then sent as the call
+    it was, or as the text it turned out to be."""
+
+    def __init__(self, tools):
+        self.table = tool_table(tools)
+        self.full = ""       # all content so far
+        self.sent = 0        # how much of it has gone to the client
+        self.holding = False
+        self.calls = {}      # index → {id, name, arguments} from real tool_call deltas
+        self.last = {}
+
+    def chunk(self, delta, finish=None):
+        base = {k: self.last.get(k) for k in ("id", "object", "created", "model") if k in self.last}
+        base.setdefault("object", "chat.completion.chunk")
+        base["choices"] = [{"index": 0, "delta": delta, "finish_reason": finish}]
+        return base
+
+    def hold_from(self):
+        """Where holding has to begin in what hasn't been sent yet, or None to send it all."""
+        rest = self.full[self.sent:]
+        if self.sent == 0 and self.full.lstrip()[:1] in ("{", "[") or self.sent == 0 and self.full.lstrip().startswith("```"):
+            return 0
+        hits = [rest.find(o) for o in OPENERS if o in rest]
+        if hits:
+            return min(hits)
+        for n in range(min(len(rest), max(len(o) for o in OPENERS) - 1), 0, -1):
+            if any(o.startswith(rest[-n:]) for o in OPENERS):
+                return len(rest) - n
+        if self.sent == 0 and not self.full.strip():
+            return 0  # only whitespace so far: it may yet open with a brace
+        return None
+
+    def feed(self, ev):
+        """ev: a parsed chunk (dict). Returns the list of chunks to forward."""
+        choices = ev.get("choices") or []
+        if not choices:
+            return [ev]  # a usage record and the like
+        self.last = ev
+        ch = choices[0]
+        delta = ch.get("delta") or {}
+        finish = ch.get("finish_reason")
+        out = []
+        for tc in delta.get("tool_calls") or []:
+            slot = self.calls.setdefault(tc.get("index", 0), {"id": None, "name": "", "arguments": ""})
+            f = tc.get("function") or {}
+            slot["id"] = tc.get("id") or slot["id"]
+            slot["name"] += f.get("name") or ""
+            slot["arguments"] += f.get("arguments") or ""
+        text = delta.get("content")
+        other = {k: v for k, v in delta.items() if k not in ("content", "tool_calls")}
+        if isinstance(text, str) and text:
+            self.full += text
+            if not self.holding and self.table:
+                at = self.hold_from()
+                if at is None:
+                    emit, self.sent = self.full[self.sent:], len(self.full)
+                else:
+                    emit = self.full[self.sent:self.sent + at]
+                    self.sent += at
+                    rest = self.full[self.sent:]
+                    self.holding = any(o in rest for o in OPENERS) or (self.sent == 0 and rest.lstrip()[:1] in ("{", "[", "`"))
+                if emit:
+                    out.append(self.chunk(dict(other, content=emit)))
+                    other = {}
+            elif not self.table:
+                out.append(self.chunk(dict(other, content=text)))
+                other = {}
+                self.sent = len(self.full)
+        if other and finish is None:
+            out.append(self.chunk(other))
+        if finish is not None:
+            out += self.finish(finish, ev)
+        return out
+
+    def finish(self, finish, ev):
+        out = []
+        held = self.full[self.sent:]
+        converted = False
+        if self.calls:
+            calls = [{"index": i, "id": c["id"] or f"call_shim_{i}", "type": "function", "function": {"name": c["name"], "arguments": c["arguments"]}}
+                     for i, c in sorted(self.calls.items())]
+            if finish != "length":
+                fixed = repair_args(calls, self.table)
+                if fixed:
+                    note("arguments", fixed)
+            if held:
+                out.append(self.chunk({"content": held}))
+            out.append(self.chunk({"tool_calls": calls}))
+        elif held:
+            got = calls_in(held, self.table) if finish != "length" else None
+            if got:
+                calls, before, kind = got
+                if before:
+                    out.append(self.chunk({"content": before}))
+                out.append(self.chunk({"tool_calls": wire_calls(calls)}))
+                note(kind, [n for n, _ in calls])
+                converted = True
+            else:
+                out.append(self.chunk({"content": held}))
+        self.sent = len(self.full)
+        last = json.loads(json.dumps(ev))
+        last["choices"][0]["delta"] = {}
+        last["choices"][0]["finish_reason"] = "tool_calls" if converted else finish
+        out.append(last)
+        return out
+
+
+# ── The proxy ─────────────────────────────────────────────────────────────────
+
+class Handler(BaseHTTPRequestHandler):
+    upstream = None
+    protocol_version = "HTTP/1.0"
+
+    def log_message(self, *_):
+        pass
+
+    def connect(self):
+        u = self.upstream
+        cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
+        return cls(u.hostname, u.port or (443 if u.scheme == "https" else 80), timeout=1800)
+
+    def forward_headers(self):
+        return {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length", "connection", "accept-encoding", "transfer-encoding")}
+
+    def do_GET(self):
+        if self.path == "/shim/health":
+            body = json.dumps({"ok": True, "upstream": self.upstream.geturl()}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.proxy("GET", None)
+
+    def do_POST(self):
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        body = self.rfile.read(n) if n else b""
+        if self.path.split("?")[0].rstrip("/").endswith("/chat/completions"):
+            try:
+                req = json.loads(body)
+            except ValueError:
+                req = None
+            if isinstance(req, dict):
+                return self.chat(req, body)
+        self.proxy("POST", body)
+
+    def upstream_failed(self, e):
+        body = json.dumps({"error": {"message": f"sakura-shim: the model server at {self.upstream.geturl()} didn't answer ({e}). "
+                                                "Is it running? `sakura-shim off` takes the shim out of the path.", "type": "upstream_error"}}).encode()
+        try:
+            self.send_response(502)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except OSError:
+            pass
+
+    def proxy(self, method, body):
+        try:
+            conn = self.connect()
+            conn.request(method, self.path, body=body, headers=self.forward_headers())
+            resp = conn.getresponse()
+        except (OSError, http.client.HTTPException) as e:
+            return self.upstream_failed(e)
+        self.send_response(resp.status)
+        for k, v in resp.getheaders():
+            if k.lower() not in ("transfer-encoding", "connection", "content-length"):
+                self.send_header(k, v)
+        self.end_headers()
+        try:
+            while True:
+                data = resp.read1(65536)
+                if not data:
+                    break
+                self.wfile.write(data)
+                self.wfile.flush()
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    def chat(self, req, body):
+        tools = req.get("tools") or [{"type": "function", "function": f} for f in req.get("functions") or []]
+        try:
+            conn = self.connect()
+            conn.request("POST", self.path, body=body, headers=dict(self.forward_headers(), **{"Content-Type": "application/json"}))
+            resp = conn.getresponse()
+        except (OSError, http.client.HTTPException) as e:
+            return self.upstream_failed(e)
+        ctype = resp.getheader("Content-Type") or ""
+        try:
+            if resp.status != 200 or not tools:
+                return self.relay(resp)
+            if "text/event-stream" in ctype:
+                return self.stream(resp, tools)
+            raw = resp.read()
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict) and repair_message(data, tools):
+                    raw = json.dumps(data, ensure_ascii=False).encode()
+            except ValueError:
+                pass
+            self.send_response(200)
+            self.send_header("Content-Type", ctype or "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    def relay(self, resp):
+        self.send_response(resp.status)
+        for k, v in resp.getheaders():
+            if k.lower() not in ("transfer-encoding", "connection", "content-length"):
+                self.send_header(k, v)
+        self.end_headers()
+        while True:
+            data = resp.read1(65536)
+            if not data:
+                break
+            self.wfile.write(data)
+            self.wfile.flush()
+
+    def stream(self, resp, tools):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        fixer = StreamRepair(tools)
+
+        def send(obj):
+            self.wfile.write(b"data: " + (obj if isinstance(obj, bytes) else json.dumps(obj, ensure_ascii=False).encode()) + b"\n\n")
+            self.wfile.flush()
+
+        while True:
+            line = resp.readline()
+            if not line:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            if not line.startswith(b"data:"):
+                self.wfile.write(line + b"\n")  # comments and event names, as they came
+                continue
+            payload = line[5:].strip()
+            if payload == b"[DONE]":
+                send(b"[DONE]")
+                continue
+            try:
+                ev = json.loads(payload)
+            except ValueError:
+                send(payload)
+                continue
+            for out in fixer.feed(ev) if isinstance(ev, dict) else [ev]:
+                send(out)
+
+
+def healthy(port, upstream=None):
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        c.request("GET", "/shim/health")
+        d = json.loads(c.getresponse().read())
+        return bool(d.get("ok")) and (upstream is None or d.get("upstream") == upstream)
+    except (OSError, ValueError, http.client.HTTPException):
+        return False
+
+
+def cmd_run(args):
+    port, upstream = PORT, os.environ.get("SAKURA_SHIM_UPSTREAM") or "http://127.0.0.1:11434"
+    i = 0
+    while i < len(args):
+        if args[i] == "--port" and i + 1 < len(args):
+            port = int(args[i + 1])
+            i += 1
+        elif args[i] == "--upstream" and i + 1 < len(args):
+            upstream = args[i + 1]
+            i += 1
+        else:
+            sys.exit("usage: sakura-shim run [--port N] [--upstream URL]")
+        i += 1
+    u = urllib.parse.urlsplit(upstream.rstrip("/"))
+    if u.scheme not in ("http", "https") or not u.hostname:
+        sys.exit(f"sakura-shim: {upstream} isn't an http URL")
+    # the model server's base, without the /v1 the engine adds to its own URL
+    Handler.upstream = u._replace(path=re.sub(r"/v1$", "", u.path), query="", fragment="")
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)  # loopback only: this must never be reachable from outside
+    except OSError as e:
+        sys.exit(f"sakura-shim: can't listen on 127.0.0.1:{port}: {e.strerror}")
+    srv.daemon_threads = True
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+def cmd_ensure(args):
+    upstream = args[args.index("--upstream") + 1] if "--upstream" in args and args.index("--upstream") + 1 < len(args) else "http://127.0.0.1:11434"
+    port = int(args[args.index("--port") + 1]) if "--port" in args and args.index("--port") + 1 < len(args) else PORT
+    want = re.sub(r"/v1$", "", upstream.rstrip("/"))
+    if healthy(port, want):
+        return 0
+    if healthy(port):
+        stop(port)
+    os.makedirs(HOME, exist_ok=True)
+    with open(os.path.join(HOME, "shim.out"), "ab") as out:
+        p = subprocess.Popen([sys.executable, os.path.realpath(__file__), "run", "--port", str(port), "--upstream", want],
+                             stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True)
+    with open(os.path.join(HOME, "shim.pid"), "w") as f:
+        f.write(str(p.pid))
+    for _ in range(50):
+        if healthy(port, want):
+            return 0
+        if p.poll() is not None:
+            break
+        time.sleep(0.1)
+    sys.exit(f"sakura-shim: it didn't start; see {os.path.join(HOME, 'shim.out')}")
+
+
+def stop(port=PORT):
+    try:
+        pid = int(open(os.path.join(HOME, "shim.pid")).read().strip())
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            if b"sakura-shim" in f.read():
+                os.kill(pid, 15)
+                for _ in range(30):
+                    if not healthy(port):
+                        break
+                    time.sleep(0.1)
+    except (OSError, ValueError):
+        pass
+    try:
+        os.remove(os.path.join(HOME, "shim.pid"))
+    except OSError:
+        pass
+
+
+def cmd_status(_):
+    print(f"sakura-shim is {'on' if os.path.exists(FLAG) else 'off'}" + (f", running on 127.0.0.1:{PORT}" if healthy(PORT) else ", not running"))
+    counts, tools, first = {}, {}, None
+    try:
+        for line in open(LOG, encoding="utf-8"):
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            first = first or d.get("t")
+            counts[d.get("kind")] = counts.get(d.get("kind"), 0) + 1
+            for t in d.get("tools") or []:
+                tools[t] = tools.get(t, 0) + 1
+    except OSError:
+        pass
+    if not counts:
+        print("  nothing repaired yet")
+        return 0
+    print(f"  repaired since {time.strftime('%Y-%m-%d', time.localtime(first))}:")
+    for k, n in sorted(counts.items(), key=lambda x: -x[1]):
+        print(f"    {n:>5}  {k}")
+    print("  by tool: " + ", ".join(f"{t} {n}" for t, n in sorted(tools.items(), key=lambda x: -x[1])))
+    return 0
+
+
+def cmd_repair(args):
+    tools = []
+    if "--tools" in args:
+        i = args.index("--tools")
+        tools = json.load(open(args[i + 1], encoding="utf-8"))
+        tools = tools.get("tools", tools) if isinstance(tools, dict) else tools
+        del args[i:i + 2]
+    if len(args) != 1:
+        sys.exit("usage: sakura-shim repair RESPONSE.json [--tools REQUEST.json]")
+    data = json.load(sys.stdin if args[0] == "-" else open(args[0], encoding="utf-8"))
+    changed = repair_message(data, tools)
+    print(json.dumps(data, indent=1, ensure_ascii=False))
+    return 0 if changed else 1
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "run":
+        return cmd_run(rest)
+    if cmd == "ensure":
+        return cmd_ensure(rest)
+    if cmd == "status":
+        return cmd_status(rest)
+    if cmd == "repair":
+        return cmd_repair(rest)
+    if cmd == "on":
+        os.makedirs(HOME, exist_ok=True)
+        open(FLAG, "w").close()
+        print("on: the next ? talks to the model through the shim (127.0.0.1 only). `sakura-shim status` shows what it repairs; "
+              "check your driver with it: python3 evals/run.py")
+        return 0
+    if cmd == "off":
+        if os.path.exists(FLAG):
+            os.remove(FLAG)
+        stop()
+        print("off: ? talks to the model server directly again")
+        return 0
+    sys.exit("usage: sakura-shim status | on | off | run | ensure | repair (sakura-shim --help)")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

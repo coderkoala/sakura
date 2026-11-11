@@ -139,6 +139,15 @@ else
     fi
 fi
 
+# `sakura-shim on`: the engine reaches the model through the tool-call repairer, which listens on 127.0.0.1 only. If it
+# can't start, say so and go straight to the model server as before.
+if [ -e "${SAKURA_HOME:-$HOME/.sakura}/shim" ] && [ "${SAKURA_NO_SHIM:-0}" != 1 ]; then
+    upstream="${SAKURA_ROUTER_URL:-${OLLAMA_API_BASE:-http://127.0.0.1:11434}/v1}"
+    if "$(dirname "$(readlink -f "$0")")/sakura-shim" ensure --upstream "$upstream" >&2; then
+        flags+=(-c "model_providers.local-ollama.base_url=\"http://127.0.0.1:${SAKURA_SHIM_PORT:-8092}/v1\"")
+    fi
+fi
+
 # Every model that suits this machine (sakura-model models), fetched in the background when some are missing.
 # Checked once a day, not on every launch; workers never start downloads.
 if [ "$mode" != exec ] && [ "${SAKURA_NO_AUTOPULL:-0}" != 1 ] && command -v sakura-model >/dev/null 2>&1; then

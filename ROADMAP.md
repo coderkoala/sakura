@@ -28,7 +28,7 @@ Measured on one machine with an 8 GB GPU, driver Ornith 1.5 35B-A3B since 0.9.5 
 | `sakura-gpu` (40 checks), `torrent` (19 checks and a live daemon lifecycle), `dl` (12 checks, byte-range resume proven), `sakura-backup` (27 checks, a real restore each run)                                                                                                                                                               | `fmt`, `?watch`, `drive` against a real Google/Microsoft account (local remote only so far)                                                                                                                                                                                                                                                                                                                                                                                  |
 | `look` (OCR and the vision model), `ledger`, `schema`, `procwatch`, `dq`, `pa offer`, `pa cron`, `docpack`, `fleet`, `drive`, `tbl`, `logs`, workers in worktrees (`evals/abilities.py`, 60 checks)                                                                                                                                         | `hear`, `say`, `clip`, `?pr`, `?review`, `?red`, `?try`, `?morning`, `pa mail` rules, `?decide`/`?why` (smoke-tested by hand)                                                                                                                                                                                                                                                                                                                                                |
 | A trust boundary: fetched content scanned for injection and bannered as data, smuggling characters stripped, data-egress to un-named hosts gated for approval, the answer checked for exfil sinks, every non-http way out read the same way (`evals/injection.py`, 43 checks)                                                               | Dual-LLM / quarantine split — one model still holds untrusted content and the tools; the egress gate is the compensating control                                                                                                                                                                                                                                                                                                                                             |
-| The machine room: `ports`, `space`, `drift`, `when`, `sakura-notes`, `host:` memory, `sakura-doctor`; `conv` (incl. redact, fill, sign), `vid`, `dupes`, `shelve`, `money`, `sakura-what`, `vault`, `sakura-complete`, `sakura-last`, `sakura-model pick` (`evals/machineroom.py`, 133 checks; `vid` and `conv URL` against a local server) | `restore`, `conv subs`, `translate` (built; `evals/archive.py` proves each only where its model is present — the eval machine had no GPU, no Vulkan and no reach to Hugging Face; `faces` passed 5/5 there on the CPU); whether the model picks the toolkit from a plain sentence (`evals/toolpick.py`, 15 asks, needs the driver); `vid` against a real site with a browser login; `conv ocr` (ocrmypdf wasn't on the eval machine); LibreOffice conversions beyond txt→pdf |
+| The machine room: `ports`, `space`, `drift`, `when`, `sakura-notes`, `host:` memory, `sakura-doctor`; `conv` (incl. redact, fill, sign), `vid`, `dupes`, `shelve`, `money`, `sakura-what`, `vault`, `sakura-complete`, `sakura-last`, `sakura-model pick`, `sakura-suggest`, `sakura-lean`, `sakura-skill` (`evals/machineroom.py`, 177 checks; `vid` and `conv URL` against a local server); `conv` books, denoise, ocr and LibreOffice documents and sheets (`evals/formats.py`, 63); memory workflows, `?teach retro`'s brief, `pa voice`, `?recall` over documents and mail (`evals/memoryflows.py`, 69, model and himalaya stubbed); `sakura-shim` (`evals/shim.py`, 51) | `restore`, `conv subs`, `translate` (built; `evals/archive.py` proves each only where its model is present — the eval machine had no GPU, no Vulkan and no reach to Hugging Face; `faces` passed 5/5 there on the CPU); whether the model picks the toolkit from a plain sentence (`evals/toolpick.py`, 15 asks, needs the driver); `vid` against a real site with a browser login; `conv stems` real separation and `conv denoise --model` (no model where the eval ran); what the real model proposes in `reflect`/`consolidate`; `pa voice` and recall's mail search on a real provider; `sakura-shim` and `sakura-lean` on the driver (`evals/run.py` with each on) |
 
 ## Next: make what exists trustworthy
 
@@ -46,7 +46,7 @@ Shipped: **`?fix`: the error you were about to spend an hour on.** See the READM
 
 Shipped: **`?undo`: never afraid again.** See the README.
 
-Partly shipped: **`?recall`: your whole past, searchable.** Sessions, shell history, decisions and memory today; mail and documents still go through `himalaya` and `rag`. "What was that command I used to fix nginx in March?" "Why did we pick Redis?" Across shell history, past sessions, notes, mail and documents, with the source cited, and none of it leaving the machine. The longer you use it, the more it's worth.
+Shipped: **`?recall`: your whole past, searchable.** Sessions, shell history, decisions, memory, documents (`rag`) and mail (himalaya), each cited. "What was that command I used to fix nginx in March?" "Why did we pick Redis?" Across shell history, past sessions, notes, mail and documents, with the source cited, and none of it leaving the machine. The longer you use it, the more it's worth.
 
 Shipped: **`?tonight`: a night shift.** See the README.
 
@@ -66,7 +66,7 @@ Shipped as `docpack`: **Offline packs.** Before a flight or an outage, it fetche
 
 Shipped: **Decisions that explain themselves.** `?decide` and `?why`; the model is told to record a decision when it hears one. See the README.
 
-Partly shipped (`pa mail urgent|mute`, `pa autoreply`, drafts through himalaya; learning your voice not yet): **Your inbox, privately.** It triages, summarises and drafts in your voice, with mail nobody would paste into a cloud service. It never sends without you.
+Partly shipped (`pa mail urgent|mute`, `pa autoreply`, drafts through himalaya; `pa voice learn` counts your style from sent mail into a note drafts read): **Your inbox, privately.** It triages, summarises and drafts in your voice, with mail nobody would paste into a cloud service. It never sends without you.
 
 Shipped as `hear`, `hear --notes`, `say` and `?hear`: **Meetings and voice.** Local transcription into notes, decisions and reminders. Speak to it when your hands are full.
 
@@ -97,7 +97,7 @@ Not more harnesses: things it couldn't do before. Built means it runs and was sm
 
 ## Memory workflows, next (2026-11-09 brainstorm)
 
-Built: recall on back-references (`hooks/recall_context.py`), project notes (`.sakura.md`). The rest, in build order:
+Built: recall on back-references (`hooks/recall_context.py`), project notes (`.sakura.md`), and on 2026-11-11 items 1 to 4 below (`evals/memoryflows.py`, 69 checks with the model and himalaya stubbed: `sakura-memory reflect|consolidate|merge|stale`, `sakura-teach retro`, `pa voice`). Not proven: what the real model proposes, and `pa voice` and recall's mail search against a real provider.
 
 1. **Reflection passes:** a nightly `pa job` reads `?recap` and proposes `sakura-memory add` lines as offers; yes writes them. The model never writes memory silently.
 2. **`?teach retro`:** mine the last session, not shell history, for a repeatable procedure, through the same `sakura-tool keep` gate.
@@ -159,7 +159,7 @@ ImageMagick, LibreOffice or tesseract underneath. So: 7. **`conv`:** those tools
 
 Next along the same line, not built: **`conv subs VIDEO`** (subtitles from `hear`, burned in or as .srt, in the language spoken);
 **faces and places in your photo library**, locally (who's in this picture, every photo of her), with the embeddings never leaving;
-**upscaling and restoring** old video and scans with a local model; **ebooks** (epub↔mobi↔pdf for a reader); a **print-to-PDF path
+**upscaling and restoring** old video and scans with a local model; a **print-to-PDF path
 for web pages** through the shared browser. Each needs a deterministic eval before it can be claimed. Built the same evening, with
 checks: **`vid watch URL`** (what's new on a channel since the last look; exit 1 when there is, so `pa job every sunday 9am: vid watch …`
 nags), **`conv extract`** (zip, tar, 7z, rar into their own folder; entries pointing outside it, and links, refused), **`conv URL --to pdf|png|md`** (the local headless browser prints the page), **`dupes`** (the same file by content across drives, kept once by hard link or deleted, dry run first), **`shelve`** (photos and videos into `YEAR/YEAR-MM` by the day taken, sidecars along), and **`sakura-doctor`** (is the install whole; it found twenty commands that didn't answer `--help`, now fixed, so the README's promise is checked, not assumed).
@@ -183,9 +183,13 @@ Built, with checks (13 in `evals/machineroom.py`): `sakura-model pick` for every
 Three research passes — open-source tools by everyday use, open-weight models by want on 8 GB, and what the other local
 agents of 2026 offer — are mapped in [docs/everything.md](docs/everything.md): for each want, the tool the web services run
 underneath, the model that fits, what Sakura does today, and what's next. The build order it ends with, each needing an eval
-first (done the same day, with checks: `conv redact|fields|fill|sign|verify` and `money` on hledger): `conv subs|denoise|stems` →
+first (done the same day, with checks: `conv redact|fields|fill|sign|verify` and `money` on hledger): `conv subs|denoise|stems` (done; stems proven as plumbing only, the Demucs model couldn't be fetched where the eval ran) →
 `restore` (Real-ESRGAN, RIFE, SeedVR2) → `faces` (InsightFace + SigLIP 2, local only) → the Nepal paperwork templates on `conv fill` →
 `translate` (Argos/NLLB) and Nepali/Hindi embeddings for `rag` → kept procedures, a repo map and a tool-call shim → a messaging gateway with pairing, last and default-closed.
+
+The tool-call shim, built 2026-11-11 as `sakura-shim` (off by default, 51 checks against a fake model server): a proxy on 127.0.0.1 between the engine and the model server that turns tool calls written as text back into calls, streamed or not, with syntax-only repairs and no second model; a tool that wasn't offered, a missing required argument or a reply cut off by the length limit is left as text. Whether it lifts `evals/run.py` on the driver is the measurement still owed.
+
+Books, denoise and stems, built 2026-11-11 (`evals/formats.py`, 63 checks, which also prove `conv ocr` and the LibreOffice conversions): **ebooks** (epub, mobi, azw3, fb2 to and from each other and md/docx/pdf), **`conv denoise`**, **`conv stems`**, sheets to csv.
 
 Kept procedures, built 2026-11-11 as `sakura-skill` (14 checks): the steps that solved something hard, kept in the SKILL.md shape and listed in every later session; `sakura-skill import` brings in another agent's skills only after the injection scanner has read them (an order aimed at the reader, a secret, a link out of the folder or a poisoned side file refuses it, and scripts arrive non-executable); a kept skill edited behind its back fails `sakura-skill check` and the next session is told not to follow it.
 
