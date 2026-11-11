@@ -56,7 +56,9 @@ if [ -L "$SAKURA_HOME/AGENTS.md" ]; then rm -f "$SAKURA_HOME/AGENTS.md"; fi
     fi
 } >"$SAKURA_HOME/AGENTS.md"
 link "$ROOT/rules" "$SAKURA_HOME/rules"
-link "$ROOT/skills" "$HOME/.agents/skills"
+# ~/.agents/skills is a directory of links: the shipped skills and the ones you kept (sakura-skill). It used to be one
+# link to this checkout, so a kept skill written through it would have landed in the repository.
+"$ROOT/bin/sakura-skill" expose || link "$ROOT/skills" "$HOME/.agents/skills"
 # every command in bin/ (a hand-kept list here drifted twice; sakura-doctor reports anything that ends up unlinked)
 for path in "$ROOT"/bin/*; do
     [ -f "$path" ] && [ -x "$path" ] && ln -sf "$path" "$HOME/.local/bin/$(basename "$path")"

@@ -42,6 +42,8 @@
 #   conv subs VIDEO [--lang ne] [--burn]  subtitles from the speech;  translate "text"|FILE.srt --to ne|hi|en   offline (Argos)
 #   money import bank.csv | month | where "KFC" | rule "KFC" expenses:food   statements into plain-text accounting (hledger)
 #   dupes DIR... [--link|--rm --go]  the same file by content, across drives;  shelve DIR --into LIB [--go]  photos/videos into YEAR/YEAR-MM by date taken
+#   sakura-skill keep NAME steps.md --about "when" | import ~/.claude/skills   know-how kept as a skill; imports are scanned first
+#   sakura-lean on|off|status   a tool reference 63% shorter on every turn; a topic's section arrives with the message about it
 #   sakura-doctor [--fix]  is this install whole: every command, hook and config checked, what's missing
 #   ?last [N] | ?last --here   what was I doing: the last turn's directory, ask and answer, from the record (cd's there)
 #   Tab completes every command's subcommands and flags (sakura-complete, generated from the manuals)
@@ -72,7 +74,12 @@ if command -v sakura-launch >/dev/null 2>&1; then
     alias '?on'='sakura-on'
     alias '?explain'='sakura-explain'
     alias '?how'='sakura-how'
-    __sakura_last() { case "${1:-}" in ""|[0-9]*) local d; d="$(sakura-last --cd 2>/dev/null)" && [ -d "$d" ] && cd "$d"; sakura-last "$@" ;; *) sakura-last "$@" ;; esac; }
+    __sakura_last() { case "${1:-}" in "" | [0-9]*)
+        local d
+        d="$(sakura-last --cd 2>/dev/null)" && [ -d "$d" ] && cd "$d"
+        sakura-last "$@"
+        ;;
+    *) sakura-last "$@" ;; esac }
     alias '?last'='__sakura_last'
     alias '?what'='sakura-what'
     alias '?docs'='rag search'
@@ -85,7 +92,12 @@ if command -v sakura-launch >/dev/null 2>&1; then
     alias '?backup'='sakura-backup'
     alias '?why'='sakura-decide why'
     alias '?morning'='sakura-morning'
-    __sakura_hear() { local t; t="$(hear "$@")" || return 1; printf 'heard: %s\n' "$t"; sakura-launch "$t"; }
+    __sakura_hear() {
+        local t
+        t="$(hear "$@")" || return 1
+        printf 'heard: %s\n' "$t"
+        sakura-launch "$t"
+    }
     alias '?hear'='__sakura_hear'
     alias '?review'='sakura-review'
     # ?teach hands Sakura your recent commands, so there's nothing to paste.
@@ -100,12 +112,12 @@ if command -v sakura-launch >/dev/null 2>&1; then
     __sakura_quote_line() {
         local head rest
         case "$READLINE_LINE" in
-            '?remind '*|'?pa '*|'?fix '*|'? '*|'?? '*|'?learn '*|'?teach '*|'?tour '*|'?recall '*|'?go '*|'?pr '*|'?try '*|'?red '*|'?decide '*|'?why '*|'?setup '*|'?explain '*|'?how '*) ;;
+            '?remind '* | '?pa '* | '?fix '* | '? '* | '?? '* | '?learn '* | '?teach '* | '?tour '* | '?recall '* | '?go '* | '?pr '* | '?try '* | '?red '* | '?decide '* | '?why '* | '?setup '* | '?explain '* | '?how '*) ;;
             *) return 0 ;;
         esac
         head=${READLINE_LINE%% *}
         rest=${READLINE_LINE#* }
-        case "$rest" in \'*\'|\"*\") return 0 ;; esac  # you already quoted it
+        case "$rest" in \'*\' | \"*\") return 0 ;; esac # you already quoted it
         printf -v rest '%q' "$rest"
         READLINE_LINE="$head $rest"
         READLINE_POINT=${#READLINE_LINE}
@@ -132,18 +144,27 @@ if command -v sakura-launch >/dev/null 2>&1; then
         __sakura_preexec() { __sakura_cmd=$1; }
         __sakura_precmd() {
             local rc=$? dir="${XDG_RUNTIME_DIR:-/tmp}/sakura-fix-$UID" cmd
-            if [ -n "${__bp_imported:-}" ]; then cmd=${__sakura_cmd:-}; __sakura_cmd=; else
-                cmd=$(HISTTIMEFORMAT='' history 1); cmd=${cmd#*[0-9]  }; fi
-            case "$rc:$cmd" in 0:*|130:*|*:|*:'?'*) return "$rc" ;; esac
-            (umask 077; mkdir -p "$dir" && printf '%s\n%s\n%s\n%s\n' "$rc" "$(date +%s)" "$PWD" "$cmd" > "$dir/$$"
-             if [ -n "${TMUX:-}" ]; then tmux capture-pane -p -S -120 > "$dir/$$.screen" 2>/dev/null; else rm -f "$dir/$$.screen"; fi)
+            if [ -n "${__bp_imported:-}" ]; then
+                cmd=${__sakura_cmd:-}
+                __sakura_cmd=
+            else
+                cmd=$(HISTTIMEFORMAT='' history 1)
+                cmd=${cmd#*[0-9]  }
+            fi
+            case "$rc:$cmd" in 0:* | 130:* | *: | *:'?'*) return "$rc" ;; esac
+            (
+                umask 077
+                mkdir -p "$dir" && printf '%s\n%s\n%s\n%s\n' "$rc" "$(date +%s)" "$PWD" "$cmd" >"$dir/$$"
+                if [ -n "${TMUX:-}" ]; then tmux capture-pane -p -S -120 >"$dir/$$.screen" 2>/dev/null; else rm -f "$dir/$$.screen"; fi
+            )
             return "$rc"
         }
         if [ -n "${__bp_imported:-}" ]; then
-            preexec_functions+=(__sakura_preexec); precmd_functions+=(__sakura_precmd)
+            preexec_functions+=(__sakura_preexec)
+            precmd_functions+=(__sakura_precmd)
         else
             case ";${PROMPT_COMMAND:-};" in *";__sakura_precmd;"*) ;;
-                *) PROMPT_COMMAND="__sakura_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;; esac
+            *) PROMPT_COMMAND="__sakura_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;; esac
         fi
     fi
 fi

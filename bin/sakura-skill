@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""sakura-skill — know-how that's kept: the steps that solved something hard, written down once and loaded by name next time. No model.
+
+  sakura-skill keep NAME FILE.md --about "when to reach for it"   keep a procedure (the file is the steps, in markdown)
+  sakura-skill import PATH [--as NAME]    bring in a skill from another agent's folder (a SKILL.md, a skill's directory, or
+                                          a folder of them such as ~/.claude/skills): each is scanned first
+  sakura-skill list                       what's kept: name, where it came from, what it's for (--json)
+  sakura-skill show NAME                  print one
+  sakura-skill check [NAME]               scan the kept ones again, and say which changed on disk since they were kept
+  sakura-skill remove NAME
+`sakura-tool keep` keeps a script; this keeps a procedure, in the SKILL.md shape other agents use, so it shows up in
+the skills list of every new session. Nothing is kept unless it passes the gate: a usable name that no shipped skill
+has, a one-line description, under 16 KB, no secret, no invisible characters, and nothing in it that tries to give
+the reader orders or send data out (the same scanner that reads every fetched page: `sakura-scan`). A skill from
+somewhere else is text written by a stranger for an AI to obey, so that scan is the point: a finding refuses it and
+names the line. Scripts that come with an imported skill are copied but never run by this command: read them first.
+Kept in $SAKURA_SKILLS_DIR, else ~/.sakura/skills, and linked into ~/.agents/skills beside the shipped ones.
+"""
+import hashlib
+import importlib.machinery
+import json
+import os
+import re
+import shutil
+import sys
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+ROOT = os.path.dirname(HERE)
+SHIPPED = os.path.join(ROOT, "skills")
+DIR = os.path.expanduser(os.environ.get("SAKURA_SKILLS_DIR") or "~/.sakura/skills")
+AGENTS = os.path.expanduser(os.environ.get("SAKURA_AGENTS_SKILLS") or "~/.agents/skills")
+NAME = re.compile(r"^[a-z][a-z0-9_-]{1,40}$")
+MAX_SIZE = 16 * 1024
+MAX_TREE = 2 * 1024 * 1024
+MAX_ABOUT = 300
+TEXT_EXT = (".md", ".txt", ".py", ".sh", ".js", ".ts", ".json", ".yaml", ".yml", ".toml", ".rb", ".php", "")
+HARDCODED = re.compile(r"\b(?:password|passwd|passphrase|pwd|api[_ -]?key|secret|token)\b[\"']?\s*[=:]\s*[\"'][^\"'$\s{<]{4,}[\"']", re.I)
+
+sys.path.insert(0, os.path.join(ROOT, "mcp", "sakura-web"))
+
+
+def memory():
+    return importlib.machinery.SourceFileLoader("sakura_memory", os.path.join(HERE, "sakura-memory")).load_module()
+
+
+def scanner():
+    import injection
+    return injection
+
+
+def split_front(text):
+    """({key: value} from the --- front matter, the body). No front matter: ({}, text)."""
+    m = re.match(r"\A---\s*\n(.*?)\n---\s*\n?", text, re.S)
+    if not m:
+        return {}, text
+    meta = {}
+    for line in m.group(1).splitlines():
+        k, sep, v = line.partition(":")
+        if sep and re.fullmatch(r"[\w-]+", k.strip()):
+            meta[k.strip().lower()] = v.strip().strip("\"'")
+    return meta, text[m.end():]
+
+
+def findings(text):
+    """What the injection scanner says about a text: [(severity, category, excerpt)], invisible characters included."""
+    inj = scanner()
+    _, removed = inj.neutralize(text)
+    out = [(f["severity"], f["category"], f["excerpt"]) for f in inj.scan(text)]
+    if removed and not any(c == "smuggled-characters" for _, c, _ in out):
+        out.insert(0, ("high", "smuggled-characters", f"{removed} invisible character(s)"))
+    return out
+
+
+def refusal_for(name, text, about, label="the file"):
+    """Why this can't be kept, or None. `text` is the whole SKILL.md."""
+    if not NAME.match(name):
+        return f"'{name}' isn't a usable name: lowercase letters, digits, - and _, starting with a letter"
+    if os.path.isdir(os.path.join(SHIPPED, name)):
+        return f"'{name}' is a skill Sakura ships. Pick another name (--as NAME for an import)"
+    if len(text.encode("utf-8", "replace")) > MAX_SIZE:
+        return f"{label} is over {MAX_SIZE // 1024} KB. A skill is read into the model's context: keep the steps, link the rest"
+    meta, body = split_front(text)
+    about = " ".join((about or meta.get("description") or "").split())
+    if not about:
+        return f"{label} has no description. Say when to reach for it: --about \"...\" (or a description: line in its front matter)"
+    if len(about) > MAX_ABOUT:
+        return f"the description is {len(about)} characters; it's read at the start of every session, so at most {MAX_ABOUT}"
+    if len(body.strip()) < 40:
+        return f"{label} has no steps in it"
+    mem = memory()
+    why = mem.flagged(about)
+    if why:
+        return f"the description can't be used: {why}"
+    if mem.SECRET_SHAPES.search(text) or HARDCODED.search(text):
+        return f"{label} looks like it has a secret in it. Say where the secret lives (`vault get NAME`), not what it is"
+    bad = [f for f in findings(text) if f[0] == "high"]
+    if bad:
+        sev, cat, excerpt = bad[0]
+        return (f"{label} reads like an attempt to give orders or send data out ({cat}: {excerpt.strip()[:120]}). "
+                "It isn't kept. If you wrote it, describe the steps without addressing the reader's instructions")
+    return None
+
+
+def render(name, text, about):
+    """The SKILL.md as kept: front matter with this name and a one-line description, then the body."""
+    meta, body = split_front(text)
+    about = " ".join((about or meta.get("description") or "").split())
+    return f"---\nname: {name}\ndescription: {about}\n---\n\n{body.strip()}\n"
+
+
+def tree_hash(path):
+    h = hashlib.sha256()
+    for root, dirs, files in os.walk(path):
+        dirs.sort()
+        for n in sorted(files):
+            if n == ".kept.json":
+                continue
+            p = os.path.join(root, n)
+            h.update(os.path.relpath(p, path).encode())
+            try:
+                with open(p, "rb") as f:
+                    h.update(f.read())
+            except OSError:
+                pass
+    return h.hexdigest()
+
+
+def expose(name=None):
+    """Make ~/.agents/skills a real directory of links: the shipped skills and the kept ones. install.sh used to point the
+    whole directory at the repo; a kept skill written through that link would land in the checkout."""
+    if os.path.islink(AGENTS):
+        os.remove(AGENTS)
+    os.makedirs(AGENTS, exist_ok=True)
+    wanted = {}
+    if os.path.isdir(SHIPPED):
+        wanted.update({n: os.path.join(SHIPPED, n) for n in os.listdir(SHIPPED) if os.path.isdir(os.path.join(SHIPPED, n))})
+    if os.path.isdir(DIR):
+        wanted.update({n: os.path.join(DIR, n) for n in os.listdir(DIR) if os.path.isfile(os.path.join(DIR, n, "SKILL.md")) and n not in wanted})
+    for n, target in wanted.items():
+        link = os.path.join(AGENTS, n)
+        if os.path.islink(link) and os.readlink(link) != target:
+            os.remove(link)
+        if not os.path.lexists(link):
+            os.symlink(target, link)
+    for n in os.listdir(AGENTS):
+        link = os.path.join(AGENTS, n)
+        if os.path.islink(link) and not os.path.exists(link):
+            os.remove(link)
+
+
+def store(name, text, about, origin, extra_from=None):
+    dest = os.path.join(DIR, name)
+    replaced = os.path.isdir(dest)
+    tmp = dest + ".new"
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp)
+    if extra_from:
+        for root, dirs, files in os.walk(extra_from):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and not os.path.islink(os.path.join(root, d))]
+            for n in files:
+                src = os.path.join(root, n)
+                if n == "SKILL.md" and root == extra_from or os.path.islink(src):
+                    continue
+                out = os.path.join(tmp, os.path.relpath(src, extra_from))
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                shutil.copyfile(src, out)  # copied without their mode: nothing that arrives is executable
+    with open(os.path.join(tmp, "SKILL.md"), "w", encoding="utf-8") as f:
+        f.write(render(name, text, about))
+    meta = {"name": name, "origin": origin, "kept": int(time.time()), "sha256": tree_hash(tmp),
+            "about": " ".join((about or split_front(text)[0].get("description") or "").split())}
+    with open(os.path.join(tmp, ".kept.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=1)
+    shutil.rmtree(dest, ignore_errors=True)
+    os.replace(tmp, dest)
+    expose()
+    return replaced
+
+
+def kept():
+    out = []
+    try:
+        names = sorted(os.listdir(DIR))
+    except OSError:
+        return out
+    for n in names:
+        try:
+            with open(os.path.join(DIR, n, ".kept.json"), encoding="utf-8") as f:
+                out.append(json.load(f))
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def cmd_keep(args):
+    about = None
+    if "--about" in args:
+        i = args.index("--about")
+        if i + 1 >= len(args):
+            sys.exit("sakura-skill: --about needs the line")
+        about = args[i + 1]
+        del args[i:i + 2]
+    if len(args) != 2:
+        sys.exit('usage: sakura-skill keep NAME FILE.md --about "when to reach for it"')
+    name, src = args
+    try:
+        with open(src, encoding="utf-8") as f:
+            text = f.read(MAX_SIZE * 4)
+    except (OSError, UnicodeDecodeError) as e:
+        sys.exit(f"sakura-skill: can't read {src}: {getattr(e, 'strerror', None) or 'not text'}")
+    why = refusal_for(name, text, about, src)
+    if why:
+        sys.exit(f"sakura-skill: not kept. {why}.")
+    replaced = store(name, text, about, "written here")
+    print(f"{'replaced' if replaced else 'kept'} {name}: new sessions list it as a skill, and `sakura-skill show {name}` prints it")
+    return 0
+
+
+def candidates(path):
+    """[(suggested name, directory or None, SKILL.md path)] under PATH: a file, one skill's directory, or a folder of them."""
+    if os.path.isfile(path):
+        return [(os.path.basename(os.path.dirname(os.path.abspath(path))) if os.path.basename(path) == "SKILL.md"
+                 else os.path.splitext(os.path.basename(path))[0], None, path)]
+    if os.path.isfile(os.path.join(path, "SKILL.md")):
+        return [(os.path.basename(os.path.abspath(path)), path, os.path.join(path, "SKILL.md"))]
+    out = []
+    for n in sorted(os.listdir(path)):
+        d = os.path.join(path, n)
+        if os.path.isdir(d) and not os.path.islink(d) and os.path.isfile(os.path.join(d, "SKILL.md")):
+            out.append((n, d, os.path.join(d, "SKILL.md")))
+    return out
+
+
+def tree_refusal(d):
+    """Why a skill's directory can't come in: something in it besides SKILL.md that's too big, a link, or flagged."""
+    total = 0
+    for root, dirs, files in os.walk(d):
+        for n in dirs + files:
+            p = os.path.join(root, n)
+            if os.path.islink(p):
+                return f"{os.path.relpath(p, d)} is a link ({os.readlink(p)}); a skill has to be whole in its own folder"
+        for n in files:
+            p = os.path.join(root, n)
+            total += os.path.getsize(p)
+            if total > MAX_TREE:
+                return f"the folder is over {MAX_TREE // (1024 * 1024)} MB"
+            if os.path.splitext(n)[1].lower() in TEXT_EXT and not (n == "SKILL.md" and root == d):
+                try:
+                    with open(p, encoding="utf-8") as f:
+                        text = f.read(200000)
+                except (OSError, UnicodeDecodeError):
+                    continue
+                bad = [f for f in findings(text) if f[0] == "high"]
+                if bad:
+                    return f"{os.path.relpath(p, d)} reads like an attempt to give orders or send data out ({bad[0][1]}: {bad[0][2].strip()[:100]})"
+                if memory().SECRET_SHAPES.search(text):
+                    return f"{os.path.relpath(p, d)} has a secret in it"
+    return None
+
+
+def cmd_import(args):
+    rename = None
+    if "--as" in args:
+        i = args.index("--as")
+        if i + 1 >= len(args):
+            sys.exit("sakura-skill: --as needs a name")
+        rename = args[i + 1]
+        del args[i:i + 2]
+    if len(args) != 1:
+        sys.exit("usage: sakura-skill import PATH [--as NAME]")
+    path = os.path.expanduser(args[0])
+    if not os.path.exists(path):
+        sys.exit(f"sakura-skill: {path} isn't there")
+    found = candidates(path)
+    if not found:
+        sys.exit(f"sakura-skill: no SKILL.md in {path} or in the folders under it")
+    if rename and len(found) > 1:
+        sys.exit(f"sakura-skill: --as names one skill, and {path} holds {len(found)}")
+    kept_n = 0
+    for name, d, md in found:
+        name = (rename or name).lower()
+        try:
+            with open(md, encoding="utf-8") as f:
+                text = f.read(MAX_SIZE * 4)
+        except (OSError, UnicodeDecodeError):
+            print(f"  refused  {name}: {md} isn't readable text")
+            continue
+        why = refusal_for(name, text, None, "its SKILL.md") or (tree_refusal(d) if d else None)
+        if why:
+            print(f"  refused  {name}: {why}")
+            continue
+        store(name, text, None, os.path.abspath(d or md), extra_from=d)
+        extras = sum(len(fs) for _, _, fs in os.walk(os.path.join(DIR, name))) - 2
+        print(f"  kept     {name}" + (f"  (+{extras} file{'s' if extras != 1 else ''} copied, none executable: read them before running any)" if extras > 0 else ""))
+        kept_n += 1
+    print(f"{kept_n} of {len(found)} kept")
+    return 0 if kept_n == len(found) else 1
+
+
+def cmd_list(args):
+    items = kept()
+    for m in items:
+        m["changed"] = tree_hash(os.path.join(DIR, m["name"])) != m.get("sha256")
+    if "--json" in args:
+        print(json.dumps(items, indent=1))
+        return 0
+    if not items:
+        print('no kept skills yet: sakura-skill keep NAME steps.md --about "when to reach for it"')
+        return 0
+    for m in items:
+        origin = "yours" if m.get("origin") == "written here" else f"from {m.get('origin')}"
+        print(f"  {m['name']:<20} {m.get('about', '')[:90]}  ({origin}{'; CHANGED since it was kept: sakura-skill check' if m['changed'] else ''})")
+    return 0
+
+
+def cmd_show(args):
+    if len(args) != 1:
+        sys.exit("usage: sakura-skill show NAME")
+    for base in (DIR, SHIPPED):
+        p = os.path.join(base, args[0], "SKILL.md")
+        if NAME.match(args[0]) and os.path.isfile(p):
+            sys.stdout.write(open(p, encoding="utf-8", errors="replace").read())
+            return 0
+    sys.exit(f"sakura-skill: no skill called {args[0]}")
+
+
+def cmd_check(args):
+    items = [m for m in kept() if not args or m["name"] in args]
+    if args and not items:
+        sys.exit(f"sakura-skill: no kept skill called {args[0]}")
+    bad = 0
+    for m in items:
+        d = os.path.join(DIR, m["name"])
+        try:
+            text = open(os.path.join(d, "SKILL.md"), encoding="utf-8").read()
+        except (OSError, UnicodeDecodeError):
+            text = ""
+        why = refusal_for(m["name"], text, None, "it") if text else "its SKILL.md is gone"
+        why = why or tree_refusal(d)
+        changed = tree_hash(d) != m.get("sha256")
+        if why:
+            bad += 1
+            print(f"  FAIL  {m['name']}: {why}. Remove it: sakura-skill remove {m['name']}")
+        elif changed:
+            bad += 1
+            print(f"  FAIL  {m['name']}: changed on disk since it was kept, and nothing vouched for the change. If the edit is yours, "
+                  f"keep it again: sakura-skill keep {m['name']} {os.path.join(d, 'SKILL.md')}")
+        else:
+            print(f"  ok    {m['name']}")
+    return 1 if bad else 0
+
+
+def cmd_remove(args):
+    if len(args) != 1 or not NAME.match(args[0]) or not os.path.isfile(os.path.join(DIR, args[0], ".kept.json")):
+        sys.exit("usage: sakura-skill remove NAME (one of: " + ", ".join(m["name"] for m in kept()) + ")")
+    shutil.rmtree(os.path.join(DIR, args[0]))
+    expose()
+    print(f"removed {args[0]}")
+    return 0
+
+
+def snapshot():
+    """One line per kept skill that changed behind its back, for the session start; '' when all is as kept."""
+    changed = [m["name"] for m in kept() if tree_hash(os.path.join(DIR, m["name"])) != m.get("sha256")]
+    return ("Kept skills changed on disk since they were kept, so don't follow them until `sakura-skill check` passes: " + ", ".join(changed)) if changed else ""
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    cmds = {"keep": cmd_keep, "import": cmd_import, "list": cmd_list, "show": cmd_show, "check": cmd_check, "remove": cmd_remove}
+    if argv[0] == "expose":  # what install.sh runs: the links, nothing else
+        expose()
+        return 0
+    if argv[0] not in cmds:
+        sys.exit("usage: sakura-skill keep|import|list|show|check|remove (sakura-skill --help)")
+    return cmds[argv[0]](argv[1:])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

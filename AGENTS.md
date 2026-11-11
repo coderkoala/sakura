@@ -69,6 +69,7 @@ CHECK
 
 - The check runs in an empty directory, calling the tool by name. It must fail without the tool and against a do-nothing stand-in, and exit 0 with the real one.
 - Kept tools are on PATH in later sessions and listed at the start of each one. A name that's already a command is refused.
+- Know-how rather than a script (the steps that solved something hard): `sakura-skill keep NAME steps.md --about "when to reach for it"`; it's a skill in later sessions. Someone else's skill comes in only through `sakura-skill import PATH`, which scans it.
 - `sakura-tool list`, `sakura-tool check [NAME]`, `sakura-tool remove NAME`. A worker can keep a tool only with `write: ~/.sakura/tools` in its job. Never put a secret in one.
 
 ## Eyes
