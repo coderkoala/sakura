@@ -27,7 +27,12 @@ run() { if [ $go = 1 ]; then "$@"; else say "  would: $*"; fi; }
 say "== 1/7 tree"
 dirty="$(git status --porcelain)"
 [ -z "$dirty" ] || { echo "release: the tree isn't clean:"; echo "$dirty" | head; exit 1; }
-git rev-parse -q --verify "refs/tags/v$ver" >/dev/null && { echo "release: v$ver already exists" >&2; exit 1; }
+tagged=0
+if git rev-parse -q --verify "refs/tags/v$ver" >/dev/null; then
+    # a tag pushed by hand but never published: carry on from the publish step; a published one is finished
+    gh release view "v$ver" >/dev/null 2>&1 && { echo "release: v$ver is already published" >&2; exit 1; }
+    tagged=1; say "  v$ver is already tagged and not yet published; publishing that tag"
+fi
 
 say "== 2/7 secrets scan (the repo is public)"
 if git log -p "v$(cat VERSION)..HEAD" 2>/dev/null | grep -niE "BEGIN (RSA|OPENSSH|EC) PRIVATE|password\s*=\s*['\"][^'\"]{6,}|api[_-]?key\s*[:=]\s*['\"][A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}" | grep -v "SECRET_SHAPES\|secrets scan\|docs/"; then
@@ -36,7 +41,7 @@ fi
 say "  clean"
 
 say "== 3/7 version and tag"
-run bash -c "echo $ver > VERSION && git add VERSION && { git diff --cached --quiet || git commit -qm 'release: $ver'; } && git tag v$ver"
+[ $tagged = 1 ] && say "  already tagged" || run bash -c "echo $ver > VERSION && git add VERSION && { git diff --cached --quiet || git commit -qm 'release: $ver'; } && git tag v$ver"
 
 say "== 4/7 push"
 run git push -q origin main --tags
