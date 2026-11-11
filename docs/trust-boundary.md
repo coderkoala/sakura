@@ -86,6 +86,15 @@ if the model is fooled. It runs on every shell command (`PreToolUse`) and on eve
   `data:` URI pointing at an untrusted host is blocked, because rendered somewhere it would leak with
   no click. The model is told to remove it and report the attempt.
 
+### 3. A reader with no hands — `quarantine`
+
+`quarantine SOURCE "price:number in_stock:bool title:text"` (or `--ask "question"`) is the dual-model split as a tool. The
+content goes to `consult`, a model with no tools and no session, and what that reader returns is not trusted either: it must be
+JSON with the fields that were asked for; each value is forced into its type (number, bool, date, word, one-of, a capped text,
+a short list) or dropped; links and addresses are cut from text; text that reads like an instruction is withheld and the
+caller is told to tell the user. The raw content is never printed, so the model holding the tools never reads it. A reader
+that is completely fooled can at worst return a wrong number. It is a choice the agent makes, not yet the default path.
+
 ### Every way out, accounted for
 
 A POST is one door. The rule is the same at each of the others, read on that door's own terms (`other_channels` in
