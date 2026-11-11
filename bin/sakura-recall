@@ -56,12 +56,23 @@ def read_session(path):
     return meta, msgs
 
 
+# A word, marks included: \\w alone stops at a Devanagari vowel sign, so भाडा would be read as भ and ड.
+WORD = r"[^\W_](?:[\w.-]|[\u0300-\u036f\u0900-\u0903\u093a-\u094f\u0951-\u0957\u0962\u0963\u0981-\u0983\u09bc-\u09d7\u0a01-\u0a03\u0a3c-\u0a51\u0e31-\u0e3a\u0e47-\u0e4e])*"
+
+
 def connect():
     os.makedirs(os.path.dirname(DB), exist_ok=True)
     db = sqlite3.connect(DB)
+    old = db.execute("select sql from sqlite_master where name='msgs'").fetchone()
+    if old and "categories" not in (old[0] or ""):
+        # An index from before marks were kept with their letters: a Nepali or Hindi word was cut at every vowel sign
+        # and couldn't be found. It's a cache of the transcripts, so it's simply read again.
+        db.execute("drop table msgs")
+        db.execute("drop table if exists files")
+        db.commit()
     db.execute("create table if not exists files(path text primary key, stamp text)")
     db.execute("create virtual table if not exists msgs using fts5(body, role unindexed, path unindexed, seq unindexed, "
-               "started unindexed, cwd unindexed, tokenize='porter unicode61')")
+               "started unindexed, cwd unindexed, tokenize=\"porter unicode61 categories 'L* N* Co Mn Mc'\")")
     return db
 
 
@@ -143,7 +154,7 @@ def refresh(db):
 
 
 def search(db, words, n, wanted=SOURCES):
-    terms = [f'"{w}"' for w in re.findall(r"\w[\w.-]*", words, re.U)]
+    terms = [f'"{w}"' for w in re.findall(WORD, words)]
     if not terms:
         return []
     skip = [p for p, kind in EXTRA.items() if KIND_SOURCE[kind] not in wanted]
@@ -193,7 +204,7 @@ def mail_account():
 def search_mail(words, n):
     """[(id, date, from, subject)] from the user's own mailbox: every word in the subject or the body."""
     ok, account = mail_account()
-    terms = re.findall(r"\w[\w.-]*", words, re.U)[:6]
+    terms = re.findall(WORD, words)[:6]
     if not ok or not terms:
         return []
     query = []

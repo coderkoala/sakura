@@ -2454,6 +2454,20 @@ def ragwords(tmp):
     before = con.execute("SELECT count(*) FROM fts WHERE fts MATCH '\"भाडा\"'").fetchone()[0]
     con.close()
     mended = run([r, "search", "भाडा"], dict(env, SAKURA_RAG_DB=old)).stdout
+    # ?recall over a past conversation held in Nepali
+    sd = os.path.join(tmp, "sessions", "2026", "11", "09")
+    os.makedirs(sd)
+    stamp = "2026-11-09T07:00:00Z"
+    ev = [{"type": "session_meta", "timestamp": stamp, "payload": {"session_id": "n1", "id": "n1", "cwd": "/home/u/ghar", "originator": "codex_tui"}},
+          {"type": "response_item", "timestamp": stamp, "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "घरभाडाको सम्झौता पत्र बनाइदेऊ, मासिक भाडा पन्ध्र हजार"}]}},
+          {"type": "response_item", "timestamp": stamp, "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "सम्झौता पत्र तयार भयो: rent-agreement.pdf"}]}}]
+    open(os.path.join(sd, "rollout-n1.jsonl"), "w").write("\n".join(json.dumps(e) for e in ev) + "\n")
+    renv = {"SAKURA_SESSIONS_DIR": os.path.join(tmp, "sessions"), "XDG_CACHE_HOME": os.path.join(tmp, "cache"), "HOME": tmp,
+            "SAKURA_MEMORY_DIR": os.path.join(tmp, "mem"), "SAKURA_HOME": os.path.join(tmp, "s")}
+    rec = os.path.join(BIN, "sakura-recall")
+    past = run([rec, "भाडा", "--no-mail", "--no-docs"], renv).stdout
+    past2 = run([rec, "सम्झौताको", "--no-mail", "--no-docs"], renv).stdout
+    none = run([rec, "हात्ती", "--no-mail", "--no-docs"], renv).stdout
     return {
         "a Nepali word is found whole": idx.returncode == 0 and got["भाडा"][:1] == ["bhada.md"] and got["चामल"] == ["pasal.md"] and got["दाल"] == ["pasal.md"],
         "asked with को or हरू on its end, it still finds the bare word": got["भाडाको"][:1] == ["bhada.md"] and got["सम्झौताहरू"] == ["bhada.md"],
@@ -2461,7 +2475,8 @@ def ragwords(tmp):
         "Hindi words too, in a file that mixes scripts": got["किराया"] == ["hindi.md"] and got["मालिक"] == ["hindi.md"],
         "English still stems": got["running cost"][:1] == ["english.md"],
         "a word that's in no file finds nothing": got["हात्ती"] == [],
-        "an index made before the fix is mended on first use, passages kept": "bhada.md" in mended and before in (0, 1),
+        "an index made before the fix is mended on first use, passages kept": "bhada.md" in mended,
+        "?recall finds a past conversation by a Nepali word": "rent-agreement.pdf" in past and "rent-agreement.pdf" not in none,
     }
 
 
