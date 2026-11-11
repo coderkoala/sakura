@@ -55,10 +55,26 @@ fleet                              # the new device shows up, with RAM/GPU
 Pass: install completes without hand-editing; `?` answers on the right model for that hardware; `fleet` sees it;
 `?on` works against it. Record the hardware and which model `sakura-model plan` chose.
 
-## 4. Reminders across devices (design pending)
+## 4. Reminders across devices
 
-`pa` fires on the machine where it was set. The roadmap item (fire once, not on all seven) needs a design decision:
-a shared schedule through the dotfiles sync with a claimed-by field, or a primary-device setting. Don't test; decide.
+Decided and built: the schedule is shared through whatever syncs `~/.sakura/pa`, a due item is claimed by one machine
+(`claims/ID@WHEN.HOST.json`), and the rest stand down when the claim reaches them. `evals/pa_devices.py` proves the rules
+with two processes and a copy step standing in for the sync. What it can't prove is your sync's real delay:
+
+```
+# on two machines that sync ~/.sakura/pa, both logged in
+pa devices                               # each lists the other within an hour of its first tick
+pa remind in 5 minutes two-machine test  # on the one you're at
+# five minutes later: it shows on this machine only
+pa list --fired                          # on the other, after a sync: "fired … on <this machine>"
+pa remind every 2 minutes repeat test    # leave it ten minutes, then: pa list --fired | grep -c "repeat test"
+pa linger                                # exit 0 on every machine that should fire while logged out
+```
+
+Pass: one notification per occurrence across both machines; `pa list --fired` names one host per occurrence. If the
+second machine fires too, time how long a file takes to cross (`touch ~/.sakura/pa/x` here, watch for it there) and set
+`pa set stagger MINUTES` a little above that; with the git-based dotfiles sync that is its timer interval. Record the
+sync used, its delay, and the stagger that gave zero duplicates over a day.
 
 ## Results
 

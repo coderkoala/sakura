@@ -2,7 +2,9 @@
 """pa — your personal assistant. Everything here works without the model, except `pa ask`.
 
 Reminders   pa remind tomorrow, 10am birthday wish       also: in 20 minutes, friday 3pm, every monday 9am, every 2 hours
-            pa list     pa cancel ID
+            pa remind every month on the 1st 9am pay rent     also: every weekday 9am, every 2 weeks friday 3pm,
+                                                              every year dec 26 9am, every month on the last day
+            pa list     pa cancel ID     pa list --fired      what fired this week, and on which machine
 Briefing    pa brief [ROLE...]    what needs you today     pa roles       pa standup     what you did since yesterday
 To-do       pa todo add "x due:2026-12-01"     pa todo     pa todo done ID
 Time        pa clock in PROJECT     pa clock out     pa clock report
@@ -14,6 +16,7 @@ Voice       pa voice learn [--n 40] [--folder NAME] [--model]    how you write m
             this machine) into a short note: the greeting and sign-off you use, your length, tone and language. No sentence of any
             mail, no address. `pa ask`, mail jobs, the default auto-reply and Sakura's drafts read it.     pa voice     pa voice forget
 Settings    pa set role developer     pa set repo ~/code/app     pa set place Kathmandu     pa unset repo ~/code/app     pa settings
+            pa set calendar ~/cal/work.ics     today's events in the brief, repeating ones (RRULE, EXDATE, time zones) included
 Anything    pa ask "..."     opens Sakura as your PA     pa ask --print "..."   the brief it would get, and stop
 
 Cron       pa cron "every day 02:00" -- rsync -a ~/notes/ backup:/notes/     a command on a schedule, exactly then, no model
@@ -23,9 +26,23 @@ Cron       pa cron "every day 02:00" -- rsync -a ~/notes/ backup:/notes/     a c
 Mail       pa mail urgent "boss@"   pa mail mute "newsletter"   who comes first in the brief, and who's hidden
 Offers     pa offer "commit last night's diff" -- git commit -am night   a push that ends in "reply: yes ID"; `pa listen` (NTFY_TOPIC)
            runs the offered command when you reply from your phone, and nothing else. `pa yes ID` / `pa no ID` here.
+Devices    pa devices        the machines sharing this schedule, the order they'd fire in, and this one's timer and lingering
+           pa set home HOST  that machine fires first whenever it's on (default: the one you used last, then the one that made the item)
+           pa set stagger 5  minutes each later machine waits for the first one's claim to arrive: a bit more than your sync takes (default 2)
+           pa pin ID HOST    an item only that machine may fire (`any` undoes it); a `pa cron` command is pinned to the machine that made it
+           pa linger         does the timer keep running while you're logged out?   pa linger on   turns that on (loginctl enable-linger)
 Stored in $SAKURA_PA_DIR, else ~/.sakura/pa. A timer checks once a minute, and anything missed while the machine was off fires when it's back.
+
+Across machines: sync that directory (dotfiles, Syncthing) and a due item fires on one of them. The first machine in turn writes
+claims/ID@WHEN.HOST.json and fires; each later one waits its stagger, sees the claim and stands down. A claim that never
+fired is taken over after 10 minutes. There is no lock over plain file sync, so a duplicate is possible when a claim takes
+longer than the stagger to arrive, when two machines disagree about which was used last, or when one was offline (it fires
+what it can't see was done). pa prefers that to a miss. Clocks more than a stagger apart upset the order, not the reminders.
+A calendar's BYYEARDAY, BYWEEKNO and RDATE are not expanded; a TZID that isn't an IANA zone is read as local time.
 """
+import calendar
 import fcntl
+import glob
 import hashlib
 import json
 import os
@@ -38,7 +55,7 @@ import sys
 import tempfile
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 DIR = os.path.expanduser(os.environ.get("SAKURA_PA_DIR") or "~/.sakura/pa")
@@ -49,7 +66,15 @@ DAY_SHORT = {d[:3]: d for d in DAYS}
 MONTHS = "jan feb mar apr may jun jul aug sep oct nov dec".split()
 # sent: the folder `pa voice learn` reads, when it isn't called Sent.
 LIST_SETTINGS = {"role": "roles", "repo": "repos", "calendar": "calendars", "host": "hosts", "topic": "topics", "product": "products", "drafts": "drafts"}
-SINGLE_SETTINGS = {"place", "account", "sent"}
+SINGLE_SETTINGS = {"place", "account", "sent", "home", "stagger"}
+STAGGER = 120            # seconds each later machine waits for an earlier one's claim to sync
+CLAIM_STALE = 600        # a claim that hasn't fired by then is anyone's
+CLAIM_KEEP = 7 * 86400
+CLAIM_TRIES = 3
+ALIVE = 36 * 3600        # a machine not seen for a day and a half isn't waited for
+PRESENCE_EVERY = 3600    # how often a machine says it's on: rarely, because every write is synced
+ACTIVE_EVERY = 1800
+WAKE_GAP = 600           # no tick for this long means the machine was off, and its copy may be behind
 AUTOREPLY_EVERY = 600
 ONCE_PER_SENDER_DAYS = 7
 MAX_REPLIES_PER_RUN = 10
@@ -58,6 +83,11 @@ MAX_REPLIES_PER_RUN = 10
 def now():
     forced = os.environ.get("SAKURA_PA_NOW")
     return datetime.fromisoformat(forced) if forced else datetime.now().replace(microsecond=0)
+
+
+def host():
+    """This machine's name. SAKURA_PA_HOST overrides it."""
+    return re.sub(r"[^A-Za-z0-9_-]", "-", os.environ.get("SAKURA_PA_HOST") or socket.gethostname().split(".")[0]) or "this"
 
 
 def path(name):
@@ -73,7 +103,7 @@ def load(name, default):
 
 
 def save(name, data):
-    os.makedirs(DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(path(name)), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=DIR, prefix=".tmp-")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=1)
@@ -113,6 +143,8 @@ def ensure_timer():
     if changed:
         subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
     subprocess.run(["systemctl", "--user", "enable", "--now", "sakura-pa.timer"], capture_output=True)
+    if changed and linger() is False:
+        print("pa: the timer stops when you log out of this machine. To keep reminders coming: pa linger on", file=sys.stderr)
 
 
 # ── Understanding when ────────────────────────────────────────────────────────
@@ -148,6 +180,29 @@ def _clock(text):
     return (h, mi) if h < 24 and mi < 60 else None
 
 
+def _day_from(text, base):
+    """A weekday, an ISO date or 'dec 26' counted from base, not from the real clock as `date -d` would. None for anything else."""
+    names = "|".join(DAYS + list(DAY_SHORT))
+    m = re.fullmatch(rf"(?:(next|this)\s+)?({names})", text)
+    if m:
+        off = (DAYS.index(DAY_SHORT.get(m.group(2), m.group(2))) - base.weekday()) % 7
+        return base + timedelta(days=7 if m.group(1) == "next" and not off else off)
+    mon = "|".join(MONTHS)
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", text)
+    a = re.fullmatch(rf"({mon})[a-z]*\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:\s+(\d{{4}}))?", text)
+    b = re.fullmatch(rf"(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({mon})[a-z]*\.?(?:\s+(\d{{4}}))?", text)
+    try:
+        if m:
+            return base.replace(year=int(m.group(1)), month=int(m.group(2)), day=int(m.group(3)))
+        if a:
+            return base.replace(year=int(a.group(3) or base.year), month=MONTHS.index(a.group(1)) + 1, day=int(a.group(2)))
+        if b:
+            return base.replace(year=int(b.group(3) or base.year), month=MONTHS.index(b.group(2)) + 1, day=int(b.group(1)))
+    except ValueError:
+        pass
+    return None
+
+
 def when_from(expr, base=None):
     """The moment an expression like 'tomorrow 10am' or 'in 20 minutes' means, or None. Never in the past."""
     base = base or now()
@@ -176,7 +231,7 @@ def when_from(expr, base=None):
         elif day_part == "tomorrow":
             day = base + timedelta(days=1)
         else:
-            day = _gnu_date(day_part)
+            day = _day_from(day_part, base) or _gnu_date(day_part)
             if not day:
                 return None
     else:
@@ -199,24 +254,77 @@ def when_from(expr, base=None):
 EVERY = re.compile(rf"^every\s+(?:(\d+)\s+)?(minute|min|hour|hr|day|weekday|week|{'|'.join(DAYS)}|{'|'.join(DAY_SHORT)})s?\b(?:\s*(?:at\s+)?({TIME_RE}))?[\s,:-]*(.*)$", re.I | re.S)
 
 
+_DAYNAMES = "|".join(DAYS + list(DAY_SHORT))
+_MON = "|".join(MONTHS)
+EVERY_WEEK = re.compile(rf"^every\s+(?:(\d+)\s+|(other)\s+)?weeks?\s+(?:on\s+)?({_DAYNAMES})s?\b(?:[\s,]*(?:at\s+)?({TIME_RE}))?[\s,:-]*(.*)$", re.I | re.S)
+EVERY_MONTH = re.compile(rf"^every\s+(?:(\d+)\s+)?months?\b(?:\s+on)?(?:\s+the)?(?:\s+(\d{{1,2}})(?:st|nd|rd|th)\b|\s+(last)(?:\s+day)?\b)?(?:[\s,]*(?:at\s+)?({TIME_RE}))?[\s,:-]*(.*)$", re.I | re.S)
+EVERY_YEAR = re.compile(rf"^every\s+(?:(\d+)\s+(?=years?\b))?(years?\b(?:\s+on)?(?:\s+the)?\s*)?(?:({_MON})[a-z]*\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b|(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({_MON})[a-z]*\b)?(?:[\s,]*(?:at\s+)?({TIME_RE}))?[\s,:-]*(.*)$", re.I | re.S)
+
+
 def next_run(rule, after):
     """The next moment a repeating rule falls, strictly after this one."""
     n, unit, clock = rule.get("n") or 1, rule["unit"], rule.get("clock")
     if unit in ("minute", "hour"):
         return after + timedelta(**{unit + "s": n})
     hour, minute = clock or (9, 0)
+    # The anchor is the first occurrence. It keeps "every 2 weeks" and "every 3 months" in step after a late firing.
+    anchor = date.fromisoformat(rule["anchor"]) if rule.get("anchor") else None
+    if unit in ("month", "year"):
+        month = rule.get("month") or (anchor or after).month
+        idx = after.year if unit == "year" else after.year * 12 + after.month - 1
+        first = (anchor.year if unit == "year" else anchor.year * 12 + anchor.month - 1) if anchor else idx
+        while True:
+            y, m = (idx, month) if unit == "year" else (idx // 12, idx % 12 + 1)
+            last = calendar.monthrange(y, m)[1]
+            want = rule.get("day") or (anchor or after).day
+            # The 31st in a short month, or 29 February in a plain year, is that month's last day: late beats never.
+            at = datetime(y, m, last if want == -1 else min(want, last), hour, minute)
+            if at > after and (idx - first) % n == 0:
+                return at
+            idx += 1
     at = after.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if unit == "day":
-        while at <= after:
-            at += timedelta(days=n)
+        while at <= after or (anchor and (at.date() - anchor).days % n):
+            at += timedelta(days=1 if anchor else n)
         return at
-    while at <= after or (unit == "weekday" and at.weekday() > 4) or (unit in DAYS and at.weekday() != DAYS.index(unit)) or (unit == "week" and at.weekday() != after.weekday()):
+    weekday = rule.get("weekday", after.weekday())
+    while (at <= after or (unit == "weekday" and at.weekday() > 4) or (unit in DAYS and at.weekday() != DAYS.index(unit))
+           or (unit == "week" and (at.weekday() != weekday or (anchor and (at.date() - anchor).days % (7 * n))))):
         at += timedelta(days=1)
     return at
 
 
+def first_run(rule, base):
+    """The first occurrence, and what the rule needs to remember from it: the day it falls on, and where its steps start."""
+    if rule["unit"] == "month" and not rule.get("day"):
+        rule["day"] = base.day
+    if rule["unit"] == "year" and not rule.get("day"):
+        rule["month"], rule["day"] = base.month, base.day
+    at = next_run(rule, base)
+    if rule["unit"] == "week" and "weekday" not in rule:
+        rule["weekday"] = at.weekday()
+    if (rule.get("n") or 1) > 1 and rule["unit"] in ("day", "week", "month", "year"):
+        rule["anchor"] = at.date().isoformat()
+    return at
+
+
 def parse_every(text):
-    m = EVERY.match(text.strip())
+    text = text.strip()
+    m = EVERY_WEEK.match(text)
+    if m:
+        day = DAY_SHORT.get(m.group(3).lower(), m.group(3).lower())
+        rule = {"n": 2 if m.group(2) else int(m.group(1) or 1), "unit": "week", "clock": _clock(m.group(4)) if m.group(4) else None, "weekday": DAYS.index(day)}
+        return (rule, m.group(5).strip()) if rule["n"] >= 1 else None
+    m = EVERY_MONTH.match(text)
+    if m:
+        rule = {"n": int(m.group(1) or 1), "unit": "month", "clock": _clock(m.group(4)) if m.group(4) else None, "day": -1 if m.group(3) else int(m.group(2) or 0)}
+        return (rule, m.group(5).strip()) if rule["n"] >= 1 and rule["day"] <= 31 else None
+    m = EVERY_YEAR.match(text)
+    if m and (m.group(2) or m.group(3) or m.group(6)):
+        month, day = (m.group(3) or m.group(6) or ""), int(m.group(4) or m.group(5) or 0)
+        rule = {"n": int(m.group(1) or 1), "unit": "year", "clock": _clock(m.group(7)) if m.group(7) else None, "month": MONTHS.index(month.lower()) + 1 if month else 0, "day": day}
+        return (rule, m.group(8).strip()) if rule["n"] >= 1 and day <= calendar.monthrange(2024, rule["month"] or 1)[1] else None
+    m = EVERY.match(text)
     if not m:
         return None
     unit = {"min": "minute", "hr": "hour"}.get(m.group(2).lower(), m.group(2).lower())
@@ -239,7 +347,7 @@ def parse_reminder(text, base=None):
         what = re.sub(r"^to\s+", "", what, flags=re.I)
         if not what:
             raise ValueError("what should I remind you about?")
-        return next_run(rule, base), rule, what
+        return first_run(rule, base), rule, what
     words = text.replace(",", " , ").split()
     plain = [w for w in words if w != ","]
     # "friday at 3pm: call the dentist". Only the punctuation ending the time, not a colon later in the message.
@@ -266,8 +374,238 @@ def describe(item):
     if rule:
         n = rule.get("n") or 1
         clock = f" at {rule['clock'][0]:02d}:{rule['clock'][1]:02d}" if rule.get("clock") else ""
-        return f"every {str(n) + ' ' if n > 1 else ''}{rule['unit']}{'s' if n > 1 else ''}{clock}, next {item['at'][:16].replace('T', ' ')}"
+        on = ""
+        if rule["unit"] == "week" and "weekday" in rule:
+            on = f" on {DAYS[rule['weekday']]}"
+        elif rule["unit"] == "month" and rule.get("day"):
+            on = " on the last day" if rule["day"] == -1 else f" on the {_nth(rule['day'])}"
+        elif rule["unit"] == "year" and rule.get("month"):
+            on = f" on {rule['day']} {MONTHS[rule['month'] - 1].capitalize()}"
+        return f"every {str(n) + ' ' if n > 1 else ''}{rule['unit']}{'s' if n > 1 else ''}{on}{clock}, next {item['at'][:16].replace('T', ' ')}"
     return item["at"][:16].replace("T", " ")
+
+
+def _nth(n):
+    return f"{n}{'th' if 10 < n % 100 < 14 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+# ── Several machines, one schedule ────────────────────────────────────────────
+# The directory is synced by something that knows nothing about pa, so nothing here is a lock. Each machine writes only
+# files with its own name in them (hosts/HOST.json, claims/ID@WHEN.HOST.json), which a file sync can't make conflict.
+# A machine takes its turn at an item: the first claims it and fires, the rest wait a stagger each and find the claim.
+
+def _when(text):
+    try:
+        return datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def stagger():
+    try:
+        return max(0, int(float(settings().get("stagger")) * 60))
+    except (TypeError, ValueError):
+        return STAGGER
+
+
+def presence():
+    """{host: {seen, active}} for every machine that has said it's on in the past month."""
+    out = {}
+    for f in glob.glob(path("hosts/*.json")):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                p = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        seen = _when(p.get("seen")) if isinstance(p, dict) else None
+        if seen and abs((now() - seen).total_seconds()) < 30 * 86400:
+            out[os.path.basename(f)[:-5]] = p
+    return out
+
+
+def touch_presence(at, active=False):
+    """Say this machine is on, and that someone is at it when they ran pa themselves. Written rarely: every write is synced."""
+    me = host()
+    p = load(f"hosts/{me}.json", {})
+    seen, was = _when(p.get("seen")), _when(p.get("active"))
+    stale = not seen or abs((at - seen).total_seconds()) >= PRESENCE_EVERY
+    moved = active and (not was or abs((at - was).total_seconds()) >= ACTIVE_EVERY)
+    if stale or moved:
+        p.update(host=me, seen=at.isoformat())
+        if moved:
+            p["active"] = at.isoformat()
+        save(f"hosts/{me}.json", p)
+
+
+def turn_order(creator, known, at):
+    """Who goes first: the home machine, else the one used last, else the one that made the item. Machines not seen lately aren't waited for."""
+    me, home = host(), settings().get("home")
+    alive = {h for h, p in known.items() if abs((at - _when(p["seen"])).total_seconds()) <= ALIVE} | {me}
+    used = lambda h: (_when(known.get(h, {}).get("active")) or datetime.min)
+    return sorted(alive, key=lambda h: (h != home, -(used(h) - datetime.min).total_seconds(), h != creator, h))
+
+
+def woke_at(at):
+    """When this machine last came back from being off. Kept outside the synced directory: it's about this machine only."""
+    base = os.environ.get("SAKURA_PA_LOCAL") or os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "sakura", "pa")
+    f = os.path.join(base, f"{hashlib.sha1(DIR.encode()).hexdigest()[:8]}-{host()}.json")
+    try:
+        with open(f, encoding="utf-8") as fh:
+            st = json.load(fh)
+    except (OSError, ValueError):
+        st = {}
+    last = _when(st.get("tick"))
+    if not last or abs((at - last).total_seconds()) > WAKE_GAP:
+        st["woke"] = at.isoformat()
+    st["tick"] = at.isoformat()
+    try:
+        os.makedirs(base, exist_ok=True)
+        with open(f + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump(st, fh)
+        os.replace(f + ".tmp", f)
+    except OSError:
+        pass
+    return _when(st.get("woke")) or at
+
+
+def claims(prune_at=None):
+    """({(id, when): [claim...]}, ids cancelled) from every machine's claim files. The tick drops those past keeping."""
+    book, gone = {}, set()
+    for f in glob.glob(path("claims/*.json")):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                c = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(c, dict) or not c.get("id") or not _when(c.get("claimed")):
+            continue
+        often = ((c.get("item") or {}).get("rule") or {}).get("unit") in ("minute", "hour")  # those would pile up
+        if prune_at and (prune_at - _when(c["claimed"])).total_seconds() > (86400 if often else CLAIM_KEEP):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+            continue
+        if c.get("cancelled"):
+            gone.add(c["id"])
+        elif c.get("occ"):
+            book.setdefault((c["id"], c["occ"]), []).append(c)
+    return book, gone
+
+
+def write_claim(c):
+    occ = _when(c.get("occ"))
+    stamp = occ.strftime("%Y%m%dT%H%M%S") if occ else "gone"
+    save(f"claims/{c['id']}@{stamp}.{c['host']}.json", c)
+
+
+def merge_conflicts(items, book, gone):
+    """A sync that couldn't merge schedule.json leaves the other machine's copy beside it (Syncthing: schedule.sync-conflict-….json).
+    Nothing in it is dropped unless a claim or a cancel says it's done. True if anything was merged."""
+    merged = False
+    for f in sorted(glob.glob(path("*.json"))):
+        name = os.path.basename(f).lower()
+        if not name.startswith("schedule") or "conflict" not in name:
+            continue
+        try:
+            with open(f, encoding="utf-8") as fh:
+                theirs = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        mine = {i["id"]: i for i in items}
+        for o in theirs if isinstance(theirs, list) else []:
+            if not isinstance(o, dict) or not o.get("id") or not _when(o.get("at")) or o["id"] in gone:
+                continue
+            if o["id"] in mine:
+                if o.get("rule") and o["at"] > mine[o["id"]]["at"]:
+                    mine[o["id"]]["at"] = o["at"]  # the copy that's further on has already fired the earlier ones
+            elif o.get("rule") or not any(c.get("fired") for c in book.get((o["id"], o["at"]), [])):
+                items.append(o)
+        os.remove(f)
+        merged = True
+    return merged
+
+
+def what_of(item):
+    return item.get("text") or item.get("prompt") or item.get("command") or ("mail to " + item.get("to", "") + ": " + item.get("subject", ""))
+
+
+def linger():
+    """Does this user's systemd keep running after logout? True, False, or None when it can't be told (no systemd here)."""
+    if not shutil.which("loginctl"):
+        return None
+    import getpass
+    user = os.environ.get("USER") or getpass.getuser()
+    _, out = sh("loginctl", "show-user", user, "--property=Linger")
+    m = re.search(r"^Linger=(yes|no)$", out, re.M)
+    if m:
+        return m.group(1) == "yes"
+    marks = os.environ.get("SAKURA_PA_LINGER_DIR") or "/var/lib/systemd/linger"  # a user with no session at all isn't known to logind
+    return os.path.exists(os.path.join(marks, user)) if os.path.isdir(marks) else None
+
+
+def cmd_linger(args):
+    """`pa linger`: exit 0 when the timer survives logout, 1 when it doesn't. `pa linger on|off` changes it."""
+    import getpass
+    user = os.environ.get("USER") or getpass.getuser()
+    if args[:1] in (["on"], ["off"]):
+        verb = "enable-linger" if args[0] == "on" else "disable-linger"
+        if not shutil.which("loginctl"):
+            sys.exit("pa: there's no loginctl here, so no systemd user timer to keep alive")
+        r = subprocess.run(["loginctl", verb, user], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        if r.returncode and shutil.which("sudo"):
+            r = subprocess.run(["sudo", "-A", "loginctl", verb, user], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        state = linger()
+        if state is not (args[0] == "on"):
+            sys.exit(f"pa: that didn't take ({(r.stderr or r.stdout).strip()[-160:] or 'loginctl said nothing'}). As root: loginctl {verb} {user}")
+        print("Lingering is on: the timer runs from boot, logged in or not." if state else "Lingering is off: the timer runs only while you're logged in.")
+        return
+    state = linger()
+    if state is None:
+        print("Can't tell: no systemd login manager answers here.")
+        sys.exit(2)
+    print("Lingering is on: reminders fire while you're logged out, and from boot before you log in." if state
+          else "Lingering is off: the timer stops when your last session ends, and whatever came due fires at your next login.\nFix: pa linger on")
+    sys.exit(0 if state else 1)
+
+
+def cmd_devices(_):
+    at, me, home = now(), host(), settings().get("home")
+    known = presence()
+    known.setdefault(me, {"seen": at.isoformat()})
+    order = turn_order(None, known, at)
+    step = stagger()
+    for h in sorted(known, key=lambda h: (order.index(h) if h in order else 99, h)):
+        p = known[h]
+        turn = f"fires {'first' if h == order[0] else 'after ' + str(order.index(h) * step // 60) + ' min'}" if h in order else "not seen lately, so not waited for"
+        marks = ", ".join(m for m in ("this machine" if h == me else "", "home" if h == home else "") if m)
+        print(f"{h:16s}  seen {p['seen'][:16].replace('T', ' ')}  used {(p.get('active') or 'never')[:16].replace('T', ' '):16s}  {turn}{'  (' + marks + ')' if marks else ''}")
+    if home and home not in known:
+        print(f"home is set to {home}, which has never checked in here. Its name on that machine: pa devices")
+    if len(known) == 1:
+        print("Only this machine uses this schedule. Sync the directory to another and it joins by itself.")
+    if not os.environ.get("SAKURA_PA_NO_TIMER") and shutil.which("systemctl"):
+        _, timer = sh("systemctl", "--user", "is-enabled", "sakura-pa.timer")
+        print(f"timer: {timer or 'not installed (it starts with the first reminder)'}")
+    state = linger()
+    print("logged out: " + ("can't tell (no systemd login manager here)" if state is None else "keeps firing (lingering is on)" if state
+                            else "STOPS firing; what came due fires at your next login. Fix: pa linger on"))
+
+
+def cmd_pin(args):
+    if len(args) != 2:
+        sys.exit("usage: pa pin ID HOST   (pa pin ID any to let any machine fire it; names are in pa devices)")
+    with Lock():
+        items = load("schedule.json", [])
+        item = next((i for i in items if i["id"] == args[0]), None)
+        if not item:
+            sys.exit(f"pa: no item {args[0]}")
+        if args[1] == "any":
+            item.pop("pin", None)
+        else:
+            item["pin"] = args[1]
+        save("schedule.json", items)
+    print(f"{args[0]} fires on any machine, once" if args[1] == "any" else f"{args[0]} fires only on {args[1]}")
 
 
 # ── Schedule ──────────────────────────────────────────────────────────────────
@@ -277,6 +615,9 @@ def add_item(item):
         items = load("schedule.json", [])
         item["id"] = hashlib.sha1(f"{time.time()}{item}".encode()).hexdigest()[:6]
         item["created"] = now().isoformat()
+        item["host"] = host()
+        if item["kind"] == "command":
+            item["pin"] = host()  # its paths and its directory are this machine's
         items.append(item)
         save("schedule.json", items)
     ensure_timer()
@@ -297,12 +638,25 @@ def cmd_remind(args):
     print(f"Reminder set for {describe(item)}: {what}  (id {item['id']})")
 
 
-def cmd_list(_):
+def cmd_list(args):
+    fired = sorted((c for cl in claims()[0].values() for c in cl if c.get("fired")), key=lambda c: c["fired"])
+    if "--fired" in args:
+        for c in fired:
+            item = c.get("item") or {}
+            print(f"{c['id']}  {item.get('kind', '?'):8s}  fired {c['fired'][:16].replace('T', ' ')} on {c['host']}  {what_of(item)}")
+        if not fired:
+            print("Nothing fired in the past week.")
+        return
+    last = {c["id"]: c for c in fired}
     items = sorted(load("schedule.json", []), key=lambda i: i["at"])
     if not items:
         print("Nothing scheduled.")
     for i in items:
-        print(f"{i['id']}  {i['kind']:8s}  {describe(i)}  {i.get('text') or i.get('prompt') or i.get('command') or ('mail to ' + i.get('to', '') + ': ' + i.get('subject', ''))}")
+        where = f"  (last fired on {last[i['id']]['host']}, {last[i['id']]['fired'][5:16].replace('T', ' ')})" if i["id"] in last else ""
+        only = f"  (only on {i['pin']})" if i.get("pin") else ""
+        print(f"{i['id']}  {i['kind']:8s}  {describe(i)}  {what_of(i)}{where}{only}")
+    if items and linger() is False:
+        print("\nThis machine stops checking when you log out; what came due fires at your next login. Fix: pa linger on")
 
 
 def cmd_cancel(args):
@@ -312,6 +666,8 @@ def cmd_cancel(args):
         items = load("schedule.json", [])
         keep = [i for i in items if i["id"] != args[0]]
         save("schedule.json", keep)
+        if len(keep) < len(items):  # so a copy of the schedule that still has it, on another machine, can't bring it back
+            write_claim({"id": args[0], "host": host(), "claimed": now().isoformat(), "cancelled": True})
     print("cancelled" if len(keep) < len(items) else f"no item {args[0]}")
     sys.exit(0 if len(keep) < len(items) else 1)
 
@@ -331,7 +687,7 @@ def split_schedule(args, what):
 def schedule_of(timing):
     every = parse_every(timing + " x")
     if every:
-        return next_run(every[0], now()), every[0]
+        return first_run(every[0], now()), every[0]
     at = when_from(timing)
     if not at:
         sys.exit(f"pa: I couldn't read that time: {timing}")
@@ -591,23 +947,78 @@ def run_watch(item):
 
 
 def cmd_tick(_):
-    at = now()
+    at, me = now(), host()
     with Lock():
+        touch_presence(at)
+        known = presence()
+        # Only with other machines about: a machine back from being off waits one stagger for the sync to catch up.
+        woke = woke_at(at) if len(known) > 1 else None
+        step = stagger()
         items = load("schedule.json", [])
+        book, gone = claims(prune_at=at)
+        changed = merge_conflicts(items, book, gone)
+        in_schedule = {(i["id"], i["at"]) for i in items}
         due, keep = [], []
         for item in items:
-            if datetime.fromisoformat(item["at"]) <= at:
-                due.append(dict(item))
+            if item["id"] in gone:
+                changed = True
+                continue
+            # Another machine fired this occurrence: take its word, and its next time, so every copy ends up the same.
+            while item and _when(item["at"]) <= at:
+                done = next((c for c in book.get((item["id"], item["at"]), []) if c.get("fired")), None)
+                if not done:
+                    break
+                changed = True
                 if item.get("rule"):
-                    item["at"] = next_run(item["rule"], at).isoformat()
-                    keep.append(item)
+                    later = done.get("next") if (done.get("next") or "") > item["at"] else None
+                    item["at"] = later or next_run(item["rule"], _when(item["at"])).isoformat()
+                else:
+                    item = None
+            if not item:
+                continue
+            occ = _when(item["at"])
+            keep.append(item)
+            if occ > at or item.get("pin") not in (None, me):
+                continue
+            taken = book.get((item["id"], item["at"]), [])
+            if any((at - _when(c["claimed"])).total_seconds() < CLAIM_STALE for c in taken):
+                continue  # someone is on it; if they never finish, it's anyone's after CLAIM_STALE
+            opens = woke + timedelta(seconds=step) if woke and occ < woke else occ
+            if at < opens + timedelta(seconds=turn_order(item.get("host"), known, at).index(me) * step):
+                continue
+            claim = {"id": item["id"], "occ": item["at"], "host": me, "claimed": at.isoformat(), "fired": None, "item": dict(item)}
+            if item.get("rule"):
+                item["at"] = claim["next"] = next_run(item["rule"], at).isoformat()
             else:
-                keep.append(item)
-        if due:
+                keep.pop()
+            write_claim(claim)
+            due.append(claim)
+            changed = True
+        # A claim that never fired, for an item the claimer already moved on from: fire it from the claim's own copy.
+        for key, taken in book.items():
+            newest = max(_when(c["claimed"]) for c in taken)
+            snapshot = next((c["item"] for c in taken if isinstance(c.get("item"), dict)), None)
+            mine = next((c for c in taken if c["host"] == me), {})
+            if (key in in_schedule or key[0] in gone or not snapshot or any(c.get("fired") for c in taken)
+                    or snapshot.get("pin") not in (None, me) or mine.get("tries", 1 if mine else 0) >= CLAIM_TRIES):
+                continue
+            rank = turn_order(snapshot.get("host"), known, at).index(me)
+            if not timedelta(seconds=CLAIM_STALE + rank * step) <= at - newest < timedelta(days=1):
+                continue
+            claim = {"id": key[0], "occ": key[1], "host": me, "claimed": at.isoformat(), "fired": None, "item": snapshot, "tries": mine.get("tries", 1 if mine else 0) + 1}
+            if mine.get("next"):
+                claim["next"] = mine["next"]
+            write_claim(claim)
+            due.append(claim)
+        if changed:
             save("schedule.json", keep)
-    for item in due:
+    for claim in due:
+        item = claim["item"]
         try:
+            if item["kind"] in ("command", "job"):  # started is as good as done: a command is never run twice
+                write_claim(dict(claim, fired=at.isoformat()))
             fire(item, at)
+            write_claim(dict(claim, fired=at.isoformat()))
         except Exception as e:
             notify("PA problem", f"{item.get('text') or item.get('prompt') or item.get('command')}: {e}")
     try:
@@ -758,6 +1169,24 @@ def send_reply(sender, subject, message_id, body, me):
         raise RuntimeError((r.stderr + r.stdout).strip()[-200:] or "himalaya couldn't send it")
 
 
+def autoreply_turn(at, since):
+    """With the schedule shared, one machine answers the mail in each ten minutes: the first in turn, unless another already has."""
+    me, known = host(), presence()
+    if len(known) < 2:
+        save(f"autoreply-by/{me}.json", {"at": at.isoformat()})  # so a machine that joins later knows when this one last looked
+        return True
+    runs = [_when(load(os.path.join("autoreply-by", os.path.basename(f)), {}).get("at")) for f in glob.glob(path("autoreply-by/*.json"))]
+    latest = max((r for r in runs if r), default=None)
+    if latest and abs((at - latest).total_seconds()) < AUTOREPLY_EVERY - 30:
+        return False  # another machine has just looked
+    due = latest + timedelta(seconds=AUTOREPLY_EVERY) if latest else _when(since) or at
+    wait = min(turn_order(None, known, at).index(me) * stagger(), AUTOREPLY_EVERY - 120)  # capped, or a later machine would never answer
+    if at < due + timedelta(seconds=wait):
+        return False
+    save(f"autoreply-by/{me}.json", {"at": at.isoformat()})
+    return True
+
+
 def autoreply_run(force=False):
     state = load("autoreply.json", {})
     if not state.get("on"):
@@ -769,6 +1198,8 @@ def autoreply_run(force=False):
         notify("Auto-reply", "turned off, as scheduled")
         return
     if not force and state.get("last") and (at - datetime.fromisoformat(state["last"])).total_seconds() < AUTOREPLY_EVERY - 30:
+        return
+    if not force and not autoreply_turn(at, state.get("since")):
         return
     state["last"] = at.isoformat()
     me = who_am_i()
@@ -1180,6 +1611,8 @@ def cmd_set(args, add=True):
     key, value = args[0], " ".join(args[1:])
     s = settings()
     if key in SINGLE_SETTINGS:
+        if key == "stagger" and add and not re.fullmatch(r"\d+(?:\.\d+)?", value):
+            sys.exit("pa: stagger is minutes, such as: pa set stagger 5")
         s[key] = value if add else None
     elif key in LIST_SETTINGS:
         if key in ("repo", "calendar", "drafts"):
@@ -1275,19 +1708,151 @@ def cmd_mail(args):
         sys.exit('usage: pa mail urgent|mute "text" | pa mail rules | pa mail forget "text"')
 
 
+ICS_DAYS = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
+
+
+def _ics_time(params, value):
+    """An .ics DATE or DATE-TIME as (wall-clock datetime, is all day, its zone or None for the reader's own clock)."""
+    m = re.fullmatch(r"(\d{8})(?:T(\d{6})(Z)?)?", value.strip())
+    if not m:
+        return None
+    if not m.group(2):
+        return datetime.strptime(m.group(1), "%Y%m%d"), True, None
+    tz = timezone.utc if m.group(3) else None
+    if not tz and params.get("TZID"):
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(params["TZID"].strip('"'))
+        except Exception:
+            tz = None  # a zone this machine doesn't know (Outlook's own names): read as local time
+    return datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S"), False, tz
+
+
+def _local(t, tz):
+    return t.replace(tzinfo=tz).astimezone().replace(tzinfo=None) if tz else t
+
+
+def _recur(start, r, stop):
+    """Every wall-clock start an RRULE gives from the first one, in order, until one passes `stop`. COUNT and UNTIL are the caller's."""
+    ints = lambda key: [int(x) for x in re.findall(r"-?\d+", r.get(key, ""))]
+    freq, step = r.get("FREQ", ""), max(1, int(r.get("INTERVAL") or 1))
+    byday = [(int(n or 0), ICS_DAYS.index(d)) for n, d in re.findall(r"([+-]?\d+)?(MO|TU|WE|TH|FR|SA|SU)", r.get("BYDAY", ""))]
+    bymd, bymonth, setpos = ints("BYMONTHDAY"), ints("BYMONTH"), ints("BYSETPOS")
+    wkst = ICS_DAYS.index(r["WKST"]) if r.get("WKST") in ICS_DAYS else 0
+    first = start.date()
+
+    def nth(days, n, wd):
+        those = [d for d in days if d.weekday() == wd]
+        return those if not n else [those[n - 1 if n > 0 else n]] if abs(n) <= len(those) else []
+
+    def in_month(y, m):
+        last = calendar.monthrange(y, m)[1]
+        days = [date(y, m, d) for d in range(1, last + 1)]
+        if bymd:
+            want = {d if d > 0 else last + 1 + d for d in bymd}
+            days = [d for d in days if d.day in want]
+        if byday:
+            month = [date(y, m, d) for d in range(1, last + 1)]
+            hit = {d for n, wd in byday for d in nth(month, n, wd)}
+            days = [d for d in days if d in hit]
+        return days if bymd or byday else [d for d in days if d.day == first.day]
+
+    for k in range(0, 200000, step):
+        if freq == "DAILY":
+            d = first + timedelta(days=k)
+            opens = d
+            last = calendar.monthrange(d.year, d.month)[1]
+            days = [d] if ((not byday or d.weekday() in {w for _, w in byday}) and (not bymonth or d.month in bymonth)
+                           and (not bymd or d.day in {x if x > 0 else last + 1 + x for x in bymd})) else []
+        elif freq == "WEEKLY":
+            opens = first - timedelta(days=(first.weekday() - wkst) % 7) + timedelta(weeks=k)
+            wds = {w for _, w in byday} or {first.weekday()}
+            days = [d for d in (opens + timedelta(days=i) for i in range(7)) if d.weekday() in wds and (not bymonth or d.month in bymonth)]
+        elif freq == "MONTHLY":
+            y, m = divmod(first.year * 12 + first.month - 1 + k, 12)
+            if y > 9998:
+                return
+            opens = date(y, m + 1, 1)
+            days = in_month(y, m + 1) if not bymonth or m + 1 in bymonth else []
+        elif freq == "YEARLY":
+            y = first.year + k
+            if y > 9998:
+                return
+            opens = date(y, 1, 1)
+            if byday and not bymonth:
+                year = [opens + timedelta(days=i) for i in range(366 if calendar.isleap(y) else 365)]
+                days = sorted({d for n, wd in byday for d in nth(year, n, wd)})
+            else:
+                days = [d for m in sorted(bymonth or [first.month]) for d in in_month(y, m)]
+        else:
+            return
+        if opens > stop.date():
+            return
+        if setpos and freq in ("MONTHLY", "YEARLY"):
+            days = sorted({days[p - 1 if p > 0 else p] for p in setpos if p and abs(p) <= len(days)})
+        for d in days:
+            t = datetime.combine(d, start.time())
+            if t >= start:
+                yield t
+
+
 def _ics_events(path_, day):
-    """Today's events from an .ics file. Single events only: repeating ones need a real calendar library."""
+    """The day's events from an .ics file, repeating ones expanded (RRULE, EXDATE, a moved or cancelled instance), in this machine's time."""
     try:
         text = re.sub(r"\r?\n[ \t]", "", open(path_, encoding="utf-8", errors="replace").read())
     except OSError:
         return []
-    out = []
-    for ev in re.findall(r"BEGIN:VEVENT(.*?)END:VEVENT", text, re.S):
-        start = re.search(r"^DTSTART[^:\n]*:(\d{8})(?:T(\d{4}))?", ev, re.M)
-        title = re.search(r"^SUMMARY[^:\n]*:(.*)$", ev, re.M)
-        if start and start.group(1) == day.strftime("%Y%m%d"):
-            t = f"{start.group(2)[:2]}:{start.group(2)[2:]} " if start.group(2) else ""
-            out.append(f"{t}{title.group(1).strip() if title else '(no title)'}")
+    text = re.sub(r"BEGIN:VALARM.*?END:VALARM", "", text, flags=re.S)
+    events = []
+    for block in re.findall(r"BEGIN:VEVENT(.*?)END:VEVENT", text, re.S):
+        props = {}
+        for name, params, value in re.findall(r'^([A-Za-z-]+)((?:;[^:"\n]*(?:"[^"\n]*"[^:"\n]*)*)?):(.*)$', block, re.M):
+            props.setdefault(name.upper(), []).append(({k.upper(): v for k, _, v in (p.partition("=") for p in params.split(";") if p)}, value.strip()))
+        events.append(props)
+    one = lambda ev, name: ev.get(name, [({}, "")])[0]
+    # An instance that was moved or cancelled is its own VEVENT with a RECURRENCE-ID: the series leaves that one out.
+    moved = set()
+    for ev in events:
+        rid = _ics_time(*one(ev, "RECURRENCE-ID")) if "RECURRENCE-ID" in ev else None
+        if rid:
+            moved.add((one(ev, "UID")[1], _local(rid[0], rid[2])))
+    today, out = day.date(), []
+    stop = datetime.combine(today + timedelta(days=2), datetime.min.time())  # two days on, so a zone far from here can't hide today
+    for ev in events:
+        begin = _ics_time(*one(ev, "DTSTART"))
+        if not begin or one(ev, "STATUS")[1].upper() == "CANCELLED":
+            continue
+        start, all_day, tz = begin
+        end = _ics_time(*one(ev, "DTEND"))
+        span = max(1, (end[0].date() - start.date()).days) if all_day and end else 1
+        title = re.sub(r"\\([,;\\])", r"\1", one(ev, "SUMMARY")[1].replace("\\n", " ").replace("\\N", " ")).strip() or "(no title)"
+        rule = dict(p.split("=", 1) for p in one(ev, "RRULE")[1].upper().split(";") if "=" in p)
+        if rule and "RECURRENCE-ID" not in ev:
+            skip = set()
+            for params, value in ev.get("EXDATE", []):
+                for v in value.split(","):
+                    x = _ics_time(params, v)
+                    if x:
+                        skip.add(datetime.combine(x[0].date(), datetime.min.time()) if all_day else _local(x[0], x[2]))
+            until, count = _ics_time({}, rule.get("UNTIL", "")), int(rule.get("COUNT") or 0)
+            starts = []
+            for n, t in enumerate(_recur(start, rule, stop)):
+                if count and n >= count or t > stop:
+                    break
+                if until:
+                    if until[1] and t.date() > until[0].date():
+                        break
+                    if not until[1] and (t.replace(tzinfo=tz).astimezone(timezone.utc).replace(tzinfo=None) if until[2] and tz else t) > until[0]:
+                        break
+                if _local(t, tz) not in skip and (one(ev, "UID")[1], _local(t, tz)) not in moved:
+                    starts.append(t)
+        else:
+            starts = [start]
+        for t in starts:
+            if all_day and t.date() <= today < t.date() + timedelta(days=span):
+                out.append(title)
+            elif not all_day and _local(t, tz).date() == today:
+                out.append(f"{_local(t, tz):%H:%M} {title}")
     return sorted(out)
 
 
@@ -1637,7 +2202,7 @@ PREAMBLE = """You're acting as the user's personal assistant. `pa` does most of 
 `pa --help` has the rest. Do it, and say in a line or two what you set up and how to undo it.
 
 The request: """
-DIRECT = {"voice", "remind", "list", "cancel", "brief", "roles", "standup", "todo", "clock", "log", "watch", "job", "autoreply", "settings", "mail", "offer", "yes", "no", "cron", "mail-at", "test"}
+DIRECT = {"voice", "remind", "list", "cancel", "brief", "roles", "standup", "todo", "clock", "log", "watch", "job", "autoreply", "settings", "mail", "offer", "yes", "no", "cron", "mail-at", "test", "devices", "linger", "pin"}
 
 
 def cmd_ask(args):
@@ -1679,9 +2244,14 @@ def main(argv):
     table = {"remind": cmd_remind, "list": cmd_list, "cancel": cmd_cancel, "job": cmd_job, "watch": cmd_watch, "tick": cmd_tick, "_job": cmd_job_run, "pending": cmd_pending,
              "autoreply": cmd_autoreply, "todo": cmd_todo, "clock": cmd_clock, "log": cmd_log, "brief": cmd_brief, "roles": cmd_roles, "standup": cmd_standup, "ask": cmd_ask,
              "voice": cmd_voice, "set": cmd_set, "unset": lambda a: cmd_set(a, add=False), "offer": cmd_offer, "yes": cmd_yes, "mail": cmd_mail, "cron": cmd_cron, "mail-at": cmd_mail_at, "test": cmd_test, "no": lambda a: cmd_yes(a, accept=False),
-             "listen": lambda a: cmd_listen_install(a) if "--install" in a else cmd_listen(a)}
+             "listen": lambda a: cmd_listen_install(a) if "--install" in a else cmd_listen(a), "devices": cmd_devices, "linger": cmd_linger, "pin": cmd_pin}
     if cmd not in table:
         sys.exit(f"pa: no command {cmd}. See: pa --help. For anything else: pa ask \"...\"")
+    if cmd not in ("tick", "_job", "listen") and os.path.isdir(DIR):  # someone is at this machine: it goes first for a while
+        try:
+            touch_presence(now(), active=True)
+        except OSError:
+            pass
     table[cmd](args)
 
 

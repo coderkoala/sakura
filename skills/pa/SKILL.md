@@ -13,7 +13,10 @@ Do what's asked, then say in a line or two what you set up and how to undo it (`
 - "What's on my plate?": `pa brief`.
 - Deadlines: `pa todo add "thesis draft due:2026-12-01"`. They appear in the brief as they get close.
 - News on a topic: `pa set topic "Nepal budget"`. Weather: `pa set place Kathmandu`.
-- A calendar: `pa set calendar ~/cal/work.ics`. Single events only: it doesn't expand repeating ones yet.
+- Repeating: `pa remind every month on the 1st 9am pay rent`, `every weekday 9am`, `every 2 weeks friday 3pm`, `every year dec 26 9am`, `every month on the last day`.
+- A calendar: `pa set calendar ~/cal/work.ics`. Repeating events are expanded (weekly meetings, EXDATE, time zones), so today's brief has them.
+- Several machines sharing `~/.sakura/pa` (dotfiles, Syncthing): a reminder fires on one, the one used last. `pa devices` shows the order, `pa set home HOST` fixes it, `pa list --fired` says where each fired. If duplicates appear, the sync is slower than the stagger: `pa set stagger 5` (minutes).
+- "My reminders stop when I log out" or "nothing fired overnight": `pa linger` checks, `pa linger on` fixes it (it may need the user's password once). What came due while off fires at the next login either way.
 - Tell me when something changes: `pa watch every day 8am: fx USD NPR`, with any `live` command.
 - A job for later: `pa job every friday 5pm: summarise what changed in ~/notes this week`. It runs as a sandboxed worker with the network on, writing only to its own directory (not your files), so it can't send mail or push, and the result arrives as a notification.
 
