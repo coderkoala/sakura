@@ -164,7 +164,7 @@ Eighty-odd commands are only a feature if nobody has to remember them. Built the
 2. **`vault`** (`?otp`): passwords and 2FA from `pass`, clipboard not screen, Bitwarden import with TOTP seeds; the agent never asks for or prints a secret.
 3. **The doctor on the morning page** and at the end of `install.sh`.
 4. **`?docs`** over the docs packs and your documents.
-   Then, the same night, with checks: **Tab completion for every command** (`sakura-complete`, generated from the manuals, so it can't drift), **`vault import keepassxc|1password`**, and **`?last`** (what was I doing: the last turn's directory, ask and answer, from the record; it cd's there). Still open: a `?` with nothing typed that offers the three most likely things from the time of day and what's open.
+   Then, the same night, with checks: **Tab completion for every command** (`sakura-complete`, generated from the manuals, so it can't drift), **`vault import keepassxc|1password`**, and **`?last`** (what was I doing: the last turn's directory, ask and answer, from the record; it cd's there). Then (2026-11-11), with 18 checks: **a `?` with nothing typed offers the three most likely things** (`sakura-suggest`, no model): the command that just failed in this shell, a merge stopped on conflicts, an offer waiting for a yes, last night's report, the guardian's findings, uncommitted work, commits without a PR, a due to-do, what you last asked here, the tour of a repository it has never seen, the morning page, the day's recap. 1-3 does one, Enter opens Sakura as before; `sakura-suggest off` turns it off.
 
 ## Your models (2026-11-09, from the user: "let the user select what models they want, via whatmodel.sh as well")
 

@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+"""sakura-suggest — the three most likely things to do right now, from what's open and the time of day. No model.
+
+  sakura-suggest            up to three lines: a number, the key, and why it's offered (nothing when nothing stands out)
+  sakura-suggest --run N    do the Nth of the list just shown
+  sakura-suggest --json     the same list for other tools: key, why, the command it runs
+  sakura-suggest off | on   stop or resume showing them at a bare `?` (SAKURA_NO_SUGGEST=1 does it for one shell)
+  --shell PID               whose failed command to look for (the `?` key passes the shell's own PID)
+A bare `?` shows these first: 1, 2 or 3 does one, Enter opens Sakura as before. What it looks at, most pressing first:
+a command that failed in this shell in the last ten minutes (?fix), a merge or rebase stopped on conflicts, an offer
+waiting for a yes (pa yes ID), last night's report (?tonight report), what the guardian found today (?guard), work
+that isn't committed (?review), commits that aren't on the base branch (?pr), a to-do that's due (pa brief), the last
+thing you asked Sakura in this directory (?last --here), a repository Sakura has never been asked about (?tour), the
+morning page before eleven (?morning) and the day's record after five (?recap). Every line comes from a file or from
+git; nothing is guessed, and nothing runs until you press its number.
+"""
+import datetime as dt
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser(os.environ.get("SAKURA_HOME") or "~/.sakura")
+PA = os.path.expanduser(os.environ.get("SAKURA_PA_DIR") or os.path.join(HOME, "pa"))
+TONIGHT = os.path.expanduser(os.environ.get("SAKURA_TONIGHT_DIR") or os.path.join(HOME, "tonight"))
+GUARDIAN = os.path.expanduser(os.environ.get("SAKURA_GUARDIAN_DIR") or os.path.join(HOME, "guardian"))
+SESSIONS = os.path.join(HOME, "sessions")
+OFF = os.path.join(HOME, "suggest-off")
+FIX_FRESH = 600
+HERE_DAYS = 7
+
+
+def now():
+    forced = os.environ.get("SAKURA_SUGGEST_NOW")
+    return dt.datetime.fromisoformat(forced) if forced else dt.datetime.now()
+
+
+def run_dir():
+    return os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", f"sakura-suggest-{os.getuid()}")
+
+
+def load(path, default):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def git(*args, cwd=None):
+    try:
+        r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def ago(seconds):
+    seconds = max(0, int(seconds))
+    if seconds < 90:
+        return f"{seconds} s ago"
+    if seconds < 5400:
+        return f"{seconds // 60} min ago"
+    if seconds < 172800:
+        return f"{seconds // 3600} h ago"
+    return f"{seconds // 86400} days ago"
+
+
+def clip(text, n=60):
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f]+", " ", text or "").strip()
+    return text if len(text) <= n else text[: n - 1].rstrip() + "…"
+
+
+def plural(n, word):
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def failed_command(shell_pid, t):
+    """The shell's own note of its last failure (shell/sakura.bash writes it): status, when, where, the command."""
+    if not shell_pid:
+        return None
+    path = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", f"sakura-fix-{os.getuid()}", str(shell_pid))
+    try:
+        with open(path, errors="replace") as f:
+            lines = f.read().split("\n")
+        status, when = int(lines[0]), int(lines[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    cmd = " ".join(lines[3:]).strip()
+    age = t.timestamp() - when
+    if not cmd or age > FIX_FRESH or age < -60:
+        return None
+    return {"key": "?fix", "why": f"the command that failed {ago(age)}: {clip(cmd, 48)} (exit {status})",
+            "run": ["sakura-fix", "--shell", str(shell_pid)], "score": 100}
+
+
+def conflicts(top):
+    if not top:
+        return None
+    gitdir = git("rev-parse", "--absolute-git-dir", cwd=top)
+    if not gitdir:
+        return None
+    what = next((name for marker, name in (("MERGE_HEAD", "merge"), ("rebase-merge", "rebase"), ("rebase-apply", "rebase"),
+                                           ("CHERRY_PICK_HEAD", "cherry-pick")) if os.path.exists(os.path.join(gitdir, marker))), None)
+    if not what:
+        return None
+    files = [f for f in (git("diff", "--name-only", "--diff-filter=U", cwd=top) or "").splitlines() if f]
+    if not files:
+        return None
+    return {"key": "?", "why": f"the {what} here stopped on {plural(len(files), 'conflicted file')}: {clip(', '.join(files), 40)}",
+            "run": ["sakura-launch", f"The {what} in this repository stopped on conflicts in: {', '.join(files)}. Read both sides of "
+                    "each conflict, resolve them, show me what you chose and why, and stop before committing."], "score": 95}
+
+
+def offer(t):
+    items = [o for o in load(os.path.join(PA, "offers.json"), []) if isinstance(o, dict) and not o.get("done")
+             and o.get("expires", 0) > t.timestamp() and o.get("id")]
+    if not items:
+        return None
+    o = items[-1]
+    more = f" (and {len(items) - 1} more)" if len(items) > 1 else ""
+    return {"key": f"pa yes {o['id']}", "why": f"waiting for your yes: {clip(o.get('text', ''), 52)}{more}",
+            "run": ["pa", "yes", str(o["id"])], "score": 90}
+
+
+def night_report(t, seen):
+    try:
+        names = sorted(n for n in os.listdir(os.path.join(TONIGHT, "reports")) if re.fullmatch(r"\d{4}-\d\d-\d\d\.md", n))
+    except OSError:
+        return None
+    if not names or names[-1] == seen.get("report"):
+        return None
+    day = names[-1][:-3]
+    if day not in (f"{t:%F}", f"{t - dt.timedelta(days=1):%F}"):
+        return None
+    try:
+        with open(os.path.join(TONIGHT, "reports", names[-1]), encoding="utf-8", errors="replace") as f:
+            lines = [ln.strip() for ln in f.read().splitlines() if ln.strip()]
+    except OSError:
+        lines = []
+    summary = next((ln for ln in lines if re.search(r"\d+ of \d+", ln)), "")
+    return {"key": "?tonight report", "why": "the night shift's report" + (f": {clip(summary, 48)}" if summary else f" for {day}"),
+            "run": ["sakura-tonight", "report"], "score": 85, "seen": {"report": names[-1]}}
+
+
+def guardian(t):
+    seen = load(os.path.join(GUARDIAN, "seen.json"), {})
+    n = sum(1 for v in seen.values() if isinstance(v, (int, float)) and 0 <= t.timestamp() - v < 86400) if isinstance(seen, dict) else 0
+    if not n:
+        return None
+    return {"key": "?guard", "why": f"the guardian found {plural(n, 'thing')} today that will hurt if left",
+            "run": ["sakura-guardian"], "score": 80}
+
+
+def uncommitted(top):
+    if not top:
+        return None
+    status = git("status", "--porcelain", "--untracked-files=no", cwd=top)
+    files = [ln.split(None, 1)[1] for ln in (status or "").splitlines() if len(ln.split(None, 1)) == 2]
+    if not files:
+        return None
+    return {"key": "?review", "why": f"{plural(len(files), 'file')} changed here and not committed: {clip(', '.join(files), 40)}",
+            "run": ["sakura-review"], "score": 60}
+
+
+def unmerged_commits(top):
+    """Commits on this branch that the base doesn't have, when the tree is clean (a dirty one gets ?review first)."""
+    if not top:
+        return None
+    branch = git("symbolic-ref", "--quiet", "--short", "HEAD", cwd=top)
+    if not branch:
+        return None
+    head = git("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD", cwd=top)
+    bases = [head] if head else []
+    bases += [b for b in ("origin/main", "origin/master", "main", "master") if b not in bases]
+    base = next((b for b in bases if git("rev-parse", "--verify", "--quiet", b, cwd=top)), None)
+    if not base or base.split("/")[-1] == branch:
+        return None
+    count = git("rev-list", "--count", f"{base}..HEAD", cwd=top)
+    if not count or count == "0":
+        return None
+    return {"key": "?pr", "why": f"{plural(int(count), 'commit')} on {clip(branch, 30)} that {base.split('/')[-1]} doesn't have",
+            "run": ["sakura-pr"], "score": 55}
+
+
+def todo_due(t):
+    due = []
+    for item in load(os.path.join(PA, "todo.json"), []):
+        text = item.get("text", "") if isinstance(item, dict) else ""
+        m = re.search(r"\bdue:(\d{4}-\d\d-\d\d)\b", text)
+        if m and not item.get("done") and m.group(1) <= f"{t:%F}":
+            due.append(re.sub(r"\s*\bdue:\S+", "", text).strip())
+    if not due:
+        return None
+    more = f" (and {len(due) - 1} more)" if len(due) > 1 else ""
+    return {"key": "pa brief", "why": f"due: {clip(due[0], 50)}{more}", "run": ["pa", "brief"], "score": 65}
+
+
+def asked_here(cwd, t):
+    """(the last thing asked in this directory or under it, seconds since), from the transcripts ?recap reads."""
+    best = None
+    for i in range(HERE_DAYS + 1):
+        day = t.date() - dt.timedelta(days=i)
+        for path in sorted(glob.glob(os.path.join(SESSIONS, f"{day:%Y}", f"{day:%m}", f"{day:%d}", "*.jsonl")), reverse=True):
+            where, asked, stamp = None, "", None
+            try:
+                with open(path, errors="replace") as f:
+                    for line in f:
+                        if '"turn_context"' not in line and '"UserMessage"' not in line and '"session_meta"' not in line:
+                            continue
+                        try:
+                            d = json.loads(line)
+                        except ValueError:
+                            continue
+                        p = d.get("payload") or {}
+                        if d.get("type") in ("session_meta", "turn_context") and p.get("cwd"):
+                            where, stamp = p["cwd"], d.get("timestamp") or stamp
+                        elif (p.get("item") or {}).get("type") == "UserMessage":
+                            asked = " ".join(c.get("text", "") for c in p["item"].get("content", []) if isinstance(c, dict)) or asked
+            except OSError:
+                continue
+            if not where or not asked or not (where == cwd or where.startswith(cwd.rstrip("/") + "/")):
+                continue
+            try:
+                when = dt.datetime.fromisoformat((stamp or "").replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                when = os.path.getmtime(path)
+            if best is None or when > best[1]:
+                best = (asked, when)
+        if best:
+            break
+    return (best[0], t.timestamp() - best[1]) if best else None
+
+
+def suggestions(shell_pid=None, cwd=None):
+    t = now()
+    cwd = cwd or os.getcwd()
+    seen = load(os.path.join(HOME, "suggest-seen.json"), {})
+    top = git("rev-parse", "--show-toplevel", cwd=cwd)
+    out = [failed_command(shell_pid, t), conflicts(top), offer(t), night_report(t, seen), guardian(t), todo_due(t)]
+    if not any(s and s["score"] == 95 for s in out):
+        out += [uncommitted(top) or unmerged_commits(top)]
+    last = None if cwd.startswith("/tmp/") or cwd == os.path.expanduser("~") else asked_here(cwd, t)
+    if last and last[1] < HERE_DAYS * 86400:
+        out.append({"key": "?last --here", "why": f"here, {ago(last[1])}, you asked: {clip(last[0], 46)}",
+                    "run": ["sakura-last", "--here"], "score": 50})
+    elif top and top == cwd and not last and os.path.isdir(SESSIONS):
+        tracked = len((git("ls-files", cwd=top) or "").splitlines())
+        if tracked >= 20:
+            out.append({"key": "?tour", "why": f"Sakura hasn't been asked about this repository ({tracked} files): a cited tour of it",
+                        "run": ["sakura-tour"], "score": 30})
+    try:
+        with open(os.path.join(HOME, "morning-shown")) as f:
+            morning_shown = f.read().strip() == f"{t:%F}"
+    except OSError:
+        morning_shown = False
+    if t.hour < 11 and not morning_shown:
+        out.append({"key": "?morning", "why": "the day on one screen: what needs you, what's about to hurt, what's due",
+                    "run": ["sakura-morning"], "score": 45})
+    if t.hour >= 17 and glob.glob(os.path.join(SESSIONS, f"{t:%Y}", f"{t:%m}", f"{t:%d}", "*.jsonl")):
+        out.append({"key": "?recap", "why": "what Sakura did today, from the record", "run": ["sakura-recap"], "score": 40})
+    out = sorted((s for s in out if s), key=lambda s: -s["score"])[:3]
+    return out
+
+
+def save_shown(items, shell_pid):
+    d = run_dir()
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        with open(os.path.join(d, f"{shell_pid or 'last'}.json"), "w", encoding="utf-8") as f:
+            json.dump(items, f)
+    except OSError:
+        pass
+
+
+def do(n, shell_pid):
+    items = load(os.path.join(run_dir(), f"{shell_pid or 'last'}.json"), None)
+    if items is None:
+        items = suggestions(shell_pid)
+    if not 1 <= n <= len(items):
+        sys.exit(f"sakura-suggest: there is no number {n} in the list (it has {len(items)})")
+    pick = items[n - 1]
+    if pick.get("seen"):
+        path = os.path.join(HOME, "suggest-seen.json")
+        seen = load(path, {})
+        seen.update(pick["seen"])
+        try:
+            os.makedirs(HOME, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(seen, f)
+        except OSError:
+            pass
+    if os.environ.get("SAKURA_SUGGEST_DRY") == "1":
+        print(json.dumps(pick["run"]))
+        return 0
+    here = os.path.dirname(os.path.realpath(__file__))
+    os.environ["PATH"] = os.environ.get("PATH", "") + os.pathsep + here
+    try:
+        os.execvp(pick["run"][0], pick["run"])
+    except OSError as e:
+        sys.exit(f"sakura-suggest: couldn't run {pick['run'][0]}: {e.strerror}")
+
+
+def main(argv):
+    if argv[:1] in (["-h"], ["--help"]):
+        print(__doc__.strip())
+        return 0
+    if argv[:1] in (["off"], ["on"]):
+        if argv[0] == "off":
+            os.makedirs(HOME, exist_ok=True)
+            open(OFF, "w").close()
+            print("a bare ? opens Sakura straight away again; `sakura-suggest on` brings the three lines back")
+        else:
+            if os.path.exists(OFF):
+                os.remove(OFF)
+            print("a bare ? shows the three most likely things first")
+        return 0
+    shell_pid, as_json, run, quiet_if_off = None, False, None, False
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--shell" and i + 1 < len(argv):
+            shell_pid = argv[i + 1] if argv[i + 1].isdigit() else None
+            i += 1
+        elif a == "--run" and i + 1 < len(argv) and argv[i + 1].isdigit():
+            run = int(argv[i + 1])
+            i += 1
+        elif a == "--json":
+            as_json = True
+        elif a == "--launch":
+            quiet_if_off = True
+        else:
+            sys.exit("usage: sakura-suggest [--shell PID] [--json | --run N] | off | on")
+        i += 1
+    if run is not None:
+        return do(run, shell_pid)
+    if quiet_if_off and (os.path.exists(OFF) or os.environ.get("SAKURA_NO_SUGGEST") == "1"):
+        return 0
+    items = suggestions(shell_pid)
+    save_shown(items, shell_pid)
+    if as_json:
+        print(json.dumps([{k: s[k] for k in ("key", "why", "run")} for s in items], ensure_ascii=False, indent=1))
+        return 0
+    width = max((len(s["key"]) for s in items), default=0)
+    for n, s in enumerate(items, 1):
+        print(f"  {n}  {s['key']:<{width}}  {s['why']}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

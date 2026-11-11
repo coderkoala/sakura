@@ -14,6 +14,17 @@ case "${1:-}" in
     --coordinator) mode=coordinator; shift; export SAKURA_COORDINATOR=1 ;;
     --exec) mode=exec; shift ;;
 esac
+# A bare `?` at a terminal: the three most likely things first (sakura-suggest, no model). 1-3 does one; any other key
+# opens Sakura as before. `sakura-suggest off` or SAKURA_NO_SUGGEST=1 skips this.
+if [ "$mode" = tui ] && [ "$#" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; then
+    suggest="$(dirname "$(readlink -f "$0")")/sakura-suggest"
+    if [ -x "$suggest" ] && likely="$("$suggest" --launch --shell "$PPID" 2>/dev/null)" && [ -n "$likely" ]; then
+        count="$(printf '%s\n' "$likely" | wc -l)"
+        printf '%s\n  \e[2m%s does it · Enter opens Sakura\e[0m\n' "$likely" "$([ "$count" = 1 ] && echo 1 || echo "1-$count")"
+        IFS= read -rsn1 key || key=""
+        case "$key" in [1-9]) [ "$key" -le "$count" ] && exec "$suggest" --shell "$PPID" --run "$key" ;; esac
+    fi
+fi
 flags=(--dangerously-bypass-hook-trust)
 # ssh and scp that fail instead of waiting for a password nobody can type (see shims/ssh).
 # Tools Sakura kept for itself go last, so they can't stand in for anything already installed.

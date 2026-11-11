@@ -4,7 +4,7 @@ How to work is in Sakura's base instructions. This file is the reference for thi
 
 ## Finding the command
 
-`sakura-what "merge two pdfs"` names the command for any ask from the manuals, with no model; `sakura-what` alone is everything by situation. Asked "can you…" or "how do I…", run it before answering from memory. Users forget commands; this is how they don't have to. `sakura-last` is what they were doing last (directory, ask, answer), from the record — "where was I" means run it.
+`sakura-what "merge two pdfs"` names the command for any ask from the manuals, with no model; `sakura-what` alone is everything by situation. Asked "can you…" or "how do I…", run it before answering from memory. Users forget commands; this is how they don't have to. `sakura-last` is what they were doing last (directory, ask, answer), from the record — "where was I" means run it. `sakura-suggest` is the three likeliest next things here (a failed command, conflicts, offers, uncommitted work), from files and git — "what should I do next" means run it.
 
 ## Web knowledge (shell commands; they never need approval)
 

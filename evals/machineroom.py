@@ -1734,6 +1734,306 @@ def models(tmp):
     }
 
 
+def suggest(tmp):
+    """A bare ?: three likely things, each from planted state, most pressing first; nothing when nothing stands out."""
+    import pty
+
+    base = tempfile.mkdtemp(
+        dir=os.path.expanduser("~"), prefix=".suggest-eval-"
+    )  # /tmp is skipped on purpose, like ?last
+    try:
+        home = os.path.join(base, "home")
+        sak = os.path.join(home, ".sakura")
+        rt = os.path.join(base, "run")
+        repo = os.path.join(base, "repo")
+        fake = os.path.join(base, "fake")
+        for d in (
+            sak,
+            rt,
+            repo,
+            fake,
+            os.path.join(sak, "pa"),
+            os.path.join(sak, "tonight", "reports"),
+            os.path.join(sak, "guardian"),
+        ):
+            os.makedirs(d)
+        s = os.path.join(BIN, "sakura-suggest")
+        noon = "2026-11-10T13:00:00"
+        epoch = int(time.mktime(time.strptime(noon, "%Y-%m-%dT%H:%M:%S")))
+        env = {
+            "HOME": home,
+            "SAKURA_HOME": sak,
+            "XDG_RUNTIME_DIR": rt,
+            "SAKURA_SUGGEST_NOW": noon,
+            "SAKURA_PA_DIR": os.path.join(sak, "pa"),
+            "SAKURA_TONIGHT_DIR": os.path.join(sak, "tonight"),
+            "SAKURA_GUARDIAN_DIR": os.path.join(sak, "guardian"),
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_AUTHOR_NAME": "e",
+            "GIT_AUTHOR_EMAIL": "e@e",
+            "GIT_COMMITTER_NAME": "e",
+            "GIT_COMMITTER_EMAIL": "e@e",
+        }
+
+        def js(cwd=repo, shell=None, **over):
+            r = run(
+                [s, "--json"] + (["--shell", str(shell)] if shell else []),
+                dict(env, **over),
+                cwd=cwd,
+            )
+            return json.loads(r.stdout or "[]")
+
+        def g(*a):
+            return run(["git", "-C", repo, *a], env)
+
+        g("init", "-q", "-b", "main")
+        for i in range(25):
+            open(os.path.join(repo, f"f{i}.py"), "w").write(f"x = {i}\n")
+        g("add", "-A")
+        g("commit", "-qm", "first")
+        quiet = js()
+        os.makedirs(os.path.join(sak, "sessions"))
+        new_repo, not_a_repo = js(), js(cwd=home)
+        morning = js(SAKURA_SUGGEST_NOW="2026-11-10T08:00:00")
+        open(os.path.join(sak, "morning-shown"), "w").write("2026-11-10\n")
+        morning_seen = js(SAKURA_SUGGEST_NOW="2026-11-10T08:00:00")
+        # a turn here two days ago, and one today for the evening recap
+        for day, text in (
+            ("2026-11-08", "rename the config loader"),
+            ("2026-11-10", "bump the version"),
+        ):
+            y, m, d = day.split("-")
+            sd = os.path.join(sak, "sessions", y, m, d)
+            os.makedirs(sd)
+            stamp = f"{day}T07:00:00Z"
+            ev = [
+                {
+                    "type": "session_meta",
+                    "timestamp": stamp,
+                    "payload": {
+                        "session_id": day,
+                        "cwd": repo if day.endswith("08") else home,
+                    },
+                },
+                {
+                    "type": "turn_context",
+                    "timestamp": stamp,
+                    "payload": {
+                        "turn_id": "t",
+                        "cwd": repo if day.endswith("08") else home,
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "item_completed",
+                        "turn_id": "t",
+                        "item": {
+                            "type": "UserMessage",
+                            "content": [{"type": "text", "text": text}],
+                        },
+                    },
+                },
+            ]
+            open(os.path.join(sd, "rollout.jsonl"), "w").write(
+                "\n".join(json.dumps(e) for e in ev) + "\n"
+            )
+        asked = js()
+        evening = js(SAKURA_SUGGEST_NOW="2026-11-10T19:00:00")
+        # uncommitted work, then a clean branch ahead of main
+        open(os.path.join(repo, "f1.py"), "a").write("y = 2\n")
+        dirty = js()
+        g("checkout", "-qb", "feature/login")
+        g("commit", "-qam", "second")
+        ahead = js()
+        # the pressing ones: a failure in "this shell", an offer, last night's report, the guardian, a due to-do
+        fixdir = os.path.join(rt, f"sakura-fix-{os.getuid()}")
+        os.makedirs(fixdir)
+        open(os.path.join(fixdir, "4242"), "w").write(
+            f"2\n{epoch - 40}\n{repo}\nmake test\n"
+        )
+        open(os.path.join(fixdir, "4343"), "w").write(
+            f"2\n{epoch - 3600}\n{repo}\nmake old\n"
+        )
+        failed, stale_fail, other_shell = js(shell=4242), js(shell=4343), js(shell=4444)
+        json.dump(
+            [
+                {
+                    "id": "ab12",
+                    "text": "commit last night's diff",
+                    "command": ["true"],
+                    "cwd": repo,
+                    "expires": epoch + 600,
+                },
+                {
+                    "id": "dead",
+                    "text": "expired",
+                    "command": ["true"],
+                    "cwd": repo,
+                    "expires": epoch - 5,
+                },
+                {
+                    "id": "done",
+                    "text": "done",
+                    "command": ["true"],
+                    "cwd": repo,
+                    "expires": epoch + 600,
+                    "done": True,
+                },
+            ],
+            open(os.path.join(sak, "pa", "offers.json"), "w"),
+        )
+        open(os.path.join(sak, "tonight", "reports", "2026-11-09.md"), "w").write(
+            "# Night shift, 2026-11-09\n\n2 of 3 passed.\n"
+        )
+        json.dump(
+            {"disk:/": epoch - 3600, "cert:old": epoch - 90000 * 2},
+            open(os.path.join(sak, "guardian", "seen.json"), "w"),
+        )
+        full = js(shell=4242)
+        keys = [x["key"] for x in full]
+        dry = run(
+            [s, "--shell", "4242", "--run", "3"],
+            dict(env, SAKURA_SUGGEST_DRY="1"),
+            cwd=repo,
+        )
+        after_report = [x["key"] for x in js()]
+        json.dump(
+            [
+                {"id": 1, "text": "renew the domain due:2026-11-09"},
+                {"id": 2, "text": "later due:2026-12-01"},
+            ],
+            open(os.path.join(sak, "pa", "todo.json"), "w"),
+        )
+        os.remove(os.path.join(sak, "pa", "offers.json"))
+        todo = js()
+        text = run([s, "--shell", "4242"], env, cwd=repo).stdout
+        # a merge stopped on a conflict outranks the review
+        g("checkout", "-q", "main")
+        open(os.path.join(repo, "f1.py"), "w").write("x = 'main'\n")
+        g("commit", "-qam", "main side")
+        g("merge", "feature/login")
+        conflict = js()
+        off = run([s, "off"], env)
+        launch_off = run([s, "--launch", "--shell", "4242"], env, cwd=repo).stdout
+        still_by_name = run([s, "--shell", "4242"], env, cwd=repo).stdout
+        run([s, "on"], env)
+
+        # the ? key itself, at a terminal: the lines, then 1 runs the first, Enter opens Sakura
+        def key(press):
+            for name, body in (
+                ("sakura", 'echo "SAKURA OPENED $#"'),
+                ("sakura-fix", 'echo "FIX RAN $*"'),
+            ):
+                with open(os.path.join(fake, name), "w") as f:
+                    f.write(f"#!/bin/sh\n{body}\n")
+                os.chmod(os.path.join(fake, name), 0o755)
+            open(os.path.join(fixdir, str(os.getpid())), "w").write(
+                f"2\n{epoch - 40}\n{repo}\nmake test\n"
+            )
+            e = dict(
+                os.environ,
+                **env,
+                PATH=fake + os.pathsep + os.environ["PATH"],
+                SAKURA_MODEL="x",
+                SAKURA_NO_AUTOPULL="1",
+            )
+            pid, fd = pty.fork()
+            if pid == 0:
+                os.chdir(repo)
+                os.execve(os.path.join(BIN, "sakura-launch"), ["sakura-launch"], e)
+            out, sent, end = b"", False, time.time() + 20
+            while time.time() < end:
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                out += chunk
+                if not sent and b"opens Sakura" in out:
+                    os.write(fd, press)
+                    sent = True
+            os.waitpid(pid, 0)
+            return out.decode(errors="replace")
+
+        one, enter = key(b"1"), key(b"\r")
+        return {
+            "nothing stands out, nothing is printed": quiet == [],
+            "a repository Sakura never saw gets the tour, and only there": [
+                x["key"] for x in new_repo
+            ]
+            == ["?tour"]
+            and not_a_repo == [],
+            "the morning page before eleven, until it has been shown": [
+                x["key"] for x in morning
+            ]
+            == ["?tour", "?morning"][::-1]
+            and "?morning" not in [x["key"] for x in morning_seen],
+            "what you last asked here, with how long ago": [x["key"] for x in asked]
+            == ["?last --here"]
+            and "rename the config loader" in asked[0]["why"]
+            and "2 days ago" in asked[0]["why"],
+            "the recap after five, on a day with a session": "?recap"
+            in [x["key"] for x in evening]
+            and "?recap" not in [x["key"] for x in asked],
+            "uncommitted work offers a review, naming the file": dirty[0]["key"]
+            == "?review"
+            and "f1.py" in dirty[0]["why"]
+            and "1 file " in dirty[0]["why"],
+            "a clean branch ahead of main offers the PR": ahead[0]["key"] == "?pr"
+            and "1 commit on feature/login" in ahead[0]["why"],
+            "a command that failed 40 s ago in this shell comes first": failed[0]["key"]
+            == "?fix"
+            and "make test" in failed[0]["why"]
+            and "exit 2" in failed[0]["why"]
+            and failed[0]["run"] == ["sakura-fix", "--shell", "4242"],
+            "an hour-old failure, or another shell's, isn't offered": "?fix"
+            not in [x["key"] for x in stale_fail + other_shell],
+            "three at most, most pressing first: fix, the offer, the night report": keys
+            == ["?fix", "pa yes ab12", "?tonight report"]
+            and "2 of 3 passed" in full[2]["why"]
+            and "commit last night's diff" in full[1]["why"],
+            "--run N does that one, and a report once opened isn't offered again": json.loads(
+                dry.stdout or "null"
+            )
+            == ["sakura-tonight", "report"]
+            and "?tonight report" not in after_report
+            and "?guard" in after_report,
+            "only today's guardian findings count": any(
+                x["key"] == "?guard" and "1 thing " in x["why"] for x in js()
+            ),
+            "an overdue to-do is named, a later one isn't": any(
+                x["key"] == "pa brief"
+                and "renew the domain" in x["why"]
+                and "more" not in x["why"]
+                for x in todo
+            ),
+            "the plain listing is numbered": text.splitlines()[0].startswith(
+                "  1  ?fix"
+            )
+            and len(text.splitlines()) == 3,
+            "a merge stopped on conflicts outranks the review and names the file": conflict[
+                0
+            ]["key"]
+            == "?"
+            and "f1.py" in conflict[0]["why"]
+            and "?review" not in [x["key"] for x in conflict]
+            and "stop before committing" in conflict[0]["run"][1],
+            "off silences the ? key only": off.returncode == 0
+            and launch_off == ""
+            and "?fix" in still_by_name,
+            "at a terminal, ? shows them and 1 runs the first": "?fix" in one
+            and "FIX RAN --shell" in one
+            and "SAKURA OPENED" not in one,
+            "Enter opens Sakura as before": "?fix" in enter
+            and "SAKURA OPENED" in enter
+            and "FIX RAN" not in enter,
+        }
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
 CASES = {
     "ports": ports,
     "space": space,
@@ -1757,6 +2057,7 @@ CASES = {
     "last": last,
     "vaultcsv": vaultcsv,
     "models": models,
+    "suggest": suggest,
 }
 
 

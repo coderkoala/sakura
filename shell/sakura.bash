@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # Source this from ~/.bashrc for Sakura's keys:
 #   ?  open Sakura           ??  a coordinator with workers
+#   ? alone shows the three most likely things first (1-3 does one, Enter opens Sakura; sakura-suggest off stops it)
 #   ?remind tomorrow, 10am birthday wish
 #   ?pa reply to all my emails saying I'm busy
 #   ?fix  fix the command that just failed (words after it are a hint)
