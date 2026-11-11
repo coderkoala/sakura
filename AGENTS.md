@@ -145,6 +145,10 @@ Never suggest a website to convert, merge, compress, OCR or unlock a file (ilove
 - `faces index DIR` finds who is in the photos (InsightFace, local); `faces people|name ID "Grandma"|find "Grandma"|who PHOTO`. `restore photo.jpg|clip.mp4 [--denoise 0.5] [--smooth]` sharpens old photos, scans and video (Real-ESRGAN, RIFE; `restore install` once). `conv subs VIDEO [--lang ne] [--burn]` subtitles from the speech; `translate "text"|FILE.srt --to ne|hi|en` offline (Argos). All on this machine; never a website.
 - `vid URL` keeps the user's own video with metadata, thumbnail, subtitles; `vid archive URL` a channel or playlist, detached, resumable (`vid status|log`); `vid watch URL` what's new there; `vid audio URL` then `hear`. Private videos: `--cookies-from-browser firefox`; never ask for a password.
 
+## Letters, bills, forms
+
+`paper new TEMPLATE [--lang ne] --set key=value ... [-o OUT.pdf|.docx|.md]` writes a letter or bill from a template in English or नेपाली, no model (`paper list`, `paper fields NAME`): application, leave, ward-request, invoice, receipt, rent-receipt, salary-certificate, experience-letter, authorization, quotation. `paper new invoice --item "desc,qty,rate"` computes VAT 13% and the total in words and numbers it in the register; `paper me set name|address|pan ...` saves the user's details once; `paper fill FORM.pdf` puts them on an office's own PDF form (dry run until `--go`). Asked for a letter, a bill or a form, use it; never invent an official form.
+
 ## Remote machines
 
 Hosts are in ~/.ssh/config. Connections are multiplexed, so many ssh calls are cheap.

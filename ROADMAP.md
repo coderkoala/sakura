@@ -70,7 +70,7 @@ Partly shipped (`pa mail urgent|mute`, `pa autoreply`, drafts through himalaya; 
 
 Shipped as `hear`, `hear --notes`, `say` and `?hear`: **Meetings and voice.** Local transcription into notes, decisions and reminders. Speak to it when your hands are full.
 
-Partly shipped (`ledger` for receipts and records; forms and letters not yet): **For everyone who isn't a developer.** Forms, letters, tax paperwork and small-business records, in the language you think in, starting with English and नेपाली, with the documents staying at home.
+Shipped as `ledger` (receipts and records) and `paper` (letters, bills and forms from templates in English and नेपाली, `evals/paper.py` 86 checks; the Bikram Sambat table ends at 2083, and the Nepali wording wants a native reader's review): **For everyone who isn't a developer.** Forms, letters, tax paperwork and small-business records, in the language you think in, starting with English and नेपाली, with the documents staying at home.
 
 ## Abilities (2026-11-08 brainstorm). Built the same day unless marked.
 
@@ -93,7 +93,7 @@ Not more harnesses: things it couldn't do before. Built means it runs and was sm
 15. **Morning page:** brief, guardian, last night's report and the calendar on one screen at the day's first `?`.
 16. **Mail that acts:** triage rules learned from you; calendar invites accepted or declined.
 17. **Per-topic tool reference: built as `sakura-lean`, off by default** (see "Fewer tokens" above; matched from the manuals, so no 2b router was needed for it). Not built: a 2b router so the 9b and the driver wake only for real work. Turning lean on by default waits for a full eval pass on the driver.
-18. **Receipts and forms:** OCR into a ledger; tax paperwork in नेपाली and English from templates.
+18. **Receipts and forms:** OCR into a ledger; tax paperwork in नेपाली and English from templates. Built: `paper` (`evals/paper.py`); ordinary letters and business documents only, never an invented official form.
 
 ## Memory workflows, next (2026-11-09 brainstorm)
 
@@ -189,7 +189,7 @@ Three research passes — open-source tools by everyday use, open-weight models 
 agents of 2026 offer — are mapped in [docs/everything.md](docs/everything.md): for each want, the tool the web services run
 underneath, the model that fits, what Sakura does today, and what's next. The build order it ends with, each needing an eval
 first (done the same day, with checks: `conv redact|fields|fill|sign|verify` and `money` on hledger): `conv subs|denoise|stems` (done; stems proven as plumbing only, the Demucs model couldn't be fetched where the eval ran) →
-`restore` (Real-ESRGAN, RIFE, SeedVR2) → `faces` (InsightFace + SigLIP 2, local only) → the Nepal paperwork templates on `conv fill` →
+`restore` (Real-ESRGAN, RIFE, SeedVR2) → `faces` (InsightFace + SigLIP 2, local only) → the Nepal paperwork templates on `conv fill` (done, as `paper`) →
 `translate` (Argos/NLLB) and Nepali/Hindi embeddings for `rag` → kept procedures, a repo map and a tool-call shim → a messaging gateway with pairing, last and default-closed.
 
 The tool-call shim, built 2026-11-11 as `sakura-shim` (off by default, 51 checks against a fake model server): a proxy on 127.0.0.1 between the engine and the model server that turns tool calls written as text back into calls, streamed or not, with syntax-only repairs and no second model; a tool that wasn't offered, a missing required argument or a reply cut off by the length limit is left as text. Whether it lifts `evals/run.py` on the driver is the measurement still owed.

@@ -40,6 +40,7 @@
 #   faces index DIR | people | name ID "Grandma" | find "Grandma"   who is in your photos, found and kept here
 #   restore photo.jpg | clip.mp4 [--denoise 0.5] [--smooth]   old photos, scans and video sharpened (Real-ESRGAN, RIFE; restore install once)
 #   conv subs VIDEO [--lang ne] [--burn]  subtitles from the speech;  translate "text"|FILE.srt --to ne|hi|en   offline (Argos)
+#   paper list | new leave --lang ne --set k=v | new invoice --item "desc,qty,rate" | me set pan N | fill FORM.pdf   letters and bills from templates (en, ne)
 #   money import bank.csv | month | where "KFC" | rule "KFC" expenses:food   statements into plain-text accounting (hledger)
 #   dupes DIR... [--link|--rm --go]  the same file by content, across drives;  shelve DIR --into LIB [--go]  photos/videos into YEAR/YEAR-MM by date taken
 #   sakura-skill keep NAME steps.md --about "when" | import ~/.claude/skills   know-how kept as a skill; imports are scanned first

@@ -30,7 +30,7 @@ SYNONYMS = {
     "picture": ["look", "faces", "restore"], "pictures": ["shelve", "faces"], "face": ["faces"], "who": ["faces", "ports"], "sort": ["shelve", "tbl"],
     "organize": ["shelve"], "organise": ["shelve"], "date": ["shelve", "when", "live"], "year": ["shelve"], "video": ["vid", "conv", "restore"], "videos": ["vid", "shelve"],
     "youtube": ["vid"], "channel": ["vid"], "playlist": ["vid"], "subtitles": ["subs", "conv"], "subtitle": ["subs"], "transcribe": ["hear", "subs"],
-    "speech": ["hear", "say", "subs"], "voice": ["hear", "say"], "speak": ["say"], "translate": ["translate"], "nepali": ["translate", "subs"], "hindi": ["translate"],
+    "speech": ["hear", "say", "subs"], "voice": ["hear", "say"], "speak": ["say"], "translate": ["translate"], "nepali": ["paper", "translate", "subs"], "hindi": ["translate"],
     "upscale": ["restore"], "sharpen": ["restore"], "blurry": ["restore"], "old": ["restore", "shelve"], "restore": ["restore", "sakura-backup", "undo"],
     "backup": ["sakura-backup"], "backups": ["sakura-backup", "sakura-guardian"], "undo": ["sakura-undo"], "revert": ["sakura-undo"], "download": ["dl", "vid", "torrent"],
     "downloads": ["dl", "space"], "magnet": ["torrent"], "torrent": ["torrent"], "email": ["himalaya", "pa", "sakura-mail-setup"], "mail": ["himalaya", "pa"],
@@ -52,6 +52,8 @@ SYNONYMS = {
     "zip": ["conv", "extract"], "unzip": ["conv", "extract"], "archive": ["conv", "vid", "extract"], "gif": ["conv"], "audio": ["conv", "hear"], "mp3": ["conv"],
     "sign": ["conv", "sign"], "signature": ["conv", "sign"], "form": ["conv", "fill"], "fill": ["conv", "fill"], "metadata": ["conv", "strip"], "exif": ["strip", "shelve"],
     "location": ["strip", "conv"], "keep": ["sakura-tool", "vid"], "tool": ["sakura-tool", "sakura-teach"], "teach": ["sakura-teach"], "learn": ["sakura-learn"],
+    "letter": ["paper"], "invoice": ["paper"], "bill": ["paper"], "application": ["paper"], "quotation": ["paper"], "leave": ["paper"],
+    "skill": ["sakura-skill"], "procedure": ["sakura-skill"], "untrusted": ["quarantine", "sakura-scan"], "ebook": ["conv"], "kindle": ["conv"],
     "explain": ["sakura-explain", "sakura-learn", "when"], "how": ["sakura-how", "sakura-what"], "which": ["sakura-what"], "command": ["sakura-what", "sakura-how"],
 }
 NOUNS = {"photo", "photos", "picture", "pictures", "video", "videos", "image", "images", "file", "files", "pdf", "pdfs", "page", "web", "server", "servers", "machines", "code", "line", "docs", "documents", "notes", "csv", "mail", "email"}
