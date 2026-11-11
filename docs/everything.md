@@ -152,5 +152,5 @@ Each needs a deterministic eval before the roadmap table can claim it.
 4. Built: `conv redact|fields|fill|sign|verify`, and the paperwork on top as `paper` (`evals/paper.py`): ordinary letters and bills in English and Nepali, never an invented official form.
 5. Built: `translate`; `rag` and `?recall` now keep Devanagari words whole (they were being cut at every vowel sign). Nepali recall of the embedding model is unmeasured.
 6. Built: `money`; `paper register --hledger` hands issued invoices to it. `ledger export --hledger` built (receipts as entries hledger accepts).
-7. Built: `sakura-skill` (§9.1) and `sakura-shim` (§9.3, deterministic repairs, no second model). The repo map (§9.2): see the roadmap.
+7. Built: `sakura-skill` (§9.1) and `sakura-shim` (§9.3, deterministic repairs, no second model). The repo map (§9.2) built as `sakura-map`, off by default as standing context.
 8. Built: `sakura-gateway` (§9.7), default closed, proven against a fake homeserver and a fake signal-cli only.

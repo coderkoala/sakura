@@ -53,12 +53,13 @@ def learn(name, manual):
         for w in re.findall(r"(?<![\w-])(--[a-z][\w-]*)", l):
             if w not in flags and w not in ("--", "--to"):
                 flags.append(w)
-        if "--to" in l and "--to" not in flags:
+        if re.search(r"(?<![\w-])--to(?![\w-])", l) and "--to" not in flags:  # --to itself, not --tools
             flags.append("--to")
         m = re.match(rf"\s*(?:\?)?{re.escape(name)}\s+([a-z][\w-]*)(?:\s|$|\|)", l)
         if m:
             sub = m.group(1)
-            if sub not in subs and not PLACEHOLDER.match(sub) and len(sub) > 1 and sub not in STOPWORDS:
+            # "on" is prose everywhere but here: at the head of a manual line, `NAME on` is the switch (sakura-lean on, pa linger on)
+            if sub not in subs and not PLACEHOLDER.match(sub) and len(sub) > 1 and (sub not in STOPWORDS or sub == "on"):
                 subs.append(sub)
         # "merge|split|pages" alternations on one line
         m2 = re.match(rf"\s*{re.escape(name)}\s+([a-z][\w-]*(?:\|[a-z][\w-]*)+)", l)

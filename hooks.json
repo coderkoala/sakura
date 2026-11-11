@@ -12,6 +12,11 @@
             "type": "command",
             "command": "python3 __SAKURA_DIR__/hooks/tool_reference.py",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3 __SAKURA_DIR__/hooks/repo_map.py",
+            "timeout": 5
           }
         ]
       }
@@ -49,6 +54,12 @@
             "type": "command",
             "command": "python3 __SAKURA_DIR__/hooks/voice_context.py",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python3 __SAKURA_DIR__/hooks/repo_map.py",
+            "timeout": 20,
+            "statusMessage": "mapping the repo"
           }
         ]
       }

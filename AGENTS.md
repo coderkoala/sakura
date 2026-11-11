@@ -82,6 +82,7 @@ CHECK
 - `dq "SQL" FILE...` queries CSV, Parquet, JSON or SQLite with DuckDB (`t`, `t2`… are the files; `--schema`). Use it instead of awk pipelines over data.
 - `procwatch start NAME -- cmd` runs something long (a server, a build) detached; `procwatch tail|wait NAME "regex"|on NAME "regex" -- cmd|stop`. Never block a turn waiting on a server.
 - `fleet` lists the user's machines (up, RAM, GPU), `fleet pick gpu|ram|cpu` names the best one, `fleet run "cmd"` runs on all. "Run it on the box with a free GPU" → `ssh "$(fleet pick gpu)" ...`.
+- `sakura-map [PATH] [--for "task words"] [--focus FILE]` is the repo's map with no model: the most-referenced files first, their most-used definitions as `line: signature`, in 4000 characters (`--budget N`). Before changing code in a repo you don't know, run it instead of listing directories.
 - `schema [TABLE | refs COLUMN]` is the project's database schema from its migrations, no connection needed.
 - `hear [FILE|SECONDS]` is speech to text (local whisper); `say "text"` speaks. `hear --notes FILE` turns a recording into notes and reminders.
 - `ledger add FILE` reads a receipt into the user's ledger (`ledger list|sum`). `docpack add laravel@13` fetches a docs pack for offline `rag search`.
