@@ -556,7 +556,7 @@ def vid(tmp):
     handler = type(
         "H", (http.server.SimpleHTTPRequestHandler,), {"log_message": lambda *a: None}
     )
-    srv = socketserver.TCPServer(
+    srv = http.server.ThreadingHTTPServer(
         ("127.0.0.1", 0), lambda *a, **k: handler(*a, directory=www, **k)
     )
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -710,7 +710,7 @@ def watch(tmp):
     handler = type(
         "H", (http.server.SimpleHTTPRequestHandler,), {"log_message": lambda *a: None}
     )
-    srv = socketserver.TCPServer(
+    srv = http.server.ThreadingHTTPServer(
         ("127.0.0.1", 0), lambda *a, **k: handler(*a, directory=www, **k)
     )
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -899,7 +899,7 @@ def convurl(tmp):
     handler = type(
         "H", (http.server.SimpleHTTPRequestHandler,), {"log_message": lambda *a: None}
     )
-    srv = socketserver.TCPServer(
+    srv = http.server.ThreadingHTTPServer(
         ("127.0.0.1", 0), lambda *a, **k: handler(*a, directory=www, **k)
     )
     threading.Thread(target=srv.serve_forever, daemon=True).start()
