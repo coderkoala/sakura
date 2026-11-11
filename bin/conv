@@ -4,13 +4,18 @@ Nothing leaves the machine; the input is never overwritten; the output lands nex
 
   conv FILE... --to EXT        documents  md html docx odt rtf epub tex rst txt ↔ (pandoc); docx xlsx pptx odt → pdf (LibreOffice);
                                pdf → txt (pdftotext), pdf → png|jpg (pdftoppm, one per page), pdf → docx (LibreOffice)
+                               sheets     xlsx xls ods → csv (LibreOffice; one file per sheet when there are several), csv → xlsx|ods|pdf
+                               books      epub mobi azw3 fb2 → epub|mobi|azw3|pdf|txt|md|docx, and md docx html → epub|mobi|azw3, for a reader:
+                               pandoc does epub and fb2 alone; anything Kindle (mobi, azw3) and a book → pdf is calibre's ebook-convert.
+                               The title and author travel with the book;
+  --title "T" --author "A"     set them instead (a markdown file with no front matter gets its file name as the title)
                                images     png jpg webp gif tiff bmp heic avif svg ↔ (ImageMagick, or Pillow)
                                sound/video mp4 mkv webm mov avi mp3 m4a wav flac ogg opus ↔ (ffmpeg); video → gif
   conv merge a.pdf b.pdf…      one pdf (qpdf; pdfunite or pypdf if it's missing)   -o out.pdf
   conv split x.pdf [--every N] one file per page (or per N pages)
   conv pages x.pdf 1-3,7       those pages;   conv rotate x.pdf 90|180|270 [--pages 2]
   conv compress FILE           pdf (ghostscript /ebook), jpg|png|webp (quality 82, longest side 2000), video (h264 crf 26)
-  conv ocr scan.pdf|image      a searchable pdf (ocrmypdf, else tesseract)
+  conv ocr scan.pdf|image      a searchable pdf (ocrmypdf, else tesseract); SAKURA_OCR_LANGS=eng+nep for other languages
   conv unlock x.pdf            remove a pdf's password: asked for on the terminal, never stored, never in the command line
   conv redact x.pdf "pattern"… remove every match for real (text, and the image underneath): not a black box over it (PyMuPDF);
                                --regex for patterns; it says how many it removed
@@ -27,6 +32,12 @@ Nothing leaves the machine; the input is never overwritten; the output lands nex
                                or Playwright's), to html as fetched, to md/txt through pandoc. Only that URL is fetched.
   conv extract ARCHIVE...      zip, tar(.gz/.bz2/.xz/.zst), 7z, rar: into a new folder named after the archive, never into the
                                current directory; entries that would land outside it (zip-slip) are refused
+  conv denoise FILE            remove hiss, hum and noise from a recording or tape, or from a video's sound with the picture copied untouched
+                               (ffmpeg afftdn). The noise floor is measured from the quietest moments of the file;
+  --strength DB                how much to take off, afftdn's own figure (default 12, up to 97);  --floor DB  the noise floor, if you know it
+  --model FILE.rnnn            a speech-denoising network instead (ffmpeg arnndn; the model file is yours to fetch, none is shipped)
+  conv stems SONG [--two vocals] [--model NAME]   vocals, drums, bass and other as separate files in a new "SONG stems" folder
+                               (Demucs, when installed; its model is fetched once on first use). --two vocals makes vocals and the rest
   conv --tools                 which converters are here and the install line for each that isn't
   --dry prints each command instead of running it;  --json  one line per output
 """
@@ -42,20 +53,28 @@ import tempfile
 
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # `conv --tools | head` ends quietly
 
-DOCS = {"md", "markdown", "html", "htm", "docx", "odt", "rtf", "epub", "tex", "rst", "txt", "org", "adoc", "ipynb", "pptx", "xlsx", "ods", "odp", "doc", "xls", "ppt"}
+DOCS = {"md", "markdown", "html", "htm", "docx", "odt", "rtf", "epub", "tex", "rst", "txt", "org", "adoc", "ipynb", "fb2", "pptx", "xlsx", "ods", "odp", "doc", "xls", "ppt"}
 IMAGES = {"png", "jpg", "jpeg", "webp", "gif", "tiff", "tif", "bmp", "heic", "heif", "avif", "svg", "ico", "pnm", "ppm"}
 AUDIO = {"mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "wma", "aiff"}
 VIDEO = {"mp4", "mkv", "webm", "mov", "avi", "m4v", "mpg", "mpeg", "ts", "3gp", "wmv", "flv"}
 OFFICE = {"docx", "doc", "odt", "rtf", "pptx", "ppt", "odp", "xlsx", "xls", "ods"}
+SHEETS = {"xlsx", "xls", "ods"}
+EBOOKS = {"epub", "mobi", "azw3", "azw", "fb2"}
+KINDLE = {"mobi", "azw3", "azw"}  # pandoc reads and writes neither
+CALIBRE_IN = EBOOKS | {"docx", "html", "htm", "txt", "odt", "rtf", "pdf", "md"}
+CALIBRE_OUT = {"epub", "mobi", "azw3", "fb2", "pdf", "txt", "docx", "rtf"}
 TOOLS = {  # name: (how to install)
     "pandoc": "sudo -A apt-get install -y pandoc", "libreoffice": "sudo -A apt-get install -y libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress",
     "pdftotext": "sudo -A apt-get install -y poppler-utils", "pdftoppm": "sudo -A apt-get install -y poppler-utils", "pdfunite": "sudo -A apt-get install -y poppler-utils",
     "qpdf": "sudo -A apt-get install -y qpdf", "gs": "sudo -A apt-get install -y ghostscript", "magick": "sudo -A apt-get install -y imagemagick",
     "ffmpeg": "sudo -A apt-get install -y ffmpeg", "chromium": "sudo -A apt-get install -y chromium", "ocrmypdf": "uv tool install ocrmypdf  (and sudo -A apt-get install -y tesseract-ocr)",
     "tesseract": "sudo -A apt-get install -y tesseract-ocr", "exiftool": "sudo -A apt-get install -y libimage-exiftool-perl", "pymupdf": "pip install pymupdf  (conv redact)", "pyhanko": "pip install pyhanko  (conv sign/verify)",
+    "ebook-convert": "sudo -A apt-get install -y calibre  (books to and from mobi/azw3, a book to pdf)",
+    "demucs": "uv tool install demucs --with numpy  (conv stems; its model, about 80 MB, is fetched on first use)",
 }
 DRY = "--dry" in sys.argv
 AS_JSON = "--json" in sys.argv
+META = {"title": None, "author": None}  # --title / --author, for a book
 made = []
 
 
@@ -115,6 +134,14 @@ def convert_one(src, to, o, outdir):
         return False
     s, t = ext(src), to.lower().lstrip(".")
     t = {"jpeg": "jpg", "markdown": "md", "htm": "html", "tif": "tiff"}.get(t, t)
+    if s in EBOOKS or t in EBOOKS:
+        done = ebook(src, s, t, o, outdir)
+        if done is not None:
+            return done
+    if s in SHEETS and t == "csv":
+        return sheets_csv(src, o, outdir)
+    if s == "csv" and t in ("xlsx", "xls", "ods", "pdf", "html"):
+        return office(src, t, o, outdir)
     if s == "pdf":
         if t == "txt":
             out = out_path(src, "txt", o, outdir)
@@ -134,7 +161,7 @@ def convert_one(src, to, o, outdir):
             return office(src, t, o, outdir)
     if t == "pdf" and (s in OFFICE or s in ("html", "txt")):
         return office(src, "pdf", o, outdir)
-    if t == "pdf" and s in ("md", "rst", "org", "tex", "epub"):
+    if t == "pdf" and s in ("md", "rst", "org", "tex", "epub", "fb2"):
         # pandoc needs a pdf engine; go through html and LibreOffice so nothing else needs installing
         html = out_path(src, "html", None, outdir)
         if not run([need("pandoc"), src, "-s", "-o", html], "pandoc", None):
@@ -149,16 +176,7 @@ def convert_one(src, to, o, outdir):
     if s in DOCS and t in DOCS:
         if s in OFFICE and t in OFFICE or s in ("xlsx", "xls", "ods", "pptx", "ppt", "odp") or t in ("xlsx", "xls", "ods", "pptx", "ppt", "odp"):
             return office(src, t, o, outdir)
-        out = out_path(src, t, o, outdir)
-        fmt = {"md": "gfm", "txt": "plain", "tex": "latex"}.get(t, t)
-        args = [need("pandoc"), src, "-o", out]
-        if t in ("html", "epub", "docx", "odt", "rtf"):
-            args.insert(2, "-s")
-        if t == "html":
-            args += ["--metadata", f"title={os.path.splitext(os.path.basename(src))[0]}"]
-        if t in ("md", "txt", "tex"):
-            args += ["-t", fmt]
-        return run(args, "pandoc", out)
+        return pandoc_doc(src, t, out_path(src, t, o, outdir))
     if s in IMAGES and t in IMAGES:
         out = out_path(src, t, o, outdir)
         if have("magick"):
@@ -184,6 +202,116 @@ def convert_one(src, to, o, outdir):
     return False
 
 
+def pandoc_meta():
+    return [x for k in ("title", "author") if META[k] for x in ("--metadata", f"{k}={META[k]}")]
+
+
+def pandoc_book(src, out, final=True):
+    """A document → epub or fb2. A book needs a title: the document's own, else --title, else the file's name. A metadata
+    file is the one place pandoc takes a value the document's own front matter still overrides."""
+    with tempfile.TemporaryDirectory() as tmp:
+        default = os.path.join(tmp, "title.yaml")
+        with open(default, "w") as f:
+            f.write("title: " + json.dumps(os.path.splitext(os.path.basename(src))[0]) + "\n")
+        return run([need("pandoc"), src, "-s", "--metadata-file", default, *pandoc_meta(), "-o", out], "pandoc", out if final else None)
+
+
+def pandoc_doc(src, t, out):
+    fmt = {"md": "gfm", "txt": "plain", "tex": "latex"}.get(t, t)
+    book = ext(src) in EBOOKS
+    if t in ("epub", "fb2") and not book:
+        return pandoc_book(src, out)
+    args = [need("pandoc"), src, "-o", out]
+    if t in ("html", "epub", "docx", "odt", "rtf", "fb2") or (t == "md" and book):
+        args.insert(2, "-s")  # on a book → md, -s is what keeps the title and author, as front matter
+    if t == "html" and not book and not META["title"]:
+        args += ["--metadata", f"title={os.path.splitext(os.path.basename(src))[0]}"]
+    args += pandoc_meta()
+    if t in ("md", "txt", "tex"):
+        args += ["-t", "gfm-raw_html" if t == "md" and book else fmt]  # a book's markup is full of anchors nobody reads
+    return run(args, "pandoc", out)
+
+
+def calibre_env():
+    env = dict(os.environ)
+    if not env.get("DISPLAY") and not env.get("WAYLAND_DISPLAY"):
+        env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        env.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox")  # the Chromium that prints calibre's pdf refuses root otherwise
+    return env
+
+
+def ebook(src, s, t, o, outdir):
+    """A book for a reader. None means pandoc's ordinary path does this pair; anything Kindle, and a book → pdf, is calibre's."""
+    cal, pan = have("ebook-convert"), have("pandoc")
+    kindle = s in KINDLE or t in KINDLE
+    if t == "azw":
+        print("conv: nothing writes .azw any more; a Kindle reads azw3 (--to azw3) or mobi", file=sys.stderr)
+        return False
+    if not kindle and "pdf" not in (s, t) and (pan or not cal):
+        return None  # epub and fb2 to and from documents: pandoc alone
+    if not kindle and t == "pdf" and not cal:
+        return None  # pandoc → html → LibreOffice, as before
+    if not cal:
+        print(f"conv: .{s} → .{t} is calibre's work (ebook-convert), and it isn't installed:\n  {TOOLS['ebook-convert']}", file=sys.stderr)
+        if not kindle and pan:
+            print("  (without it, pandoc alone does epub and fb2 to and from md, docx, html, txt)", file=sys.stderr)
+        sys.exit(3)
+    if t not in CALIBRE_OUT and t not in ("md", "html", "odt", "rst", "tex", "org"):
+        print(f"conv: I don't know how to turn .{s} into .{t}", file=sys.stderr)
+        return False
+    out = out_path(src, t, o, outdir)
+    env = calibre_env()
+    meta = [*(["--title", META["title"]] if META["title"] else []), *(["--authors", META["author"]] if META["author"] else [])]
+    stem = os.path.splitext(os.path.basename(src))[0]
+    with tempfile.TemporaryDirectory() as tmp:
+        first = src
+        if s not in CALIBRE_IN or (s not in EBOOKS and s != "pdf" and pan):
+            # a document: pandoc makes the epub (chapters from the headings, front matter as the title), calibre the Kindle file
+            first = os.path.join(tmp, stem + ".epub")
+            if not pandoc_book(src, first, final=False):
+                return False
+        if t in CALIBRE_OUT:
+            return run([cal, first, out, *meta], "calibre", out, env=env)
+        if not pan and t == "md":
+            txt = os.path.join(tmp, stem + ".txt")  # calibre names the format by the extension
+            if not run([cal, first, txt, "--txt-output-formatting=markdown", *meta], "calibre", None, env=env):
+                return False
+            if not DRY:
+                shutil.move(txt, out)
+                made.append({"out": out, "tool": "calibre"})
+                if not AS_JSON:
+                    print(f"wrote {out}  (calibre)")
+            return True
+        # md, html, odt…: calibre opens the Kindle file, pandoc writes the document
+        mid = os.path.join(tmp, stem + ".epub")
+        return run([cal, first, mid, *meta], "calibre", None, env=env) and pandoc_doc(mid, t, out)
+
+
+def sheets_csv(src, o, outdir):
+    """Every sheet as its own csv: LibreOffice's filter with sheet -1, UTF-8, commas, text quoted."""
+    lo = need("libreoffice")
+    flt = "csv:Text - txt - csv (StarCalc):44,34,76,1,,0,false,true,false,false,false,-1"
+    with tempfile.TemporaryDirectory() as tmp:
+        if not run([lo, "--headless", "--norestore", "--convert-to", flt, "--outdir", tmp, src], "libreoffice", None, env=dict(os.environ, HOME=os.environ.get("HOME", "/tmp"))):
+            return False
+        if DRY:
+            return True
+        got = sorted(os.listdir(tmp))
+        if not got:
+            print(f"conv: libreoffice made nothing for {src}", file=sys.stderr)
+            return False
+        stem = os.path.splitext(os.path.basename(src))[0]
+        for f in got:
+            sheet = os.path.splitext(f)[0][len(stem) + 1:]
+            out = out_path(src, "csv", o, outdir) if len(got) == 1 else out_path(src, "csv", None, outdir or (os.path.dirname(os.path.abspath(o)) if o else None), suffix=f" {sheet}")
+            shutil.move(os.path.join(tmp, f), out)
+            made.append({"out": out, "tool": "libreoffice"})
+            if not AS_JSON:
+                print(f"wrote {out}  (libreoffice)")
+    return True
+
+
 def pillow(src, out):
     try:
         from PIL import Image
@@ -204,20 +332,19 @@ def pillow(src, out):
 
 def office(src, t, o, outdir):
     lo = need("libreoffice")
-    d = outdir or os.path.dirname(os.path.abspath(src)) or "."
     env = dict(os.environ, HOME=os.environ.get("HOME", "/tmp"))
-    produced = os.path.join(d, os.path.splitext(os.path.basename(src))[0] + "." + t)
-    clash = os.path.exists(produced)
-    if not run([lo, "--headless", "--norestore", "--convert-to", t, "--outdir", d, src], "libreoffice", None, env=env):
-        return False
-    if DRY:
-        return True
-    final = o or (out_path(src, t, None, outdir) if clash else produced)
-    if os.path.abspath(final) != os.path.abspath(produced) and os.path.exists(produced):
-        os.replace(produced, final)
-    if not os.path.exists(final):
-        print(f"conv: libreoffice made nothing for {src}", file=sys.stderr)
-        return False
+    # into a folder of its own first: LibreOffice names the file itself, and writes over one of that name already there
+    with tempfile.TemporaryDirectory() as tmp:
+        if not run([lo, "--headless", "--norestore", "--convert-to", t, "--outdir", tmp, src], "libreoffice", None, env=env):
+            return False
+        if DRY:
+            return True
+        got = os.listdir(tmp)
+        if not got:
+            print(f"conv: libreoffice made nothing for {src}", file=sys.stderr)
+            return False
+        final = o or out_path(src, t, None, outdir)
+        shutil.move(os.path.join(tmp, got[0]), final)
     made.append({"out": final, "tool": "libreoffice"})
     if not AS_JSON:
         print(f"wrote {final}  (libreoffice)")
@@ -519,7 +646,8 @@ def verify(src, cert):
 def strip(src, o, outdir):
     s = ext(src)
     out = o or out_path(src, s, None, outdir, suffix=" clean")
-    if have("exiftool") and (s in IMAGES or s in VIDEO or s in AUDIO or s == "pdf"):
+    # not a pdf: exiftool's edit of one is an appended update, and the author is still in the file underneath it
+    if have("exiftool") and (s in IMAGES or s in VIDEO or s in AUDIO):
         if not run([have("exiftool"), "-all=", "-tagsfromfile", "@", "-orientation", "-icc_profile", "-o", out, src], "exiftool", out):
             return False
         return True
@@ -556,7 +684,7 @@ def strip(src, o, outdir):
             print(f"wrote {out}  (pypdf)")
             return True
         except ImportError:
-            return run([q, "--linearize", src, out], "qpdf", out) and print("conv: qpdf keeps the document info; install exiftool to drop it") is None
+            return run([q, "--linearize", src, out], "qpdf", out) and print("conv: qpdf keeps the document info; pip install pypdf to drop it") is None
     print(f"conv: don't know how to strip a .{s}", file=sys.stderr)
     return False
 
@@ -597,6 +725,122 @@ def gif(src, o, outdir, fps, width):
     out = o or out_path(src, "gif", None, outdir)
     flt = f"fps={fps},scale={width}:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128[p];[s1][p]paletteuse=dither=bayer"
     return run([need("ffmpeg"), "-hide_banner", "-loglevel", "error", "-i", src, "-vf", flt, "-loop", "0", out], "ffmpeg", out)
+
+
+def noise_floor(ff, src):
+    """Where afftdn should put the noise floor, in dB (-80 to -20): the level of the file's quietest moments, the hiss with
+    nothing over it, plus 5. Measured on a tone under white hiss: with the floor at the hiss's own level afftdn takes off about
+    10 of 12 dB asked and 16 of 30; 5 dB above it, 12 of 12 and 26 of 30, and the tone keeps its level either way."""
+    r = subprocess.run([ff, "-hide_banner", "-nostats", "-loglevel", "error", "-i", src, "-vn", "-af",
+                        "asetnsamples=n=2048,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
+                        "-f", "null", "-"], capture_output=True, text=True)
+    levels = []
+    for line in r.stdout.splitlines():
+        if "RMS_level=" in line:
+            try:
+                v = float(line.rsplit("=", 1)[1])
+            except ValueError:
+                continue
+            if v == v and v > -120:  # not nan, not digital silence
+                levels.append(v)
+    if not levels:
+        return None
+    levels.sort()
+    return max(-80.0, min(-20.0, levels[len(levels) // 10] + 5))
+
+
+def denoise(src, strength, floor, model, o, outdir):
+    s = ext(src)
+    if s not in AUDIO and s not in VIDEO:
+        print(f"conv: denoise takes a recording or a video, not a .{s}", file=sys.stderr)
+        return False
+    if not os.path.exists(src):
+        print(f"conv: no such file {src}", file=sys.stderr)
+        return False
+    ff = need("ffmpeg")
+    how = {}
+    if model:
+        if strength is not None or floor is not None:
+            print("conv: --strength and --floor are afftdn's; the network (--model) has no such knob. Leave them off.", file=sys.stderr)
+            return False
+        if not os.path.isfile(model):
+            print(f"conv: no such model file {model}", file=sys.stderr)
+            return False
+        flt = "arnndn=m='" + os.path.abspath(model).replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:") + "'"
+        how = {"filter": "arnndn"}
+    else:
+        nr = 12.0 if strength is None else strength
+        if not 0.01 <= nr <= 97:
+            print("conv: --strength is decibels of noise taken off, 0.01 to 97 (default 12)", file=sys.stderr)
+            return False
+        if floor is not None and not -80 <= floor <= -20:
+            print("conv: --floor is the noise floor in dB, -80 to -20", file=sys.stderr)
+            return False
+        nf = floor if floor is not None else (None if DRY else noise_floor(ff, src))
+        if nf is None and not DRY:
+            print(f"conv: no sound to measure in {src}", file=sys.stderr)
+            return False
+        flt = f"afftdn=nr={nr:g}:nf={'MEASURED' if nf is None else format(nf, '.1f')}"
+        how = {"filter": "afftdn", "reduction_db": nr, "floor_db": nf}
+    out = o or out_path(src, s, None, outdir, suffix=" denoised")
+    t = ext(out)
+    codec = {"mp3": ["-c:a", "libmp3lame", "-q:a", "2"], "avi": ["-c:a", "libmp3lame", "-q:a", "2"], "webm": ["-c:a", "libopus"], "opus": ["-c:a", "libopus"],
+             "wav": [], "flac": [], "ogg": [], "aiff": [], "wma": []}.get(t, ["-c:a", "aac", "-b:a", "192k"])
+    # the picture and subtitles are copied as they are; only the sound is filtered, so it alone is encoded again
+    cmd = [ff, "-hide_banner", "-loglevel", "error", "-i", src, "-map", "0:v?", "-map", "0:a", "-map", "0:s?", "-c:v", "copy", "-c:s", "copy", "-af", flt, *codec, out]
+    if not run(cmd, "ffmpeg " + how["filter"], out):
+        return False
+    if made and made[-1]["out"] == out:
+        made[-1].update(how)
+        if not AS_JSON and "floor_db" in how:
+            print(f"  noise floor {how['floor_db']:.1f} dB{'' if floor is None else ' (yours)'}, {nr:g} dB taken off; --strength for more or less")
+    return True
+
+
+def stems(src, two, model, o, outdir):
+    """Demucs does the separating; conv finds it, keeps its output folder tidy and never touches the song."""
+    d = have("demucs")
+    if not d:
+        print(f"conv: stems needs Demucs, which isn't installed:\n  {TOOLS['demucs']}\nnothing was written.", file=sys.stderr)
+        sys.exit(3)
+    if not os.path.exists(src):
+        print(f"conv: no such file {src}", file=sys.stderr)
+        return False
+    if ext(src) not in AUDIO and ext(src) not in VIDEO:
+        print(f"conv: stems takes a song (or a video's sound), not a .{ext(src)}", file=sys.stderr)
+        return False
+    parent = outdir or os.path.dirname(os.path.abspath(src))
+    stem = os.path.splitext(os.path.basename(src))[0]
+    dest = o or os.path.join(parent, f"{stem} stems")
+    n = 2
+    while not o and os.path.exists(dest):
+        dest = os.path.join(parent, f"{stem} stems ({n})")
+        n += 1
+    if o and os.path.exists(o):
+        print(f"conv: {o} is already there; name a folder that isn't", file=sys.stderr)
+        return False
+    cmd = [d, *(["-n", model] if model else []), *(["--two-stems", two] if two else [])]
+    if DRY:
+        print(" ".join(shlex.quote(c) for c in [*cmd, "-o", dest + ".part", src]) + f"   # then its files into {shlex.quote(dest)}/")
+        return True
+    work = tempfile.mkdtemp(prefix=".conv-stems-", dir=os.path.dirname(os.path.abspath(dest)))
+    try:
+        if not run([*cmd, "-o", work, src], "demucs", None):
+            return False
+        got = sorted(os.path.join(r, f) for r, _, fs in os.walk(work) for f in fs if ext(f) in ("wav", "mp3", "flac"))
+        if not got:
+            print(f"conv: demucs ran but left no stems for {src}", file=sys.stderr)
+            return False
+        os.makedirs(dest)
+        for f in got:
+            shutil.move(f, os.path.join(dest, os.path.basename(f)))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    names = [os.path.basename(f) for f in got]
+    made.append({"out": dest, "tool": "demucs", "stems": names})
+    if not AS_JSON:
+        print(f"wrote {dest}/  (demucs): {', '.join(names)}")
+    return True
 
 
 WHISPER_SRT = r'''
@@ -785,10 +1029,10 @@ def url_convert(url, to, o, outdir):
 def tools_report():
     for t, how in TOOLS.items():
         p = have(t)
-        print(f"  {'ok     ' if p else 'missing'}  {t:<12} {p or how}")
+        print(f"  {'ok     ' if p else 'missing'}  {t:<13} {p or how}")
     try:
         import PIL  # noqa
-        print("  ok       pillow       (python)")
+        print("  ok       pillow        (python)")
     except ImportError:
         pass
     return 0
@@ -802,7 +1046,8 @@ def main():
     if a == ["--tools"]:
         return tools_report()
     opt = {"o": None, "dir": None, "to": None, "every": 1, "pages": None, "fps": 12, "width": 480, "regex": False, "flatten": False,
-           "key": None, "cert": None, "chain": [], "field": None, "reason": None, "self_signed": None, "lang": None, "burn": False, "model": "small"}
+           "key": None, "cert": None, "chain": [], "field": None, "reason": None, "self_signed": None, "lang": None, "burn": False, "model": None,
+           "strength": None, "floor": None, "two": None}
     rest = []
     while a:
         x = a.pop(0)
@@ -823,8 +1068,16 @@ def main():
             opt["width"] = int(a.pop(0))
         elif x in ("--regex", "--flatten", "--burn"):
             opt[x[2:]] = True
-        elif x in ("--lang", "--model"):
+        elif x in ("--lang", "--model", "--two"):
             opt[x[2:]] = a.pop(0)
+        elif x in ("--title", "--author"):
+            META[x[2:]] = a.pop(0)
+        elif x in ("--strength", "--floor"):
+            try:
+                opt[x[2:]] = float(a.pop(0))
+            except (ValueError, IndexError):
+                print(f"conv: {x} takes a number of decibels", file=sys.stderr)
+                return 2
         elif x in ("--key", "--cert", "--field", "--reason", "--self-signed"):
             opt[x[2:].replace("-", "_")] = a.pop(0)
         elif x == "--chain":
@@ -881,7 +1134,15 @@ def main():
     elif cmd == "thumbs":
         ok = bool(args) and thumbs(args[0], opt["o"], opt["dir"])
     elif cmd == "subs":
-        ok = bool(args) and subs(args[0], opt["lang"], opt["burn"], opt["model"], opt["o"], opt["dir"])
+        ok = bool(args) and subs(args[0], opt["lang"], opt["burn"], opt["model"] or "small", opt["o"], opt["dir"])
+    elif cmd == "denoise":
+        ok = bool(args)
+        for f in args:
+            ok &= denoise(f, opt["strength"], opt["floor"], opt["model"], opt["o"] if len(args) == 1 else None, opt["dir"])
+    elif cmd == "stems":
+        ok = bool(args)
+        for f in args:
+            ok &= stems(f, opt["two"], opt["model"], opt["o"] if len(args) == 1 else None, opt["dir"])
     elif cmd == "extract":
         ok = bool(args)
         for f in args:
@@ -889,7 +1150,7 @@ def main():
     else:
         files = rest
         if not opt["to"]:
-            print("conv FILE... --to EXT  (or merge, split, pages, rotate, compress, ocr, unlock, redact, fields, fill, sign, verify, strip, extract, trim, audio, gif, thumbs)", file=sys.stderr)
+            print("conv FILE... --to EXT  (or merge, split, pages, rotate, compress, ocr, unlock, redact, fields, fill, sign, verify, strip, extract, trim, audio, gif, thumbs, subs, denoise, stems)", file=sys.stderr)
             return 2
         for f in files:
             if f.startswith(("http://", "https://")):
