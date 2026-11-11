@@ -69,8 +69,8 @@ already does · what Sakura should do next. "Built" means it runs and has an eva
 |---|---|---|---|---|
 | receipts into a ledger | Paperless-ngx, Sakura's `ledger` | the vision model (`look`) | `ledger add receipt.jpg` (eval) | `ledger export --hledger` so the ledger is plain-text accounting |
 | bank statements, budgets | hledger 1.52 (CSV rules import), beancount 3 + fava, Actual Budget 26.11 (web) | — | `dq` over CSVs | `money import bank.csv` through hledger's rules, `money month` — plain text, no bank credentials anywhere |
-| invoices | Invoice Ninja (self-host) | — | — | a LibreOffice template + `conv --to pdf` is enough for one person |
-| tax forms (Nepal, English + नेपाली) | pdfcpu `form fill`, LibreOffice templates; no open-source Nepal tax tool exists | the driver for the words | — | templates in `skills/` + `conv fill`; the roadmap's "for everyone who isn't a developer" |
+| invoices, receipts, quotations | Invoice Ninja (self-host) | — | `paper new invoice --item "desc,qty,rate"`: VAT 13% in whole paisa, the total in words, numbered per fiscal year in a plain-text register (eval) | a VAT-inclusive mode for retail bills; `paper register --hledger` straight into `money` |
+| letters and forms (Nepal, English + नेपाली) | pandoc + LibreOffice with a Devanagari font; pypdf form fill; no open-source Nepal tax tool exists | — (templates, no model) | `paper`: ten letter and bill templates in both languages, Bikram Sambat dates from a table (2000–2083), `paper fill FORM.pdf` for an office's own PDF form through `conv fill` (eval) | the BS table past 2083 as each year's calendar is published; the driver for free-text bodies; more templates |
 
 ## 7. The machine room and the fleet
 

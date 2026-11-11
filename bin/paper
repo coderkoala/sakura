@@ -1,0 +1,980 @@
+#!/usr/bin/env python3
+"""paper — letters, bills and everyday paperwork from templates, in English and नेपाली, filled and rendered on this machine. No model.
+
+  paper list [--lang en|ne]            the templates, by language (yours in ~/.sakura/paper/templates/ win over the shipped ones)
+  paper fields TEMPLATE [--lang ne]    what a template needs: every field, which are required (*), what your saved details answer
+  paper new TEMPLATE [--lang en|ne] [--set key=value ...] [--from FILE.json|.toml] [-o OUT.pdf|.docx|.md]
+                                       fill it and write the document (default: a PDF in this directory). A required field
+                                       that's missing refuses with the list and writes nothing; nothing is ever left as {{...}}
+  paper new invoice --item "desc,qty,rate" [--item ...] [--discount 500|10%] [--pan-only]
+                                       line items for invoice and quotation: amounts, VAT 13% and the total are computed here in
+                                       whole paisa, with the total in words. --pan-only is a bill without VAT (a PAN-registered seller)
+  paper new ... --ne-digits            numbers as १२३ in the amounts, dates and plain-number fields (the invoice number stays 123)
+  paper new ... --no-bs                leave the Bikram Sambat date out;  --draft  no number, nothing entered in the register;
+                                       --force  replace an existing -o file (without it an existing file is never overwritten)
+  paper me                             your saved details (name, address, phone, email, pan, business, bank_account ...; add
+                                       name_ne, address_ne ... for the नेपाली documents). Long numbers show only their last four
+  paper me set KEY VALUE               save one, typed once (0600 in ~/.sakura/paper/me.toml);  paper me get KEY  one, in full;
+  paper me unset KEY                   forget one
+  paper fill FORM.pdf [--map FIELD=key ...] [--go] [-o OUT.pdf]
+                                       a real PDF form (a bank's, an office's): your saved details onto its fields by name
+                                       (name, address, pan, phone, email, date). Shows the mapping; writes a copy only with --go,
+                                       through `conv fill`. The form itself is never changed. `conv fields FORM.pdf` lists every field
+  paper register [2083/84] [--hledger] every invoice and receipt issued: one line each, numbered per fiscal year, never reused.
+                                       --hledger prints them as journal entries (append to `money journal` if you keep one)
+  paper words 123456.50 [--lang ne]    an amount in words (lakh and crore; लाख र करोड)
+  paper date [YYYY-MM-DD|bs:YYYY-MM-DD]   a date in both calendars (Bikram Sambat 2000-2083 from a table; later years: see below)
+These are ordinary letters and business documents, not official government forms: for an office's own form, get its PDF and use
+`paper fill`. Dates given as bs:2083-07-25 are read as Bikram Sambat; १२३ digits are accepted anywhere a number is.
+A template is a text file NAME.LANG.md with its fields declared on top; copy one to ~/.sakura/paper/templates/ and edit it.
+The Nepali fiscal year (from 1 Shrawan) numbers the bills; `paper me set fiscal_year_start 01-01` (or 04-01, ...) changes that.
+Bikram Sambat years after the table's last come from ~/.sakura/paper/bs-years.txt, one line a year: 2084 31 32 31 ... (12 lengths).
+PDFs go through pandoc and LibreOffice; नेपाली needs a Devanagari font (sudo -A apt-get install -y fonts-noto-core), named with
+`paper me set font "Family"` or SAKURA_PAPER_FONT; without one it stops rather than print boxes. State: SAKURA_HOME.
+"""
+import datetime as dt
+import fcntl
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+import zipfile
+
+HOME = os.environ.get("SAKURA_HOME", os.path.expanduser("~/.sakura"))
+DIR = os.path.join(HOME, "paper")
+ME = os.path.join(DIR, "me.toml")
+REGISTER = os.path.join(DIR, "register.tsv")
+SEQ = os.path.join(DIR, "seq.json")
+BIN = os.path.dirname(os.path.realpath(__file__))
+SHIPPED = os.path.join(os.path.dirname(BIN), "templates", "paper")
+MINE = os.path.join(DIR, "templates")
+LANGS = {"en": "English", "ne": "नेपाली"}
+FONTS = ["Noto Sans Devanagari", "Noto Serif Devanagari", "Mukta", "Lohit Devanagari", "Kalimati", "Annapurna SIL", "Samanata", "FreeSerif", "FreeSans"]
+FONT_HELP = ("install one:  sudo -A apt-get install -y fonts-noto-core   (or fonts-lohit-deva, fonts-mukta)\n"
+             "or name one you have:  paper me set font \"Family\"")
+VAT_PERCENT = 13
+NE_DIGITS = str.maketrans("0123456789", "०१२३४५६७८९")
+ASCII_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
+DEVANAGARI = re.compile("[%s-%s]" % (chr(0x0900), chr(0x097F)))
+
+# ---- numbers in words -------------------------------------------------------------------------------------------------
+
+EN_SMALL = ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen "
+            "eighteen nineteen").split()
+EN_TENS = "- - twenty thirty forty fifty sixty seventy eighty ninety".split()
+NE_SMALL = (
+    "शून्य एक दुई तीन चार पाँच छ सात आठ नौ दश एघार बाह्र तेह्र चौध पन्ध्र सोह्र सत्र अठार उन्नाइस "
+    "बीस एक्काइस बाइस तेइस चौबीस पच्चीस छब्बीस सत्ताइस अट्ठाइस उनन्तीस तीस एकतीस बत्तीस तेत्तीस चौँतीस पैँतीस छत्तीस सैँतीस अठतीस उनन्चालीस "
+    "चालीस एकचालीस बयालीस त्रिचालीस चवालीस पैँतालीस छयालीस सतचालीस अठचालीस उनन्चास पचास एकाउन्न बाउन्न त्रिपन्न चवन्न पचपन्न छपन्न सन्ताउन्न अन्ठाउन्न उनन्साठी "
+    "साठी एकसट्ठी बयसट्ठी त्रिसट्ठी चौसट्ठी पैँसट्ठी छयसट्ठी सतसट्ठी अठसट्ठी उनन्सत्तरी सत्तरी एकहत्तर बहत्तर त्रिहत्तर चौहत्तर पचहत्तर छयहत्तर सतहत्तर अठहत्तर उनासी "
+    "असी एकासी बयासी त्रियासी चौरासी पचासी छयासी सतासी अठासी उनान्नब्बे नब्बे एकानब्बे बयानब्बे त्रियानब्बे चौरानब्बे पन्चानब्बे छयानब्बे सन्तानब्बे अन्ठानब्बे उनान्सय"
+).split()
+assert len(NE_SMALL) == 100
+
+
+def words_en(n):
+    """A whole number in English words, the way amounts are written in Nepal: thousand, lakh, crore."""
+    if n < 20:
+        return EN_SMALL[n]
+    if n < 100:
+        return EN_TENS[n // 10] + ("-" + EN_SMALL[n % 10] if n % 10 else "")
+    parts = []
+    for size, name in ((10_000_000, "crore"), (100_000, "lakh"), (1000, "thousand"), (100, "hundred")):
+        if n >= size:
+            parts.append(f"{words_en(n // size)} {name}")
+            n %= size
+    if n:
+        parts.append(words_en(n))
+    return " ".join(parts)
+
+
+def words_ne(n):
+    """A whole number in Nepali words: सय, हजार, लाख, करोड, अर्ब, खर्ब."""
+    if n < 100:
+        return NE_SMALL[n]
+    parts = []
+    for size, name in ((100_000_000_000, "खर्ब"), (1_000_000_000, "अर्ब"), (10_000_000, "करोड"), (100_000, "लाख"), (1000, "हजार"), (100, "सय")):
+        if n >= size:
+            parts.append(f"{words_ne(n // size)} {name}")
+            n %= size
+    if n:
+        parts.append(NE_SMALL[n])
+    return " ".join(parts)
+
+
+def amount_words(paisa, lang):
+    """Rupees and paisa in words, as written under a bill's total."""
+    rupees, p = divmod(paisa, 100)
+    if lang == "ne":
+        return f"रुपैयाँ {words_ne(rupees)}" + (f" र पैसा {words_ne(p)}" if p else "") + " मात्र"
+    cap = lambda s: " ".join("-".join(x.capitalize() for x in w.split("-")) for w in s.split())  # noqa: E731
+    return f"Rupees {cap(words_en(rupees))}" + (f" and Paisa {cap(words_en(p))}" if p else "") + " Only"
+
+
+def group(n):
+    """1234567 → 12,34,567: the last three digits, then twos."""
+    s = str(n)
+    if len(s) <= 3:
+        return s
+    head, tail = s[:-3], s[-3:]
+    pairs = []
+    while len(head) > 2:
+        pairs.insert(0, head[-2:])
+        head = head[:-2]
+    return ",".join([head, *pairs, tail])
+
+
+def money(paisa):
+    return f"{group(paisa // 100)}.{paisa % 100:02d}"
+
+
+def half_up(num, den):
+    """num/den rounded to the nearest whole, halves up. Integers only, so no float ever touches money."""
+    return (2 * num + den) // (2 * den)
+
+
+def parse_decimal(text, places, what):
+    """'1,500.50' → 150050 for places=2. Refuses anything that isn't a plain non-negative number."""
+    s = str(text).translate(ASCII_DIGITS).strip()
+    s = re.sub(r"^(rs\.?|npr|रु\.?)\s*", "", s, flags=re.I).replace(",", "").replace(" ", "")
+    m = re.fullmatch(r"(\d+)(?:\.(\d{0,%d}))?" % places, s)
+    if not m:
+        raise ValueError(f"{what}: {text!r} isn't a number I can use (digits, at most {places} after the point)")
+    return int(m.group(1)) * 10 ** places + int((m.group(2) or "").ljust(places, "0"))
+
+
+# ---- Bikram Sambat ----------------------------------------------------------------------------------------------------
+
+# Month lengths, Baisakh..Chaitra, as (length - 29), for BS 2000..2083; 1 Baisakh 2000 was 14 April 1943. Two separately
+# kept tables (the nepali-datetime and nepali packages, both MIT) agree on every year here but Baisakh/Jestha 2062, so those two
+# months are not converted. Later years are only projections until each year's calendar is published: add them to bs-years.txt.
+BS_FIRST = 2000
+BS_EPOCH = dt.date(1943, 4, 14)
+BS_TABLE = (
+    "132321110102 223222101011 223321101011 232321110012 132321110102 223222101011 223321101011 232321110012 "
+    "222322011002 223222101011 223321101011 232321110012 222322011011 223222101011 223321101011 232321110012 "
+    "222322011011 223222101011 232321101011 232321110102 222322101011 223222101011 232321110011 232321110102 "
+    "222322101011 223222101011 232321110012 132321110102 223222101011 223231101011 232321110012 132321110102 "
+    "223222101011 223321101011 232321110012 132322011002 223222101011 223321101011 232321110012 222322011011 "
+    "223222101011 223321101011 232321110012 222322011011 223222101011 232321101011 232321110012 222322101011 "
+    "223222101011 232321110011 232321110102 222322101011 223222101011 232321110011 232321110102 223222101011 "
+    "223231101011 232321110012 132321110102 223222101011 223321101011 232321110012 222322010102 223222101011 "
+    "223321101011 232321110012 222322011002 223222101011 223321101011 232321110012 222322011011 223222101011 "
+    "232321101011 232321110012 222322101011 223222101011 232321110011 232321110102 222322101011 223222101011 "
+    "232321110011 232321110102 223222101011 223222101011"
+).split()
+BS_UNSURE = {(2062, 1), (2062, 2)}
+BS_MONTHS = {"en": "Baisakh Jestha Ashadh Shrawan Bhadra Ashwin Kartik Mangsir Poush Magh Falgun Chaitra".split(),
+             "ne": "वैशाख जेठ असार साउन भदौ असोज कात्तिक मंसिर पुस माघ फागुन चैत".split()}
+AD_MONTHS = {"en": "January February March April May June July August September October November December".split(),
+             "ne": "जनवरी फेब्रुअरी मार्च अप्रिल मे जुन जुलाई अगस्ट सेप्टेम्बर अक्टोबर नोभेम्बर डिसेम्बर".split()}
+
+
+def bs_years():
+    """[[12 month lengths], ...] from BS_FIRST on: the table, then whatever years the user has added, as long as they follow on."""
+    years = [[int(c) + 29 for c in row] for row in BS_TABLE]
+    try:
+        for line in open(os.path.join(DIR, "bs-years.txt"), encoding="utf-8"):
+            nums = [int(x) for x in re.findall(r"\d+", line.split("#")[0].translate(ASCII_DIGITS))]
+            if len(nums) == 13 and nums[0] == BS_FIRST + len(years) and all(29 <= n <= 32 for n in nums[1:]):
+                years.append(nums[1:])
+    except OSError:
+        pass
+    return years
+
+
+def ad_to_bs(day):
+    """(year, month, day) in Bikram Sambat, or None when the date is outside what the table knows for certain."""
+    n = (day - BS_EPOCH).days
+    if n < 0:
+        return None
+    for i, months in enumerate(bs_years()):
+        if n < sum(months):
+            for m, length in enumerate(months, 1):
+                if n < length:
+                    return None if (BS_FIRST + i, m) in BS_UNSURE else (BS_FIRST + i, m, n + 1)
+                n -= length
+        n -= sum(months)
+    return None
+
+
+def bs_to_ad(y, m, d):
+    years = bs_years()
+    if not (BS_FIRST <= y < BS_FIRST + len(years)) or not 1 <= m <= 12 or not 1 <= d <= years[y - BS_FIRST][m - 1] or (y, m) in BS_UNSURE:
+        return None
+    return BS_EPOCH + dt.timedelta(days=sum(sum(x) for x in years[:y - BS_FIRST]) + sum(years[y - BS_FIRST][:m - 1]) + d - 1)
+
+
+def today():
+    now = os.environ.get("SAKURA_PAPER_NOW")
+    return dt.date.fromisoformat(now[:10]) if now else dt.date.today()
+
+
+def parse_date(text):
+    s = str(text).translate(ASCII_DIGITS).strip().lower()
+    if s in ("", "today"):
+        return today()
+    m = re.fullmatch(r"(bs:)?\s*(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", s)
+    if not m:
+        raise ValueError(f"{text!r} isn't a date: write 2026-11-11, or bs:2083-07-25 for Bikram Sambat")
+    y, mo, d = int(m.group(2)), int(m.group(3)), int(m.group(4))
+    if m.group(1):
+        day = bs_to_ad(y, mo, d)
+        if not day:
+            raise ValueError(f"{text!r}: that Bikram Sambat date isn't in the table (2000-{BS_FIRST + len(bs_years()) - 1}); give the date as YYYY-MM-DD")
+        return day
+    try:
+        return dt.date(y, mo, d)
+    except ValueError:
+        raise ValueError(f"{text!r} isn't a real date")
+
+
+def date_forms(day, lang, with_bs):
+    """The spellings of one date a template can use: X (Gregorian), X_bs, X_full (both), X_local (the one the language reads first)."""
+    ad = f"{day.day} {AD_MONTHS['en'][day.month - 1]} {day.year}" if lang == "en" else f"ई.सं. {day.year} {AD_MONTHS['ne'][day.month - 1]} {day.day}"
+    bs = ad_to_bs(day) if with_bs else None
+    if not bs:
+        return {"": ad, "_bs": "", "_full": ad, "_local": ad, "_iso": day.isoformat()}
+    if lang == "en":
+        b = f"{bs[2]} {BS_MONTHS['en'][bs[1] - 1]} {bs[0]} BS"
+        return {"": ad, "_bs": b, "_full": f"{ad} ({b})", "_local": ad, "_iso": day.isoformat()}
+    b = f"{bs[0]} {BS_MONTHS['ne'][bs[1] - 1]} {bs[2]} गते"
+    return {"": ad, "_bs": b, "_full": f"{b} ({ad})", "_local": b, "_iso": day.isoformat()}
+
+
+def fiscal_year(day, start):
+    """The fiscal year a date falls in, as the bills name it: 2083/84 from 1 Shrawan, or 2026/27 from a fixed MM-DD, or 2026."""
+    if start in ("", "shrawan"):
+        bs = ad_to_bs(day)
+        if not bs:
+            raise ValueError(f"{day.isoformat()} is outside the Bikram Sambat table, so I can't name its fiscal year. Add the year to "
+                             f"{os.path.join(DIR, 'bs-years.txt')} (see paper --help), or number by a fixed date: paper me set fiscal_year_start 07-16")
+        y = bs[0] if bs[1] >= 4 else bs[0] - 1
+        return f"{y}/{(y + 1) % 100:02d}"
+    m = re.fullmatch(r"(\d{1,2})-(\d{1,2})", start)
+    if not m:
+        raise ValueError(f"fiscal_year_start is {start!r}; it should be shrawan or MM-DD (paper me set fiscal_year_start 01-01)")
+    first = (int(m.group(1)), int(m.group(2)))
+    if first == (1, 1):
+        return str(day.year)
+    y = day.year if (day.month, day.day) >= first else day.year - 1
+    return f"{y}/{(y + 1) % 100:02d}"
+
+
+# ---- saved details ----------------------------------------------------------------------------------------------------
+
+def me_load():
+    try:
+        with open(ME, "rb") as f:
+            return {k: str(v) for k, v in tomllib.load(f).items()}
+    except OSError:
+        return {}
+    except tomllib.TOMLDecodeError as e:
+        sys.exit(f"paper: {ME} isn't valid TOML ({e}). Fix or remove it.")
+
+
+def me_save(data):
+    os.makedirs(DIR, mode=0o700, exist_ok=True)
+    text = "# paper — your details, typed once. key = \"value\"; edit freely.\n" + "".join(
+        f'{k} = "{v.replace(chr(92), chr(92) * 2).replace(chr(34), chr(92) + chr(34)).replace(chr(10), chr(92) + "n")}"\n' for k, v in sorted(data.items()))
+    fd = os.open(ME + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.chmod(ME + ".tmp", 0o600)
+    os.replace(ME + ".tmp", ME)
+
+
+def masked(value):
+    """A long number (an account, a PAN, a phone) shows only its last four; anything else shows whole."""
+    digits = sum(c.isdigit() for c in value.translate(ASCII_DIGITS))
+    solid = [c for c in value if not c.isspace()]
+    if digits >= 6 and digits * 2 >= len(solid):
+        return "*" * max(len(value) - 4, 3) + value[-4:]
+    return value
+
+
+def me_cmd(args):
+    data = me_load()
+    if not args:
+        if not data:
+            print('nothing saved yet. Start with:  paper me set name "Your Name"   (then address, phone, email, pan, business, bank_account)')
+            return 0
+        w = max(len(k) for k in data)
+        for k in sorted(data):
+            print(f"  {k.ljust(w)}  {masked(data[k])}")
+        return 0
+    if args[0] == "set" and len(args) >= 3:
+        key = args[1].lower()
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", key):
+            sys.exit(f"paper: {args[1]!r} isn't a key I can keep: small letters, digits and _ (name, address_ne, bank_account)")
+        data[key] = " ".join(args[2:])
+        me_save(data)
+        print(f"saved {key} = {masked(data[key])}")
+        return 0
+    if args[0] == "get" and len(args) == 2:
+        if args[1] not in data:
+            print(f"paper: nothing saved as {args[1]}", file=sys.stderr)
+            return 1
+        print(data[args[1]])
+        return 0
+    if args[0] == "unset" and len(args) == 2:
+        if data.pop(args[1], None) is None:
+            print(f"paper: nothing saved as {args[1]}", file=sys.stderr)
+            return 1
+        me_save(data)
+        print(f"forgot {args[1]}")
+        return 0
+    print("usage: paper me | paper me set KEY VALUE | paper me get KEY | paper me unset KEY", file=sys.stderr)
+    return 2
+
+
+def from_me(spec, lang, data):
+    """A field's `me = "business|name"`: the first saved key, the language's own (name_ne) before the plain one."""
+    for key in spec.split("|"):
+        for k in ([f"{key}_{lang}"] if lang != "en" else []) + [key]:
+            if data.get(k):
+                return data[k]
+    return ""
+
+
+# ---- templates --------------------------------------------------------------------------------------------------------
+
+def template_files():
+    """{(name, lang): path}; a file in the user's own folder replaces the shipped one of the same name."""
+    found = {}
+    for d in (SHIPPED, MINE):
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for f in names:
+            m = re.fullmatch(r"([a-z0-9][a-z0-9-]*)\.([a-z]{2})\.md", f)
+            if m:
+                found[(m.group(1), m.group(2))] = os.path.join(d, f)
+    return found
+
+
+def load(name, lang):
+    files = template_files()
+    path = files.get((name, lang))
+    if not path:
+        langs = sorted(l for n, l in files if n == name)
+        if langs:
+            sys.exit(f"paper: {name} isn't written in {lang} yet; it has: {', '.join(langs)}")
+        sys.exit(f"paper: no template called {name}. `paper list` shows them.")
+    text = open(path, encoding="utf-8").read()
+    m = re.match(r"\+\+\+\n(.*?)\n\+\+\+\n", text, re.S)
+    if not m:
+        sys.exit(f"paper: {path} has no +++ header declaring its fields")
+    try:
+        head = tomllib.loads(m.group(1))
+    except tomllib.TOMLDecodeError as e:
+        sys.exit(f"paper: the header of {path} isn't valid TOML: {e}")
+    head.setdefault("fields", {})
+    head["fields"].setdefault("date", {"kind": "date", "label": "the date on it (default: today)" if lang == "en" else "पत्रको मिति (नदिए आजको)"})
+    return head, text[m.end():], path
+
+
+def pick_lang(args, data):
+    lang = flag(args, "--lang") or data.get("lang") or "en"
+    if lang not in LANGS:
+        sys.exit(f"paper: --lang is en or ne, not {lang}")
+    return lang
+
+
+def flag(args, name, many=False):
+    """Take `name VALUE` out of args. With many, every one of them."""
+    got = []
+    while name in args:
+        i = args.index(name)
+        if i + 1 >= len(args):
+            sys.exit(f"paper: {name} needs a value")
+        got.append(args[i + 1])
+        del args[i:i + 2]
+    return got if many else (got[-1] if got else None)
+
+
+def switch(args, name):
+    if name in args:
+        args.remove(name)
+        return True
+    return False
+
+
+def list_cmd(args):
+    only = flag(args, "--lang")
+    files = template_files()
+    for lang in LANGS:
+        if only and only != lang:
+            continue
+        names = sorted(n for n, l in files if l == lang)
+        if not names:
+            continue
+        print(f"{LANGS[lang]} ({lang})")
+        for n in names:
+            head, _, path = load(n, lang)
+            yours = "  (yours)" if path.startswith(MINE + os.sep) else ""
+            print(f"  {n:<20} {head.get('title', '')}: {head.get('about', '')}{yours}")
+    if not files:
+        print(f"no templates found in {SHIPPED}")
+        return 1
+    print("\npaper fields NAME   what one needs      paper new NAME --lang ne --set key=value ...   write it")
+    return 0
+
+
+def fields_cmd(args):
+    data = me_load()
+    lang = pick_lang(args, data)
+    if not args:
+        print("usage: paper fields TEMPLATE [--lang en|ne]", file=sys.stderr)
+        return 2
+    head, _, path = load(args[0], lang)
+    print(f"{args[0]} ({lang}) — {head.get('title', '')}: {head.get('about', '')}\n  {path}")
+    w = max(len(k) for k in head["fields"])
+    for k, f in head["fields"].items():
+        saved = from_me(f["me"], lang, data) if f.get("me") else ""
+        note = f"   saved: {masked(saved)}" if saved else (f"   (paper me set {f['me'].split('|')[0]} ...)" if f.get("me") else "")
+        kind = {"date": "a date", "money": "an amount", "para": "text, may run to paragraphs"}.get(f.get("kind"), "")
+        default = f"   default: {f['default']}" if f.get("default") else ""
+        print(f"  {k.ljust(w)} {'*' if f.get('required') else ' '} {f.get('label', '')}{' (' + kind + ')' if kind else ''}{default}{note}")
+    print("  * required")
+    if head.get("items"):
+        print('  line items: --item "description,quantity,rate" at least once; --discount 500 or 10%; --pan-only for a bill without VAT')
+    if head.get("series"):
+        print(f"  numbered {head['series']}-<fiscal year>-0001 and entered in the register when written (--draft: neither)")
+    return 0
+
+
+# ---- filling ----------------------------------------------------------------------------------------------------------
+
+def esc(value):
+    """A value as literal text in markdown: nothing the user types can turn into a heading, a list, a table cell or a link."""
+    s = re.sub(r"[ \t]+", " ", str(value)).strip()
+    s = re.sub(r"([\\`*_\[\]<|])", r"\\\1", s)
+    s = re.sub(r"&(?=#?\w+;)", r"\\&", s)
+    s = re.sub(r"^([#>+\-=:~])", r"\\\1", s)
+    return re.sub(r"^(\d+)([.)])", r"\1\\\2", s)
+
+
+def parse_item(text):
+    parts = [p.strip() for p in str(text).rsplit(",", 2)]
+    if len(parts) != 3 or not parts[0]:
+        raise ValueError(f'--item {text!r}: write it as "description,quantity,rate" (the rate without commas: 1500.50)')
+    qty = parse_decimal(parts[1], 3, f"quantity of {parts[0]!r}")
+    rate = parse_decimal(parts[2], 2, f"rate of {parts[0]!r}")
+    if qty == 0:
+        raise ValueError(f"--item {text!r}: the quantity is zero")
+    return {"desc": parts[0], "qty": qty, "rate": rate, "amount": half_up(qty * rate, 1000)}
+
+
+def totals(items, discount, vat):
+    """Every figure on a bill, in whole paisa. The discount comes off before VAT; VAT is 13% of what's left, halves rounded up."""
+    subtotal = sum(i["amount"] for i in items)
+    off = 0
+    if discount:
+        d = str(discount).translate(ASCII_DIGITS).strip()
+        off = half_up(subtotal * parse_decimal(d[:-1], 2, "--discount"), 10000) if d.endswith("%") else parse_decimal(d, 2, "--discount")
+        if off > subtotal:
+            raise ValueError("--discount is more than the bill")
+    taxable = subtotal - off
+    tax = half_up(taxable * VAT_PERCENT, 100) if vat else 0
+    return {"subtotal": subtotal, "discount": off, "taxable": taxable, "vat": tax, "total": taxable + tax}
+
+
+LABELS = {
+    "en": {"sn": "S.N.", "desc": "Description", "qty": "Qty", "rate": "Rate (Rs.)", "amount": "Amount (Rs.)", "subtotal": "Subtotal", "discount": "Discount",
+           "taxable": "Taxable amount", "vat": f"VAT {VAT_PERCENT}%", "total": "Total", "vat_no": "VAT No.", "pan_no": "PAN No."},
+    "ne": {"sn": "क्र.सं.", "desc": "विवरण", "qty": "परिमाण", "rate": "दर (रु.)", "amount": "रकम (रु.)", "subtotal": "जम्मा", "discount": "छुट",
+           "taxable": "करयोग्य रकम", "vat": f"मू.अ.कर {VAT_PERCENT}%", "total": "कुल जम्मा", "vat_no": "मू.अ.कर दर्ता नं.", "pan_no": "स्थायी लेखा नं. (PAN)"},
+}
+
+
+def items_table(items, t, lang, vat, num):
+    """The bill's table as a pipe table. The dashes set the column widths, so the description gets the room."""
+    L = LABELS[lang]
+    qty = lambda q: num(str(q // 1000) + (("." + f"{q % 1000:03d}".rstrip("0")) if q % 1000 else ""))  # noqa: E731
+    rows = [f"| {L['sn']} | {L['desc']} | {L['qty']} | {L['rate']} | {L['amount']} |", "|--------:|:--------------------------------|---------:|---------------:|-----------------:|"]
+    for n, i in enumerate(items, 1):
+        rows.append(f"| {num(str(n))} | {esc(i['desc'])} | {qty(i['qty'])} | {num(money(i['rate']))} | {num(money(i['amount']))} |")
+    summary = [("subtotal", t["subtotal"])] if (t["discount"] or vat) else []
+    if t["discount"]:
+        summary.append(("discount", t["discount"]))
+    if vat:
+        summary += ([("taxable", t["taxable"])] if t["discount"] else []) + [("vat", t["vat"])]
+    for key, value in summary:
+        rows.append(f"| | | | {num(L[key])} | {num(money(value))} |")
+    rows.append(f"| | | | **{L['total']}** | **{num(money(t['total']))}** |")
+    return "\n".join(rows)
+
+
+def fill(body, values):
+    """{{#x}}...{{/x}} stays when x has a value, {{^x}}...{{/x}} when it has none; then every {{x}} is replaced, once."""
+    block = re.compile(r"\{\{([#^])([a-z0-9_]+)\}\}((?:(?!\{\{[#^]).)*?)\{\{/\2\}\}", re.S)
+    while True:
+        body, n = block.subn(lambda m: m.group(3) if bool(values.get(m.group(2))) == (m.group(1) == "#") else "", body)
+        if not n:
+            break
+    unknown = sorted({m for m in re.findall(r"\{\{([^{}]*)\}\}", body) if m not in values})
+    if unknown or re.search(r"\{\{[#^/]", body):
+        raise KeyError(", ".join(unknown) or "an unclosed {{#...}} block")
+    return re.sub(r"\{\{([a-z0-9_]+)\}\}", lambda m: values[m.group(1)], body)
+
+
+def gather(head, lang, args, data):
+    """Every field's raw value: --set, then --from, then the saved details, then the template's default."""
+    given = {}
+    src = flag(args, "--from")
+    if src:
+        try:
+            with open(src, "rb") as f:
+                given = tomllib.load(f) if src.lower().endswith(".toml") else json.load(f)
+        except (OSError, ValueError) as e:
+            sys.exit(f"paper: can't read {src}: {e}")
+        if not isinstance(given, dict):
+            sys.exit(f"paper: {src} should be one object of key: value")
+    file_items = given.pop("items", [])
+    extra = sorted(k for k in given if k not in head["fields"])
+    if file_items and not head.get("items"):
+        extra, file_items = extra + ["items"], []
+    if extra:
+        print(f"paper: not used by this template (from {src}): {', '.join(extra)}", file=sys.stderr)
+    for pair in flag(args, "--set", many=True):
+        k, eq, v = pair.partition("=")
+        if not eq or k not in head["fields"]:
+            sys.exit(f"paper: --set {pair!r}: write key=value, with a key from `paper fields`: {', '.join(head['fields'])}")
+        given[k] = v
+    raw = {}
+    for k, f in head["fields"].items():
+        v = given.get(k)
+        if v in (None, ""):
+            v = from_me(f["me"], lang, data) if f.get("me") else ""
+        if v in (None, ""):
+            v = f.get("default", "")
+        raw[k] = str(v).strip()
+    items = [",".join(str(x) for x in (i if isinstance(i, list) else [i.get("desc", ""), i.get("qty", 1), i.get("rate", "")])) for i in file_items]
+    return raw, items + flag(args, "--item", many=True)
+
+
+NUMBER = "\x00number\x00"  # stands in for the bill's number until one is issued, under the lock
+
+
+def build(name, lang, args, data):
+    """The filled markdown and the facts for the register. Raises ValueError with what to fix; nothing is written here."""
+    head, body, _ = load(name, lang)
+    with_bs, ne_digits, pan_only = not switch(args, "--no-bs"), switch(args, "--ne-digits"), switch(args, "--pan-only")
+    discount = flag(args, "--discount")
+    raw, item_texts = gather(head, lang, args, data)
+    num = (lambda s: s.translate(NE_DIGITS)) if ne_digits else (lambda s: s)
+    missing = [k for k, f in head["fields"].items() if f.get("required") and not raw[k]]
+    if head.get("items") and not item_texts:
+        missing.append("--item")
+    if missing:
+        w = max(len(k) for k in missing)
+        item_help = 'a line of the bill: --item "description,quantity,rate"'
+        lines = [f"  {k.ljust(w)}  {head['fields'].get(k, {}).get('label', item_help)}" for k in missing]
+        raise ValueError(f"{name} ({lang}) needs these before it can be written; nothing was:\n" + "\n".join(lines)
+                         + "\ngive them with --set key=value (or --from FILE.json); your own details once with: paper me set KEY VALUE")
+    values, facts = {}, {"date": today(), "party": "", "taxable": 0, "vat": 0, "total": 0}
+    for k, f in head["fields"].items():
+        v, kind = raw[k], f.get("kind", "text")
+        if kind == "date":
+            if not v and k != "date":
+                values.update({k + s: "" for s in ("", "_bs", "_full", "_local", "_iso")})
+                continue
+            day = parse_date(v)
+            values.update({k + s: (x if s == "_iso" else num(x)) for s, x in date_forms(day, lang, with_bs).items()})
+            if k == "date":
+                facts["date"] = day
+        elif kind == "money":
+            if not v:
+                values.update({k: "", k + "_words": ""})
+                continue
+            p = parse_decimal(v, 2, k)
+            values.update({k: num(money(p)), k + "_words": amount_words(p, lang)})
+            if k == head.get("amount"):
+                facts["taxable"] = facts["total"] = p
+        elif kind == "para":
+            values[k] = "\n\n".join(esc(line) for line in re.split(r"\n+", v) if line.strip())
+        else:
+            flat = esc(re.sub(r"\s*\n\s*", ", ", v))
+            values[k] = num(flat) if re.fullmatch(r"[\d\s,./()+:\\-]+", flat) else flat
+    if head.get("items"):
+        items = [parse_item(t) for t in item_texts]
+        t = totals(items, discount, not pan_only)
+        values.update({k: num(money(v)) for k, v in t.items()})
+        values.update({"items_table": items_table(items, t, lang, not pan_only, num), "total_words": amount_words(t["total"], lang),
+                       "tax_id_label": LABELS[lang]["pan_no" if pan_only else "vat_no"], "vat_bill": "" if pan_only else "1"})
+        facts.update({"taxable": t["taxable"], "vat": t["vat"], "total": t["total"]})
+    elif discount or pan_only or item_texts:
+        raise ValueError(f"{name} has no line items: --item, --discount and --pan-only are for invoice and quotation")
+    facts["party"] = raw.get(head.get("party", ""), "")
+    values["number"] = NUMBER
+    try:
+        text = fill(body, values)
+    except KeyError as e:
+        raise ValueError(f"the {name}.{lang} template uses a field it doesn't declare: {e.args[0]}")
+    return head, text.strip() + "\n", facts
+
+
+# ---- rendering --------------------------------------------------------------------------------------------------------
+
+PANDOC_FROM = ("markdown-smart-raw_html-raw_tex-tex_math_dollars-citations-footnotes-inline_notes-subscript-superscript-strikeout"
+               "-yaml_metadata_block-pandoc_title_block-definition_lists-example_lists-fancy_lists-table_captions-latex_macros")
+
+
+def tool(name, install):
+    p = shutil.which(name) or (shutil.which("soffice") if name == "libreoffice" else None)
+    if not p:
+        print(f"paper: this needs {name}, which isn't installed:\n  {install}\n(-o FILE.md needs nothing: `conv` or any editor can take it from there)", file=sys.stderr)
+        sys.exit(3)
+    return p
+
+
+def deva_font(data):
+    """The Devanagari font to set the text in, by family name, or None. Asked of fontconfig; never a guess, never a bitmap fallback."""
+    if not shutil.which("fc-list"):
+        return None
+    out = subprocess.run(["fc-list", ":charset=915", "family"], capture_output=True, text=True).stdout
+    have = {name.strip() for line in out.splitlines() for name in line.split(",")}
+    want = os.environ.get("SAKURA_PAPER_FONT") or data.get("font")
+    if want and want not in have:
+        print(f"paper: the font {want!r} isn't installed or has no Devanagari; looking for another", file=sys.stderr)
+    return next((f for f in ([want] if want else []) + FONTS if f in have), None)
+
+
+def reference_docx(pandoc, path, font):
+    """pandoc's own reference document with A4 margins, black headings, ruled tables and, when given, the font named for every script."""
+    base = subprocess.run([pandoc, "--print-default-data-file", "reference.docx"], capture_output=True, check=True).stdout
+    with open(path + ".base", "wb") as f:
+        f.write(base)
+    borders = "<w:tblBorders>" + "".join(f'<w:{side} w:val="single" w:sz="4" w:space="0" w:color="000000"/>' for side in ("top", "left", "bottom", "right", "insideH", "insideV")) + "</w:tblBorders>"
+    page = '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1418" w:right="1418" w:bottom="1418" w:left="1418" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr>'
+    with zipfile.ZipFile(path + ".base") as zin, zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            blob = zin.read(item.filename)
+            if item.filename == "word/styles.xml":
+                s = blob.decode("utf-8")
+                if font:
+                    s = re.sub(r"<w:rFonts w:asciiTheme[^>]*/>", f'<w:rFonts w:ascii="{font}" w:hAnsi="{font}" w:eastAsia="{font}" w:cs="{font}" />', s)
+                    s = s.replace('w:bidi="ar-SA"', 'w:bidi="ne-NP"')
+                s = re.sub(r'<w:color w:val="[0-9A-Fa-f]{6}"[^>]*/>', '<w:color w:val="000000" />', s)
+                s = re.sub(r'(w:styleId="Table">.*?<w:tblPr>)', lambda m: m.group(1) + borders, s, count=1, flags=re.S)
+                s = s.replace('<w:sz w:val="24" />', '<w:sz w:val="22" />', 1).replace('<w:szCs w:val="24" />', '<w:szCs w:val="22" />', 1)
+                blob = s.encode("utf-8")
+            elif item.filename == "word/document.xml":
+                blob = re.sub(r"<w:sectPr\s*/>", page, blob.decode("utf-8")).encode("utf-8")
+            zout.writestr(item, blob)
+    os.unlink(path + ".base")
+
+
+def render(text, out, data):
+    """Write the document at `out` in the format its name asks for. Returns a word on how; exits with what to install otherwise."""
+    kind = os.path.splitext(out)[1].lower()
+    if kind in (".md", ".txt"):
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(text)
+        return "text"
+    if kind not in (".pdf", ".docx"):
+        sys.exit(f"paper: I write .pdf, .docx or .md, not {kind or 'a file with no ending'}  (then `conv FILE --to ...` for anything else)")
+    deva = bool(DEVANAGARI.search(text))
+    font = deva_font(data) if deva else None
+    if deva and not font:
+        if kind == ".pdf":
+            sys.exit(f"paper: there is no Devanagari font on this machine, so the PDF would come out as boxes. Nothing written.\n{FONT_HELP}\n"
+                     "(-o FILE.docx or FILE.md can still be written and opened where a font is)")
+        print("paper: no Devanagari font here; the .docx is written and will use whatever the machine that opens it has", file=sys.stderr)
+    pandoc = tool("pandoc", "sudo -A apt-get install -y pandoc")
+    office = tool("libreoffice", "sudo -A apt-get install -y libreoffice-writer") if kind == ".pdf" else None
+    with tempfile.TemporaryDirectory(prefix="paper-") as tmp:
+        src, ref, docx = os.path.join(tmp, "doc.md"), os.path.join(tmp, "reference.docx"), os.path.join(tmp, "doc.docx")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write(text)
+        reference_docx(pandoc, ref, font)
+        r = subprocess.run([pandoc, src, "-f", PANDOC_FROM, "-t", "docx", "--columns=20", "--reference-doc", ref, "-o", docx], capture_output=True, text=True)
+        if r.returncode != 0 or not os.path.exists(docx):
+            sys.exit(f"paper: pandoc failed:\n{r.stderr.strip()[-600:]}")
+        if kind == ".docx":
+            shutil.move(docx, out)
+            return "pandoc" + (f"; font {font}" if font else "")
+        # its own profile, so a LibreOffice the user has open doesn't swallow the job
+        r = subprocess.run([office, "--headless", "--norestore", f"-env:UserInstallation=file://{tmp}/profile", "--convert-to", "pdf", "--outdir", tmp, docx],
+                           capture_output=True, text=True, timeout=300, env=dict(os.environ, HOME=os.environ.get("HOME", tmp)))
+        pdf = os.path.join(tmp, "doc.pdf")
+        if not os.path.exists(pdf):
+            sys.exit(f"paper: LibreOffice made no PDF:\n{(r.stderr or r.stdout).strip()[-600:]}")
+        if font and shutil.which("pdffonts"):
+            used = subprocess.run(["pdffonts", pdf], capture_output=True, text=True).stdout
+            if font.replace(" ", "").lower() not in used.replace(" ", "").lower():
+                sys.exit(f"paper: the PDF didn't come out in {font} (LibreOffice substituted another font), so the नेपाली can't be trusted. Nothing written.\n{FONT_HELP}")
+        shutil.move(pdf, out)
+        return "pandoc, libreoffice" + (f"; font {font}" if font else "")
+
+
+# ---- the register -----------------------------------------------------------------------------------------------------
+
+REG_HEAD = "# paper — every numbered document issued. number, date, template, party, taxable, vat, total, file (tabs). Append-only.\n"
+
+
+def register_rows():
+    try:
+        lines = open(REGISTER, encoding="utf-8").read().splitlines()
+    except OSError:
+        return []
+    keys = ("number", "date", "template", "party", "taxable", "vat", "total", "file")
+    return [dict(zip(keys, line.split("\t") + [""] * 8)) for line in lines if line.strip() and not line.startswith("#")]
+
+
+def next_number(series, fy):
+    """The next number in a series for a fiscal year: one past the highest ever issued, by the register and by the counter beside it,
+    so removing a line from the register can't bring a number back."""
+    prefix = f"{series}-{fy}-"
+    seen = [int(r["number"][len(prefix):]) for r in register_rows() if r["number"].startswith(prefix) and r["number"][len(prefix):].isdigit()]
+    try:
+        counter = json.load(open(SEQ)).get(f"{series} {fy}", 0)
+    except (OSError, ValueError):
+        counter = 0
+    return max(seen + [counter]) + 1
+
+
+def register_add(series, fy, n, row):
+    try:
+        seq = json.load(open(SEQ))
+    except (OSError, ValueError):
+        seq = {}
+    seq[f"{series} {fy}"] = n
+    with open(SEQ + ".tmp", "w") as f:
+        json.dump(seq, f, indent=1, sort_keys=True)
+    os.replace(SEQ + ".tmp", SEQ)
+    new = not os.path.exists(REGISTER)
+    with open(REGISTER, "a", encoding="utf-8") as f:
+        f.write((REG_HEAD if new else "") + "\t".join(re.sub(r"\s+", " ", str(x)) for x in row) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def plain(paisa):
+    return f"{paisa // 100}.{paisa % 100:02d}"
+
+
+POSTINGS = {"INV": ("assets:receivable", "income:sales"), "RCT": ("assets:cash", "assets:receivable"), "RENT": ("assets:cash", "income:rent")}
+
+
+def register_cmd(args):
+    as_journal = switch(args, "--hledger")
+    rows = [r for r in register_rows() if not args or f"-{args[0]}-" in r["number"]]
+    if not rows:
+        print("nothing in the register" + (f" for {args[0]}" if args else " yet: `paper new invoice ...` or receipt enters a line"))
+        return 0
+    if as_journal:
+        for r in rows:
+            accounts = POSTINGS.get(r["number"].split("-")[0])
+            if not accounts:
+                continue
+            print(f"{r['date']} * ({r['number']}) {r['party']}")
+            print(f"    {accounts[0]:<24} NPR {r['total']}")
+            print(f"    {accounts[1]:<24} NPR -{r['taxable']}")
+            if r["vat"] not in ("", "0.00"):
+                print(f"    {'liabilities:vat':<24} NPR -{r['vat']}")
+            print()
+        return 0
+    w = max(len(r["number"]) for r in rows)
+    for r in rows:
+        print(f"{r['number'].ljust(w)}  {r['date']}  {r['template']:<13} {r['total']:>14}  {r['party']}")
+    return 0
+
+
+# ---- new --------------------------------------------------------------------------------------------------------------
+
+def free_path(path):
+    base, ext = os.path.splitext(path)
+    n = 2
+    while os.path.exists(path):
+        path = f"{base}-{n}{ext}"
+        n += 1
+    return path
+
+
+def new_cmd(args):
+    data = me_load()
+    lang = pick_lang(args, data)
+    out, draft, force = flag(args, "-o"), switch(args, "--draft"), switch(args, "--force")
+    if not args or args[0].startswith("-"):
+        print("usage: paper new TEMPLATE [--lang en|ne] [--set key=value ...] [--from FILE] [--item \"desc,qty,rate\" ...] [-o OUT.pdf|.docx|.md]", file=sys.stderr)
+        return 2
+    name, rest = args[0], args[1:]
+    try:
+        head, text, facts = build(name, lang, rest, data)
+        if rest:
+            raise ValueError(f"I don't know what to do with: {' '.join(rest)}  (see paper --help)")
+        series = head.get("series")
+        fy = fiscal_year(facts["date"], data.get("fiscal_year_start", "shrawan").lower()) if series and not draft else None
+    except ValueError as e:
+        print(f"paper: {e}", file=sys.stderr)
+        return 1
+    if out and not os.path.isdir(os.path.dirname(os.path.abspath(out))):
+        print(f"paper: there is no folder {os.path.dirname(os.path.abspath(out))} to write {os.path.basename(out)} into", file=sys.stderr)
+        return 1
+    if out and os.path.exists(out) and not force:
+        print(f"paper: {out} already exists and I won't write over it: choose another -o, or add --force", file=sys.stderr)
+        return 1
+    os.makedirs(DIR, mode=0o700, exist_ok=True)
+    with open(os.path.join(DIR, ".lock"), "w") as lock:
+        if fy:
+            fcntl.flock(lock, fcntl.LOCK_EX)  # one number at a time, even with two terminals open
+            n = next_number(series, fy)
+            number = f"{series}-{fy}-{n:04d}"
+        else:
+            number = ("DRAFT" if lang == "en" else "मस्यौदा") if series else ""
+        text = text.replace(NUMBER, number)
+        stem = f"{name}-{number.replace('/', '-')}" if fy else f"{name}-{facts['date'].isoformat()}"
+        final = out or free_path(os.path.join(os.getcwd(), stem + ".pdf"))
+        part = os.path.join(os.path.dirname(os.path.abspath(final)), f".paper-{os.getpid()}{os.path.splitext(final)[1]}")
+        try:
+            how = render(text, part, data)
+            if fy:  # the register first: a number that's on paper must never be given out again
+                register_add(series, fy, n, [number, facts["date"].isoformat(), name, facts["party"], plain(facts["taxable"]), plain(facts["vat"]), plain(facts["total"]), os.path.abspath(final)])
+            os.replace(part, final)
+        finally:
+            if os.path.exists(part):
+                os.unlink(part)
+    print(f"wrote {final}  ({how})")
+    if fy:
+        print(f"{number} entered in the register ({REGISTER})")
+    return 0
+
+
+# ---- a real PDF form --------------------------------------------------------------------------------------------------
+
+ALIASES = {
+    "name": "name fullname yourname applicantname nameofapplicant applicantsname taxpayername nameoftaxpayer customername accountname accountholdername नाम पूरानाम",
+    "address": "address fulladdress permanentaddress currentaddress mailingaddress postaladdress ठेगाना",
+    "pan": "pan panno pannumber panvat panvatno permanentaccountnumber permanentaccountno स्थायीलेखानम्बर",
+    "phone": "phone phoneno phonenumber mobile mobileno mobilenumber contact contactno contactnumber telephone tel cell फोन मोबाइल सम्पर्कनम्बर",
+    "email": "email emailaddress emailid mail इमेल",
+    "date": "date today dateofapplication applicationdate मिति",
+}
+
+
+def norm(name):
+    """A form field's name as the alias table knows it: the last part of form1[0].Page1[0].FullName[0], small, letters and digits only."""
+    parts = [part for part in re.sub(r"\[\d+\]", "", name).split(".") if re.search(r"\w", part)]
+    return re.sub(r"[\W_]+", "", (parts[-1] if parts else name).lower())
+
+
+def fill_cmd(args):
+    data = me_load()
+    lang = pick_lang(args, data)
+    go, out, maps = switch(args, "--go"), flag(args, "-o"), flag(args, "--map", many=True)
+    if len(args) != 1:
+        print("usage: paper fill FORM.pdf [--map FIELD=key ...] [--go] [-o OUT.pdf]", file=sys.stderr)
+        return 2
+    form, conv = args[0], os.path.join(BIN, "conv")
+    if not os.path.isfile(form):
+        print(f"paper: no such file {form}", file=sys.stderr)
+        return 1
+    if out and os.path.exists(out) and os.path.samefile(out, form):
+        print("paper: -o is the form itself; the form is never changed. Choose another name.", file=sys.stderr)
+        return 1
+    r = subprocess.run([conv, "fields", form, "--json"], capture_output=True, text=True)
+    try:
+        fields = json.loads(r.stdout)
+    except ValueError:
+        why = (r.stderr.strip().splitlines() or ["no output"])[-1]
+        print(f"paper: {form} isn't a PDF form I can read. `conv fields` said: {why}" + ("\n  pip install pypdf" if "pypdf'" in why else ""), file=sys.stderr)
+        return 1
+    if not fields:
+        print(f"{form} has no fillable fields (it isn't an AcroForm). `conv {form} --to docx` and an editor, or print it, is the way.")
+        return 1
+    known = {alias: key for key, words in ALIASES.items() for alias in words.split()}
+    wanted = {}
+    for pair in maps:
+        k, eq, v = pair.partition("=")
+        if not eq or k not in fields:
+            print(f"paper: --map {pair!r}: write FIELD=key with a field of this form: {', '.join(fields)}", file=sys.stderr)
+            return 2
+        wanted[k] = v
+    plan, alone = {}, []
+    for name, current in fields.items():
+        key = wanted.get(name) or known.get(norm(name))
+        value = today().isoformat() if key == "date" else (from_me(key, lang, data) if key else "")
+        if name not in wanted and current not in (None, ""):
+            alone.append(f"{name} (already filled)")
+        elif not key:
+            alone.append(name)
+        elif not value:
+            alone.append(f"{name} (nothing saved as {key}: paper me set {key} ...)")
+        else:
+            plan[name] = (key, value)
+    w = max((len(n) for n in plan), default=0)
+    for name, (key, value) in plan.items():
+        print(f"  {name.ljust(w)}  <- {key:<8} {value if key == 'date' else masked(value)}")
+    if alone:
+        print("  left alone: " + ", ".join(alone))
+    if not plan:
+        print("nothing of yours matches this form's field names. Name them: --map FIELD=key  (keys: paper me)")
+        return 1
+    if not go:
+        print(f"dry run: nothing written. Add --go to write a filled copy; {form} itself is never changed.")
+        return 0
+    with tempfile.TemporaryDirectory(prefix="paper-") as tmp:
+        values = os.path.join(tmp, "values.json")
+        fd = os.open(values, os.O_WRONLY | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({name: value for name, (_, value) in plan.items()}, f, ensure_ascii=False)
+        r = subprocess.run([conv, "fill", form, values, "--json"] + (["-o", out] if out else []), capture_output=True, text=True)
+    try:
+        made = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        print(f"paper: `conv fill` failed:\n{(r.stderr or r.stdout).strip()[-400:]}", file=sys.stderr)
+        return 1
+    print(f"wrote {made['out']}  (conv fill; {made.get('filled', len(plan))} fields). Check it before it goes anywhere.")
+    return 0
+
+
+# ---- small ones -------------------------------------------------------------------------------------------------------
+
+def words_cmd(args):
+    lang = flag(args, "--lang")
+    if len(args) != 1:
+        print("usage: paper words AMOUNT [--lang en|ne]", file=sys.stderr)
+        return 2
+    try:
+        p = parse_decimal(args[0], 2, "amount")
+    except ValueError as e:
+        print(f"paper: {e}", file=sys.stderr)
+        return 1
+    for l in ([lang] if lang else list(LANGS)):
+        print(f"{money(p) if l == 'en' else money(p).translate(NE_DIGITS)}  {amount_words(p, l)}")
+    return 0
+
+
+def date_cmd(args):
+    try:
+        day = parse_date(args[0] if args else "today")
+    except ValueError as e:
+        print(f"paper: {e}", file=sys.stderr)
+        return 1
+    bs = ad_to_bs(day)
+    if not bs:
+        print(f"{day.isoformat()}  {date_forms(day, 'en', False)['']}  (no Bikram Sambat date: outside the table, 2000-{BS_FIRST + len(bs_years()) - 1}, or one of the two months of 2062 the sources disagree on)")
+        return 1
+    print(f"{day.isoformat()} = bs:{bs[0]}-{bs[1]:02d}-{bs[2]:02d}")
+    print(f"  {date_forms(day, 'en', True)['_full']}")
+    print(f"  {date_forms(day, 'ne', True)['_full'].translate(NE_DIGITS)}")
+    return 0
+
+
+def main(argv):
+    cmds = {"list": list_cmd, "fields": fields_cmd, "new": new_cmd, "me": me_cmd, "fill": fill_cmd, "register": register_cmd, "words": words_cmd, "date": date_cmd}
+    if not argv or argv[0] in ("-h", "--help") or argv[0] not in cmds:
+        print(__doc__.strip())
+        return 0 if argv[:1] in (["-h"], ["--help"]) else 2
+    return cmds[argv[0]](list(argv[1:])) or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
