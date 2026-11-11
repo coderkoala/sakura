@@ -102,6 +102,9 @@ install_binary() {
     echo "  engine: $tag installed from the release ($got)"
 }
 install_binary
+if command -v loginctl >/dev/null 2>&1 && [ "$(loginctl show-user "$USER" --property=Linger 2>/dev/null)" = "Linger=no" ]; then
+    echo "  pa: reminders stop while you're logged out of this machine. To keep them coming: pa linger on"
+fi
 
 echo "Sakura $(cat "$ROOT/VERSION") installed to $SAKURA_HOME."
 missing=0

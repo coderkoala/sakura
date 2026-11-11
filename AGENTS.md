@@ -96,7 +96,9 @@ CHECK
 
 `pa` does these, without the model, and they survive reboots. Don't write your own cron job or reminder script.
 
-- `pa remind tomorrow, 10am birthday wish`, also `in 20 minutes`, `friday 3pm`, `every monday 9am`, `every 2 hours`. `pa list`, `pa cancel ID`.
+- `pa remind tomorrow, 10am birthday wish`, also `in 20 minutes`, `friday 3pm`, `every monday 9am`, `every 2 hours`, `every month on the 1st 9am`, `every year dec 26`. `pa list`, `pa cancel ID`.
+- Synced across machines a reminder fires on one (`pa devices`, `pa set home HOST`, `pa list --fired`); `pa linger on` keeps it firing while logged out.
+- `sakura-gateway` puts `notify` (reminders, night reports, offers) on the user's phone over Matrix or Signal and takes `yes ID`/`no ID`/`remind …` back; closed until `sakura-gateway setup …` then `pair`, which the user runs themselves. Asked "send it to my phone" → `sakura-gateway status`; never pair or set it up for them.
 - `pa brief [ROLE]` for what needs the user today, `pa standup` for what they've done, `pa roles` for the roles.
 - `pa todo add "thing due:2026-12-01"`, `pa clock in PROJECT`, `pa log "..."`.
 - `pa watch every day 8am: releases owner/repo` says when a `live` answer changes. `pa job every day 7am: ...` runs you later, unattended.

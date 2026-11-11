@@ -44,6 +44,8 @@
 #   money import bank.csv | month | where "KFC" | rule "KFC" expenses:food   statements into plain-text accounting (hledger)
 #   dupes DIR... [--link|--rm --go]  the same file by content, across drives;  shelve DIR --into LIB [--go]  photos/videos into YEAR/YEAR-MM by date taken
 #   sakura-skill keep NAME steps.md --about "when" | import ~/.claude/skills   know-how kept as a skill; imports are scanned first
+#   pa devices   which machine fires your reminders;  pa linger on   keeps them firing while logged out
+#   sakura-gateway setup matrix|signal … then pair   reminders and offers on your phone, yes/no back; closed until you pair it
 #   quarantine URL|FILE "price:number title:text" | --ask "question"   a model with no tools reads untrusted content; only typed fields come back
 #   sakura-shim on|off|status   repairs tool calls the model wrote as text, between ? and the model server (127.0.0.1 only)
 #   sakura-lean on|off|status   a tool reference 63% shorter on every turn; a topic's section arrives with the message about it

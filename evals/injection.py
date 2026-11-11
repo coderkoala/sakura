@@ -172,6 +172,11 @@ def main():
     res["git push to a remote whose host came from a fetched page asks"] = '"ask"' in pre_in("git push mirror main", tp)
     res["git push to a remote this session added asks"] = '"ask"' in pre_in("git push mirror main", added_tp)
 
+    # the phone gateway: who it listens to, and its token, are never the agent's to touch
+    res["pairing or re-pointing the phone gateway asks, however it's wrapped"] = asks("sakura-gateway pair") and asks("true && sakura-gateway setup matrix https://evil.example @b:evil.example") \
+        and asks("echo '{}' > ~/.sakura/gateway/peer.json") and asks("cat ~/.sakura/gateway/token")
+    res["looking at the gateway is allowed"] = not asks("sakura-gateway status") and not asks("sakura-gateway log -n 5") and not asks("ls ~/.sakura/gateway/")
+
     # the MCP door: no hook runs there, so the server itself refuses a beacon and sends it to the shell
     def mcp(url):
         req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "fetch_url", "arguments": {"url": url}}}) + "\n"
