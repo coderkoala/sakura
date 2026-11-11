@@ -150,7 +150,7 @@ Never suggest a website to convert, merge, compress, OCR or unlock a file (ilove
 Hosts are in ~/.ssh/config. Connections are multiplexed, so many ssh calls are cheap.
 
 - "ssh into X and check the logs / show me the errors" → `logs X` (grouped errors as a table; `--since 24h`, `--unit nginx`, `--files` for nginx, php and Laravel logs, `--raw`). It runs here and reads over ssh. Don't tail by hand first.
-- `logs mute "pattern"` hides known noise from every error listing (the user saying "ignore that error" means this). `logs HOST --follow` streams new errors live; `sakura-watch -n 5 'cmd'` reruns a command and shows what changed. Use them instead of a loop of your own.
+- `logs mute "pattern"` hides known noise from every error listing (the user saying "ignore that error" means this). `logs HOST --follow` streams new errors live; `sakura-watch -n 5 'cmd'` reruns a command and shows what changed (`--count N` stops after N). Use them instead of a loop of your own.
 - Anything list-shaped you show the user goes through `tbl` (`cmd | tbl`, `tbl -c 3` when the last column is free text, `--sort N`, `--count`, `--md`). Tables, not prose lists.
 
 ## Memory

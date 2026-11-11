@@ -203,6 +203,7 @@ python3 evals/abilities.py        # 60 checks: look, ledger, schema, procwatch, 
 python3 evals/gpu.py              # sakura-gpu, 40 deterministic checks
 python3 evals/torrent.py          # torrent, 19 deterministic checks
 python3 evals/injection.py        # the trust boundary: injection detection + egress approval on every way out (http, scp, ssh, nc, DNS, git push, mail, the MCP path), 43 checks against a local site and planted transcripts
+python3 evals/daily.py            # clip, ?decide/?why, ?morning, pa mail rules, fmt, ?watch, ?pr, ?review, ?try, hear, say: 156 checks, no model (--only NAME)
 python3 evals/formats.py          # conv: books (epub, mobi, azw3, fb2), denoise, stems, ocr, LibreOffice documents and sheets: 63 checks, graded from the files written
 python3 evals/memoryflows.py      # reflection, consolidation, 90-day flags, ?teach retro, the mail voice, ?recall over mail and documents: 69 checks, model stubbed
 python3 evals/shim.py             # sakura-shim against a fake model server replaying mangled tool calls, streamed and not: 51 checks
