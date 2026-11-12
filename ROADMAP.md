@@ -42,29 +42,29 @@ Measured on one machine with an 8 GB GPU, driver Ornith 1.5 35B-A3B since 0.9.5 
 
 Each of these should make someone stop and show a friend. In rough order of value for effort.
 
-Shipped: **`?fix`: the error you were about to spend an hour on.** See the README.
+Shipped: **`?fix`: the error you were about to spend an hour on.** See [docs/features.md](docs/features.md).
 
-Shipped: **`?undo`: never afraid again.** See the README.
+Shipped: **`?undo`: never afraid again.** See [docs/features.md](docs/features.md).
 
 Shipped: **`?recall`: your whole past, searchable.** Sessions, shell history, decisions, memory, documents (`rag`) and mail (himalaya), each cited. "What was that command I used to fix nginx in March?" "Why did we pick Redis?" Across shell history, past sessions, notes, mail and documents, with the source cited, and none of it leaving the machine. The longer you use it, the more it's worth.
 
-Shipped: **`?tonight`: a night shift.** See the README.
+Shipped: **`?tonight`: a night shift.** See [docs/features.md](docs/features.md).
 
-Shipped: **`?tour`: any codebase in five minutes.** See the README.
+Shipped: **`?tour`: any codebase in five minutes.** See [docs/features.md](docs/features.md).
 
 Shipped (brief-based, no eval without a second machine): **`?setup`: a new machine feels like yours by lunchtime.** Your tools, config, keys workflow and habits, from what it knows about you. Tell it what's different and it adapts.
 
-Shipped: **`?teach`: do it once, never again.** See the README.
+Shipped: **`?teach`: do it once, never again.** See [docs/features.md](docs/features.md).
 
-Shipped: **`?receipts`: what exactly did it do, and how do we know?** See the README.
+Shipped: **`?receipts`: what exactly did it do, and how do we know?** See [docs/features.md](docs/features.md).
 
-Shipped: **The guardian.** See the README. Its backup promise is real now: `sakura-backup prove` restores a real file from the latest snapshot, byte-compares it, checks the repo, and resets the nag (eval 27/27).
+Shipped: **The guardian.** See [docs/features.md](docs/features.md). Its backup promise is real now: `sakura-backup prove` restores a real file from the latest snapshot, byte-compares it, checks the repo, and resets the nag (eval 27/27).
 
-Shipped: **`?learn`: a mentor, not an answer machine.** See the README.
+Shipped: **`?learn`: a mentor, not an answer machine.** See [docs/features.md](docs/features.md).
 
 Shipped as `docpack`: **Offline packs.** Before a flight or an outage, it fetches the docs for your exact stack and versions. Then it works with no internet at all, including in places where connectivity can't be assumed.
 
-Shipped: **Decisions that explain themselves.** `?decide` and `?why`; the model is told to record a decision when it hears one. See the README.
+Shipped: **Decisions that explain themselves.** `?decide` and `?why`; the model is told to record a decision when it hears one. See [docs/features.md](docs/features.md).
 
 Partly shipped (`pa mail urgent|mute`, `pa autoreply`, drafts through himalaya; `pa voice learn` counts your style from sent mail into a note drafts read): **Your inbox, privately.** It triages, summarises and drafts in your voice, with mail nobody would paste into a cloud service. It never sends without you.
 
