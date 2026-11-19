@@ -1,0 +1,481 @@
+#!/usr/bin/env python3
+"""sakura-mini — a bash-only agent in one plain loop, taken from mini-swe-agent (MIT; Kilian A. Lieret, Carlos E. Jimenez).
+
+The model answers with a short thought and one ```bash block; that command runs in a fresh shell and its output goes
+back verbatim. No tool-call API, so any model that can write a code block can drive it, the small fast tier included,
+and a run is one linear transcript you can read top to bottom.
+
+  sakura-mini "task"             work in the current directory
+  sakura-mini --box "task"       inside bubblewrap: the system read-only, your home and /run hidden, only this directory
+                                 writable, no network (--net lets it out)
+  sakura-mini --confirm "task"   ask before each command that isn't a plain read (also whenever ~/.sakura/ask exists)
+  sakura-mini view [FILE|last]   replay a run: each step's thought, command, exit code and output (--full: all output)
+  sakura-mini ls                 the latest runs
+  options: --fast (the fast-tier model)  --model NAME  --base-url URL  --steps N (40)  --time SECONDS (whole run)
+           --timeout SECONDS (per command, 120)  --out FILE  --quiet
+
+It finishes by running `echo SAKURA_MINI_DONE` followed by whatever shows the result (`git diff`, the test run, the
+file): the report is what that command printed. Before it runs, every command passes the same PreToolUse hooks as a
+`?` session: the root-owned guard declared in /etc/codex/requirements.toml, then those in ~/.sakura/hooks.json (?undo
+snapshots included). A deny goes back to the model with its reason; an "ask" asks you, and is refused when nobody can
+be asked. Runs are saved after every step in ~/.sakura/mini/, in mini-swe-agent's trajectory format.
+"""
+import argparse
+import datetime
+import json
+import os
+import platform
+import re
+import signal
+import subprocess
+import sys
+import time
+import tomllib
+import urllib.error
+import urllib.request
+import uuid
+
+HOME = os.path.expanduser("~")
+SAKURA = os.path.join(HOME, ".sakura")
+RUNS = os.environ.get("SAKURA_MINI_DIR") or os.path.join(SAKURA, "mini")
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+REQUIREMENTS = "/etc/codex/requirements.toml"  # where the root-owned guard is declared; deliberately not overridable
+DRIVER = "http://127.0.0.1:8091/v1"
+DONE = "SAKURA_MINI_DONE"
+ACTION = re.compile(r"```(?:bash|sh|shell)[ \t]*\n(.*?)```", re.S)
+THINK = re.compile(r"<think>.*?</think>", re.S)
+MAX_OUT, HALF = 10000, 5000
+# For --confirm: a single plain read (no redirection, chaining or substitution) runs without asking.
+READ_ONLY = re.compile(r"^\s*(?:ls|cat|head|tail|nl|wc|grep|rg|find|pwd|echo|stat|file|tree|du|df|which|type|uname|date|"
+                       r"git (?:status|log|diff|show|branch|rev-parse|ls-files)|sed -n)\b[^;&|<>`$]*$")
+
+SYSTEM = f"""You are Sakura, working on this computer through a bash shell, one command at a time.
+
+Every reply is a short THOUGHT, then exactly ONE ```bash block with one command (join steps with && when you must).
+It runs in a fresh shell: cd and variables don't carry over, so begin with `cd DIR &&` when it matters. Its real output
+and exit code come back to you next. Never write what a command printed: run it, then read what came back.
+
+When the task is done, reply with a block whose first line is `echo {DONE}`, followed by the commands that show the
+result: `git diff`, the test run, `cat` of the file you made, or an echo of the answer you found. Its output is your
+report, and nothing runs after it.
+
+Edit files with a heredoc (cat <<'EOF' > file) or sed -i; read them in pieces: nl -ba FILE | sed -n '10,40p'.
+Anything interactive (an editor, a pager, a prompt) hangs until it's killed, so don't start one."""
+
+EXAMPLE = f"""Example reply:
+
+THOUGHT: I need to see what's in this directory first.
+
+```bash
+ls -la
+```
+
+Example of finishing:
+
+THOUGHT: The tests pass now, so I'll show the change and stop.
+
+```bash
+echo {DONE} && git diff
+```"""
+
+
+# --- the model -----------------------------------------------------------------------------------------------------
+
+def get_json(url, timeout=3):
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        return json.load(r)
+
+
+def pick_model(args):
+    ollama = (os.environ.get("OLLAMA_API_BASE") or "http://127.0.0.1:11434").rstrip("/") + "/v1"
+    base = args.base_url or os.environ.get("SAKURA_MINI_URL")
+    if not base:
+        try:
+            ids = [m["id"] for m in get_json(DRIVER + "/models")["data"]] if not args.fast else []
+        except Exception:
+            ids = []
+        base = DRIVER if ids else ollama
+        if ids and not (args.model or os.environ.get("SAKURA_MINI_MODEL")):
+            return base, ids[0]
+    model = args.model or os.environ.get("SAKURA_MINI_MODEL")
+    if not model:
+        role = "fast" if args.fast else "agent"
+        try:
+            model = subprocess.run([sys.executable, os.path.join(ROOT, "lib", "sakura_choices.py"), "get", role],
+                                   capture_output=True, text=True, timeout=10).stdout.strip()
+        except Exception:
+            model = ""
+        model = model or ("hf.co/FrostWolfAI/Spark-X2.6-4B-abliterated-GGUF:Q8_0" if args.fast else "huihui_ai/qwen3.5-abliterated:9b")
+    return base, model
+
+
+def chat(base, model, messages, timeout=900):
+    body = {"model": model, "stream": False, "temperature": 0.2,
+            "messages": [{"role": m["role"], "content": m["content"]} for m in messages if m["role"] in ("system", "user", "assistant")]}
+    req = urllib.request.Request(base.rstrip("/") + "/chat/completions", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json", "Authorization": "Bearer " + (os.environ.get("SAKURA_MINI_KEY") or "local")})
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                d = json.load(r)
+            break
+        except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
+            if attempt == 2:
+                raise SystemExit(f"sakura-mini: the model at {base} didn't answer: {e}")
+            time.sleep(3 * (attempt + 1))
+    choice = d["choices"][0]
+    msg = choice.get("message") or {}
+    return msg.get("content") or "", choice.get("finish_reason"), d.get("usage") or {}, msg.get("reasoning_content") or msg.get("reasoning") or ""
+
+
+# --- the guard -----------------------------------------------------------------------------------------------------
+
+def matches(matcher):
+    try:
+        return not matcher or matcher in ("*", "Bash") or re.fullmatch(matcher, "Bash") is not None
+    except re.error:
+        return False
+
+
+def pre_tool_hooks():
+    """The PreToolUse hooks a ? session runs on a shell command: the managed (root-owned) ones first, then the user's."""
+    found = []
+    try:
+        with open(REQUIREMENTS, "rb") as f:
+            for grp in tomllib.load(f).get("hooks", {}).get("PreToolUse", []):
+                if matches(grp.get("matcher", "")):
+                    found += [(h["command"], h.get("timeout", 30)) for h in grp.get("hooks", []) if h.get("type") == "command"]
+    except (OSError, tomllib.TOMLDecodeError):
+        pass
+    try:
+        with open(os.path.join(SAKURA, "hooks.json")) as f:
+            for grp in json.load(f).get("hooks", {}).get("PreToolUse", []):
+                if matches(grp.get("matcher", "")):
+                    found += [(h["command"], h.get("timeout", 30)) for h in grp.get("hooks", []) if h.get("type") == "command"]
+    except (OSError, ValueError):
+        pass
+    have = " ".join(c for c, _ in found)
+    for name, t in (("tool_guard.py", 5), ("egress_guard.py", 10), ("undo_snapshot.py", 30)):
+        if name not in have:  # no guard installed here: the repo's own copy, so the guard is never skipped
+            found.append((f"python3 -I {ROOT}/hooks/{name}", t))
+    return found
+
+
+def guard(cmd, run):
+    """('allow'|'deny'|'ask', reason) from the hooks, the first refusal winning."""
+    payload = json.dumps({"session_id": run["id"], "transcript_path": run["transcript"], "cwd": run["cwd"], "hook_event_name": "PreToolUse",
+                          "tool_name": "Bash", "tool_input": {"command": cmd}, "model": run["model"]})
+    ask = None
+    for hook, timeout in run["hooks"]:
+        try:
+            r = subprocess.run(hook, shell=True, input=payload, capture_output=True, text=True, timeout=timeout, cwd=run["cwd"])
+        except subprocess.TimeoutExpired:
+            continue  # as the engine does: a hook that hangs doesn't stop the command
+        if r.returncode == 2:
+            return "deny", (r.stderr or r.stdout).strip()[:1500] or "refused by " + hook
+        try:
+            d = json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else {}
+        except ValueError:
+            d = {}
+        hso = d.get("hookSpecificOutput") or {}
+        decision = "deny" if d.get("decision") == "block" else hso.get("permissionDecision")
+        reason = hso.get("permissionDecisionReason") or d.get("reason") or ""
+        if decision == "deny":
+            return "deny", reason
+        if decision == "ask" and ask is None:
+            ask = reason
+    return ("ask", ask) if ask is not None else ("allow", "")
+
+
+def note_turn(run, kind, **payload):
+    """A transcript in the engine's rollout shape, so the guard's turn-aware checks (draft only, no push unless asked,
+    no way around a host that refused) see this run as they'd see a ? session."""
+    with open(run["transcript"], "a", encoding="utf-8") as f:
+        f.write(json.dumps({"timestamp": datetime.datetime.now().isoformat(), "type": "response_item", "payload": dict(payload, type=kind)}) + "\n")
+
+
+# --- running a command ---------------------------------------------------------------------------------------------
+
+def box_argv(cwd, net):
+    a = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", HOME]
+    for d in (".local/bin", ".local/lib", ".local/share/uv", ".cargo", ".rustup", ".nvm", ".local/share/mise", ".asdf", "go", ".npm-global"):
+        a += ["--ro-bind-try", os.path.join(HOME, d), os.path.join(HOME, d)]  # tools, not secrets
+    if net:
+        a += ["--ro-bind-try", "/run/systemd/resolve", "/run/systemd/resolve"]  # DNS, for the network it was given
+    return a + ["--bind", cwd, cwd, "--chdir", cwd, "--unshare-all"] + (["--share-net"] if net else []) + ["--die-with-parent", "--new-session"]
+
+
+def execute(cmd, cwd, timeout, box, net):
+    argv = (box_argv(cwd, net) if box else []) + ["bash", "-c", cmd]
+    env = dict(os.environ, PAGER="cat", MANPAGER="cat", GIT_PAGER="cat", LESS="-R", PIP_PROGRESS_BAR="off", TQDM_DISABLE="1", SAKURA_MINI="1")
+    p = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, encoding="utf-8", errors="replace", start_new_session=True)
+    try:
+        out, _ = p.communicate(timeout=timeout)
+        return {"output": out, "returncode": p.returncode}
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGKILL)  # the whole group, so nothing it started is left running
+        out, _ = p.communicate()
+        return {"output": out or "", "returncode": -1,
+                "note": f"killed after {timeout}s, still running. Put long jobs in the background with output to a file, or do less per command."}
+
+
+def observation(out):
+    text = out.get("output", "")
+    head = (f"<note>{out['note']}</note>\n" if out.get("note") else "") + f"<returncode>{out.get('returncode')}</returncode>\n"
+    if out.get("refused"):
+        return f"<refused>{out['refused']}</refused>\nThe command did not run."
+    if len(text) <= MAX_OUT:
+        return head + f"<output>\n{text}</output>"
+    return head + (f"<warning>The output was {len(text)} characters, too long to show whole. Ask for less: head, tail, sed -n, a narrower "
+                   f"grep, or send it to a file and search that.</warning>\n<output_head>\n{text[:HALF]}\n</output_head>\n"
+                   f"<elided_chars>{len(text) - 2 * HALF} characters elided</elided_chars>\n<output_tail>\n{text[-HALF:]}\n</output_tail>")
+
+
+def format_error(n, finish):
+    if finish == "length":
+        return ("Your reply hit the output limit before it finished, so it was cut off. Answer more briefly: a short THOUGHT and "
+                "exactly one ```bash block.")
+    return (f"Format error: found {n} ```bash blocks, and every reply needs exactly one. Write a short THOUGHT, then one block:\n\n"
+            "THOUGHT: why this command.\n\n```bash\nthe_command\n```\n\n"
+            f"When you're done, the block starts with `echo {DONE}`.")
+
+
+def read_only(cmd):
+    return all(READ_ONLY.match(part) for part in cmd.split("|")) and "\n" not in cmd.strip()
+
+
+def has_tty():
+    try:
+        open("/dev/tty").close()
+        return True
+    except OSError:
+        return False
+
+
+def tty_ask(prompt):
+    try:
+        with open("/dev/tty", "r+") as t:
+            t.write(prompt)
+            t.flush()
+            return t.readline().strip()
+    except OSError:
+        return None
+
+
+# --- the loop ------------------------------------------------------------------------------------------------------
+
+def save(run, messages, status="", submission=""):
+    data = {"info": {"exit_status": status, "submission": submission, "task": run["task"], "cwd": run["cwd"], "started": run["started"],
+                     "elapsed_seconds": int(time.time() - run["t0"]), "model_stats": {"api_calls": run["calls"], "instance_cost": 0.0},
+                     "config": {"agent": {"step_limit": run["steps"], "wall_time_limit_seconds": run["time"], "confirm": run["confirm"]},
+                                "model": {"model_name": run["model"], "base_url": run["base"]},
+                                "environment": {"cwd": run["cwd"], "timeout": run["timeout"], "box": run["box"], "net": run["net"]},
+                                "agent_type": "sakura-mini"},
+                     "mini_version": "sakura-mini"},
+            "messages": messages, "trajectory_format": "mini-swe-agent-1.1"}
+    tmp = run["out"] + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=1)
+    os.replace(tmp, run["out"])
+
+
+def say(run, text):
+    if not run["quiet"]:
+        print(text, file=sys.stderr, flush=True)
+
+
+def solve(args):
+    cwd = os.path.realpath(args.cwd or os.getcwd())
+    if args.box and (cwd in ("/", HOME) or HOME.startswith(cwd + "/")):
+        sys.exit("sakura-mini: --box needs a project directory, not / or your home (the box would show what it hides).")
+    if args.box and subprocess.run(["bwrap", "--ro-bind", "/", "/", "--unshare-all", "true"], capture_output=True).returncode != 0:
+        sys.exit("sakura-mini: bubblewrap can't make a box here (is bwrap installed and allowed user namespaces?).")
+    base, model = pick_model(args)
+    os.makedirs(RUNS, mode=0o700, exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    slug = re.sub(r"[^a-z0-9]+", "-", args.task.lower())[:40].strip("-") or "run"
+    out = os.path.abspath(args.out) if args.out else os.path.join(RUNS, f"{stamp}-{slug}.json")
+    run = {"id": str(uuid.uuid4()), "task": args.task, "cwd": cwd, "model": model, "base": base, "out": out, "transcript": out[:-5] + ".rollout.jsonl",
+           "started": datetime.datetime.now().isoformat(timespec="seconds"), "t0": time.time(), "calls": 0, "steps": args.steps, "time": args.time,
+           "timeout": args.timeout, "box": args.box, "net": args.net, "quiet": args.quiet, "hooks": pre_tool_hooks(),
+           "confirm": bool(args.confirm or os.path.exists(os.path.join(SAKURA, "ask")))}
+    interactive = sys.stdin.isatty() and has_tty()
+    u = platform.uname()
+    where = ("It runs in a box: only this directory is writable, your home is hidden, and there's no network.\n" if args.box and not args.net
+             else "It runs in a box: only this directory is writable and your home is hidden.\n" if args.box else "")
+    task_msg = (f"Task: {args.task}\n\nWorking directory: {cwd}\nSystem: {u.system} {u.release} {u.machine}, "
+                f"{datetime.datetime.now():%Y-%m-%d %H:%M}\n{where}\n{EXAMPLE}")
+    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": task_msg}]
+    note_turn(run, "message", role="user", content=[{"type": "input_text", "text": args.task}])
+    say(run, f"sakura-mini: {model} at {base}{' (boxed)' if args.box else ''}; saving to {out}")
+    status, submission, fmt_errors = "", "", 0
+    try:
+        while True:
+            if run["calls"] >= args.steps:
+                status = "LimitsExceeded"
+                break
+            if args.time and time.time() - run["t0"] > args.time:
+                status = "TimeExceeded"
+                break
+            run["calls"] += 1
+            content, finish, usage, reasoning = chat(base, model, messages)
+            messages.append({"role": "assistant", "content": content,
+                             "extra": {"finish_reason": finish, "usage": usage, "reasoning": reasoning[:20000], "timestamp": time.time()}})
+            text = THINK.sub("", content)
+            actions = ACTION.findall(text)
+            if len(actions) != 1:
+                fmt_errors += 1
+                messages.append({"role": "user", "content": format_error(len(actions), finish),
+                                 "extra": {"interrupt_type": "FormatError", "n_actions": len(actions), "timestamp": time.time()}})
+                say(run, f"[{run['calls']}] format error ({len(actions)} blocks)")
+                if fmt_errors >= 3:
+                    status = "RepeatedFormatError"
+                    break
+                save(run, messages)
+                continue
+            fmt_errors = 0
+            cmd = actions[0].strip()
+            thought = text[:text.find("```")].strip().replace("\n", " ")
+            say(run, f"[{run['calls']}] {thought[:300]}\n  $ {cmd[:400]}")
+            verdict, reason = guard(cmd, run)
+            if verdict == "ask":
+                if not interactive:
+                    verdict, reason = "deny", f"it needs the user's approval and nobody was there to give it. {reason}"
+                elif (tty_ask(f"  this needs your approval: {reason[:600]}\n  run it? [y/N] ") or "").lower().startswith("y"):
+                    verdict, reason = "allow", ""
+                else:
+                    verdict, reason = "deny", "the user declined it"
+            if verdict == "allow" and run["confirm"] and interactive and not read_only(cmd):
+                answer = tty_ask("  run? [Enter] yes  [n] no  [a] yes to all  [q] stop: ")
+                if answer is None or answer.lower() == "q":
+                    status = "Stopped"
+                    break
+                if answer.lower() == "a":
+                    run["confirm"] = False
+                elif answer.lower().startswith("n"):
+                    note = tty_ask("  a word for it (why, or what to do instead): ") or ""
+                    verdict, reason = "deny", "the user declined it" + (f": {note}" if note else "")
+            cid = "call_" + uuid.uuid4().hex[:12]
+            note_turn(run, "function_call", name="shell", call_id=cid, arguments=json.dumps({"command": cmd}))
+            if verdict == "deny":
+                result = {"output": "", "returncode": None, "refused": reason or "refused by the guard"}
+                say(run, f"  refused: {(reason or '')[:300]}")
+            else:
+                result = execute(cmd, cwd, args.timeout, args.box, args.net)
+                lines = result["output"].lstrip().splitlines()
+                say(run, f"  -> {result['returncode']}" + "".join(f"\n     {line[:200]}" for line in lines[:6]) + ("\n     ..." if len(lines) > 6 else ""))
+                if lines and lines[0].strip() == DONE and result["returncode"] == 0:
+                    submission = "\n".join(lines[1:])
+                    status = "Submitted"
+                    note_turn(run, "function_call_output", call_id=cid, output=f"Exit code: 0\n{result['output'][:4000]}")
+                    break
+            note_turn(run, "function_call_output", call_id=cid, output=f"Exit code: {result.get('returncode')}\n{result.get('output', '')[:4000]}")
+            messages.append({"role": "user", "content": observation(result),
+                             "extra": {"raw_output": result.get("output", ""), "returncode": result.get("returncode"), "refused": result.get("refused"),
+                                       "timestamp": time.time()}})
+            save(run, messages)
+    except KeyboardInterrupt:
+        status = "Interrupted"
+    messages.append({"role": "exit", "content": submission or status, "extra": {"exit_status": status, "submission": submission}})
+    save(run, messages, status, submission)
+    if status == "Submitted":
+        print(submission)
+    else:
+        print(f"sakura-mini: stopped ({status}) after {run['calls']} steps. The run: sakura-mini view {out}", file=sys.stderr)
+    return 0 if status == "Submitted" else 1
+
+
+# --- reading runs back ---------------------------------------------------------------------------------------------
+
+def runs():
+    try:
+        return sorted((os.path.join(RUNS, f) for f in os.listdir(RUNS) if f.endswith(".json")), key=os.path.getmtime)
+    except OSError:
+        return []
+
+
+def view(path, full):
+    if path in (None, "last"):
+        found = runs()
+        if not found:
+            sys.exit("sakura-mini: no runs yet")
+        path = found[-1]
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    info = data.get("info", {})
+    print(f"{path}\ntask: {info.get('task', '?')}\nmodel: {info.get('config', {}).get('model', {}).get('model_name', '?')}   "
+          f"status: {info.get('exit_status') or 'running'}   steps: {info.get('model_stats', {}).get('api_calls', '?')}   "
+          f"{info.get('elapsed_seconds', '?')}s\n")
+    step = 0
+    for m in data.get("messages", [])[2:]:
+        role, content, extra = m.get("role"), m.get("content") or "", m.get("extra") or {}
+        if role == "assistant":
+            step += 1
+            text = THINK.sub("", content)
+            acts = ACTION.findall(text)
+            thought = text[:text.find("```")].strip() if "```" in text else text.strip()
+            print(f"── step {step}")
+            print("   " + thought.replace("\n", "\n   ")[:None if full else 600])
+            for a in acts:
+                print("   $ " + a.strip().replace("\n", "\n     "))
+        elif role == "user" and extra.get("interrupt_type"):
+            print(f"   (format error: {extra.get('n_actions')} blocks)")
+        elif role == "user":
+            if extra.get("refused"):
+                print(f"   refused: {extra['refused']}")
+                continue
+            lines = (extra.get("raw_output") or "").splitlines()
+            shown = lines if full else lines[:15]
+            print(f"   -> exit {extra.get('returncode')}" + "".join(f"\n      {line}" for line in shown)
+                  + (f"\n      ... {len(lines) - 15} more lines (--full)" if len(lines) > len(shown) else ""))
+        elif role == "exit":
+            print(f"── {extra.get('exit_status')}")
+            if extra.get("submission"):
+                print("   " + extra["submission"].replace("\n", "\n   "))
+    return 0
+
+
+def listing():
+    for p in runs()[-15:]:
+        try:
+            with open(p, encoding="utf-8") as f:
+                info = json.load(f).get("info", {})
+        except (OSError, ValueError):
+            continue
+        print(f"{info.get('started', '?'):19}  {(info.get('exit_status') or 'running'):19} {info.get('model_stats', {}).get('api_calls', '?'):>3} steps  "
+              f"{info.get('task', '')[:60]}\n   {p}")
+    return 0
+
+
+def main():
+    argv = sys.argv[1:]
+    if argv and argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    if argv and argv[0] == "view":
+        rest = [a for a in argv[1:] if a != "--full"]
+        return view(rest[0] if rest else None, "--full" in argv)
+    if argv and argv[0] == "ls":
+        return listing()
+    ap = argparse.ArgumentParser(prog="sakura-mini", add_help=False)
+    ap.add_argument("task", nargs="+")
+    ap.add_argument("--box", action="store_true")
+    ap.add_argument("--net", action="store_true")
+    ap.add_argument("--confirm", action="store_true")
+    ap.add_argument("--fast", action="store_true")
+    ap.add_argument("--model")
+    ap.add_argument("--base-url")
+    ap.add_argument("--steps", type=int, default=40)
+    ap.add_argument("--time", type=int, default=0)
+    ap.add_argument("--timeout", type=int, default=120)
+    ap.add_argument("--out")
+    ap.add_argument("--cwd")
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args(argv)
+    args.task = " ".join(args.task)
+    return solve(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
