@@ -17,6 +17,7 @@
 #   ?pr [words]  a pull request from this branch, body from the diff;  ?review [PR|range] [--post]  findings, ranked
 #   look FILE|screen|clip [question]  eyes: a local vision model, or --text for OCR
 #   ?try [lang] question   a scratch directory, run a snippet, keep nothing
+#   ?mini [--box] task   the bash-only loop (sakura-mini): one command a turn, its real output back, any model;  ?mini view  the last run
 #   ?hear   speak a request instead of typing it;  ?morning  the day on one screen (also shown at the first ? of the day)
 #   ?red TEST|"sentence"   red to green: a failing test (or one written from a sentence) made to pass
 #   ?decide "what: why"   record a decision where you are;  ?why [words]  find one later
@@ -60,7 +61,7 @@
 #   sakura-status   one line for tmux's status bar: driver, night queue, offers, guardian
 #   ?go [request]  a session that doesn't stop to ask (sakura-trust on makes every ? like this)
 if command -v sakura-launch >/dev/null 2>&1; then
-    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' '?pr' '?review' '?try' '?hear' '?morning' '?red' '?decide' '?why' '?setup' '?on' '?explain' '?how' '?what' '?docs' '?otp' '?last' '?watch' '?fmt' '?gpu' '?drive' '?dl' '?backup' 2>/dev/null
+    unalias '?' '??' '?pa' '?remind' '?fix' '?undo' '?recap' '?receipts' '?recall' '?tour' '?tonight' '?teach' '?learn' '?guard' '?go' '?pr' '?review' '?try' '?hear' '?morning' '?red' '?decide' '?why' '?setup' '?on' '?explain' '?how' '?what' '?docs' '?otp' '?last' '?watch' '?fmt' '?gpu' '?drive' '?dl' '?backup' '?mini' 2>/dev/null
     alias '?'='sakura-launch'
     alias '?fix'='sakura-fix --shell $$'
     alias '?undo'='sakura-undo'
@@ -74,6 +75,7 @@ if command -v sakura-launch >/dev/null 2>&1; then
     alias '?go'='SAKURA_TRUST=1 sakura-launch'
     alias '?pr'='sakura-pr'
     alias '?try'='sakura-try'
+    alias '?mini'='sakura-mini'
     alias '?red'='sakura-red'
     alias '?decide'='sakura-decide'
     alias '?setup'='sakura-setup'
@@ -118,7 +120,7 @@ if command -v sakura-launch >/dev/null 2>&1; then
     __sakura_quote_line() {
         local head rest
         case "$READLINE_LINE" in
-            '?remind '* | '?pa '* | '?fix '* | '? '* | '?? '* | '?learn '* | '?teach '* | '?tour '* | '?recall '* | '?go '* | '?pr '* | '?try '* | '?red '* | '?decide '* | '?why '* | '?setup '* | '?explain '* | '?how '*) ;;
+            '?remind '* | '?pa '* | '?fix '* | '? '* | '?? '* | '?learn '* | '?teach '* | '?tour '* | '?recall '* | '?go '* | '?pr '* | '?try '* | '?red '* | '?decide '* | '?why '* | '?setup '* | '?explain '* | '?how '* | '?mini '*) ;;
             *) return 0 ;;
         esac
         head=${READLINE_LINE%% *}
@@ -137,6 +139,7 @@ if command -v sakura-launch >/dev/null 2>&1; then
         complete -F _sakura_host_comp '?on' sakura-on logs 2>/dev/null
         complete -W 'list cancel at report run' '?tonight' sakura-tonight 2>/dev/null
         complete -W 'on off tick backup restored forget --all --json' '?guard' sakura-guardian 2>/dev/null
+        complete -W 'view ls --box --net --confirm --fast --model --base-url --steps --time --timeout --full' '?mini' sakura-mini 2>/dev/null
         complete -W 'remind list cancel brief standup roles todo clock log watch job autoreply mail voice offer yes no listen pending' pa 2>/dev/null
         # every other command: subcommands and flags learned from the manuals (hosts and the keys included)
         command -v sakura-complete >/dev/null 2>&1 && eval "$(sakura-complete 2>/dev/null)"

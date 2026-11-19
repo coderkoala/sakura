@@ -14,8 +14,9 @@ and a run is one linear transcript you can read top to bottom.
   options: --fast (the fast-tier model)  --model NAME  --base-url URL  --steps N (40)  --time SECONDS (whole run)
            --timeout SECONDS (per command, 120)  --out FILE  --quiet
 
-It finishes by running `echo SAKURA_MINI_DONE` followed by whatever shows the result (`git diff`, the test run, the
-file): the report is what that command printed. Before it runs, every command passes the same PreToolUse hooks as a
+A tool call a small model writes as text instead (<tool_call>…, JSON, Qwen's XML) is taken as the command. It finishes by
+running `echo SAKURA_MINI_DONE` followed by whatever shows the result (`git diff`, the test run, the file): the report is
+what that command printed, and a bare finish with nothing after the marker is sent back once for it. Before it runs, every command passes the same PreToolUse hooks as a
 `?` session: the root-owned guard declared in /etc/codex/requirements.toml, then those in ~/.sakura/hooks.json (?undo
 snapshots included). A deny goes back to the model with its reason; an "ask" asks you, and is refused when nobody can
 be asked. Runs are saved after every step in ~/.sakura/mini/, in mini-swe-agent's trajectory format.
@@ -44,6 +45,7 @@ DRIVER = "http://127.0.0.1:8091/v1"
 DONE = "SAKURA_MINI_DONE"
 ACTION = re.compile(r"```(?:bash|sh|shell)[ \t]*\n(.*?)```", re.S)
 THINK = re.compile(r"<think>.*?</think>", re.S)
+TEXT_CALL = re.compile(r"<\|?tool_call\|?>\s*(.*?)\s*(?:<\|?/tool_call\|?>|\Z)|<function=[\w.:-]+>\s*(.*?)\s*(?:</function>|\Z)", re.S)
 MAX_OUT, HALF = 10000, 5000
 # For --confirm: a single plain read (no redirection, chaining or substitution) runs without asking.
 READ_ONLY = re.compile(r"^\s*(?:ls|cat|head|tail|nl|wc|grep|rg|find|pwd|echo|stat|file|tree|du|df|which|type|uname|date|"
@@ -232,7 +234,45 @@ def observation(out):
                    f"<elided_chars>{len(text) - 2 * HALF} characters elided</elided_chars>\n<output_tail>\n{text[-HALF:]}\n</output_tail>")
 
 
-def format_error(n, finish):
+def text_calls(text):
+    """Commands from tool calls a model wrote as text instead of a ```bash block (small models trained on tool calls do):
+    <tool_call>{"name": "bash", "arguments": {"command": "ls"}}</tool_call>, GLM's <arg_value>ls</arg_value>, Qwen's
+    <parameter=command>ls</parameter>, or the bare command between the tags."""
+    found = []
+    for m in TEXT_CALL.finditer(text):
+        body = (m.group(1) if m.group(1) is not None else m.group(2) or "").strip()
+        cmd = None
+        try:
+            obj = json.loads(body)
+            args = obj.get("arguments", obj) if isinstance(obj, dict) else {}
+            args = json.loads(args) if isinstance(args, str) else args
+            cmd = args.get("command") or args.get("cmd") if isinstance(args, dict) else None
+            cmd = " ".join(cmd) if isinstance(cmd, list) else cmd
+        except (ValueError, AttributeError):
+            pass
+        if cmd is None:
+            keyed = re.search(r"<parameter=(?:command|cmd)>\s*(.*?)\s*(?:</parameter>|\Z)", body, re.S) \
+                or re.search(r"<arg_key>\s*(?:command|cmd)\s*</arg_key>\s*<arg_value>\s*(.*?)\s*(?:</arg_value>|\Z)", body, re.S) \
+                or re.search(r"<arg_value>\s*(.*?)\s*(?:</arg_value>|\Z)", body, re.S)
+            cmd = keyed.group(1) if keyed else re.sub(r"</?(?:arg_key|arg_value|parameter)[^>]*>|<function=[^>]*>|</function>", "", body)
+        cmd = (cmd or "").strip()
+        if cmd and not cmd.startswith("{"):
+            found.append(cmd)
+    return found
+
+
+def actions_in(text):
+    """Every action in a reply: ```bash blocks and tool calls written as text (outside the blocks), the same command
+    written both ways counted once. One reply, one action: two different ones are a format error, so nothing runs that
+    the model didn't see coming."""
+    found = [a.strip() for a in ACTION.findall(text)] + text_calls(ACTION.sub("", text))
+    return list(dict.fromkeys(a for a in found if a))
+
+
+def format_error(n, finish, mixed=False):
+    if mixed:
+        return (f"Format error: that reply held {n} different commands (a <tool_call> and a ```bash block), and only one runs per turn, "
+                "so none of them ran. Put the one command you want next in a single ```bash block; join steps with && when they belong together.")
     if finish == "length":
         return ("Your reply hit the output limit before it finished, so it was cut off. Answer more briefly: a short THOUGHT and "
                 "exactly one ```bash block.")
@@ -323,10 +363,11 @@ def solve(args):
             messages.append({"role": "assistant", "content": content,
                              "extra": {"finish_reason": finish, "usage": usage, "reasoning": reasoning[:20000], "timestamp": time.time()}})
             text = THINK.sub("", content)
-            actions = ACTION.findall(text)
+            actions = actions_in(text)
             if len(actions) != 1:
                 fmt_errors += 1
-                messages.append({"role": "user", "content": format_error(len(actions), finish),
+                mixed = bool(ACTION.search(text)) and bool(text_calls(ACTION.sub("", text)))
+                messages.append({"role": "user", "content": format_error(len(actions), finish, mixed),
                                  "extra": {"interrupt_type": "FormatError", "n_actions": len(actions), "timestamp": time.time()}})
                 say(run, f"[{run['calls']}] format error ({len(actions)} blocks)")
                 if fmt_errors >= 3:
@@ -365,7 +406,12 @@ def solve(args):
                 result = execute(cmd, cwd, args.timeout, args.box, args.net)
                 lines = result["output"].lstrip().splitlines()
                 say(run, f"  -> {result['returncode']}" + "".join(f"\n     {line[:200]}" for line in lines[:6]) + ("\n     ..." if len(lines) > 6 else ""))
-                if lines and lines[0].strip() == DONE and result["returncode"] == 0:
+                if lines and lines[0].strip() == DONE and result["returncode"] == 0 and not "".join(lines[1:]).strip() and not run.get("sent_back"):
+                    # A bare `echo SAKURA_MINI_DONE` is a finish with no report: send it back, once, for the proof.
+                    run["sent_back"] = True
+                    result["note"] = (f"Nothing came after {DONE}, so there's no report. Finish again with the command that shows the "
+                                      f"result in the same block: echo {DONE} && <the test run, git diff, cat FILE, or echo of the answer>.")
+                elif lines and lines[0].strip() == DONE and result["returncode"] == 0:
                     submission = "\n".join(lines[1:])
                     status = "Submitted"
                     note_turn(run, "function_call_output", call_id=cid, output=f"Exit code: 0\n{result['output'][:4000]}")
@@ -413,8 +459,9 @@ def view(path, full):
         if role == "assistant":
             step += 1
             text = THINK.sub("", content)
-            acts = ACTION.findall(text)
-            thought = text[:text.find("```")].strip() if "```" in text else text.strip()
+            acts = actions_in(text)
+            cut = min([i for i in (text.find("```"), text.find("<tool_call"), text.find("<|tool_call"), text.find("<function=")) if i >= 0], default=len(text))
+            thought = text[:cut].strip()
             print(f"── step {step}")
             print("   " + thought.replace("\n", "\n   ")[:None if full else 600])
             for a in acts:
@@ -448,8 +495,27 @@ def listing():
     return 0
 
 
+VALUED = ("--model", "--base-url", "--steps", "--time", "--timeout", "--out", "--cwd")
+
+
+def unquote_head(argv):
+    """?mini quotes the whole line as one word, so an apostrophe in the task is safe: take leading options, and view or
+    ls, back out of it."""
+    if len(argv) != 1 or " " not in argv[0]:
+        return argv
+    words = argv[0].split(" ")
+    if words[0] in ("view", "ls"):
+        return [w for w in words if w]
+    head = []
+    while words and words[0].startswith("--"):
+        head.append(words.pop(0))
+        if head[-1] in VALUED and words:
+            head.append(words.pop(0))
+    return head + [" ".join(words)] if head and words else argv
+
+
 def main():
-    argv = sys.argv[1:]
+    argv = unquote_head(sys.argv[1:])
     if argv and argv[0] in ("-h", "--help"):
         print(__doc__)
         return 0

@@ -120,6 +120,8 @@ def check_links(fix):
     for n in sorted(os.listdir(BIN)):
         link = os.path.join(lb, n)
         target = os.path.join(BIN, n)
+        if not (os.path.isfile(target) and os.access(target, os.X_OK)):
+            continue  # install.sh links executable files only; a __pycache__ an import left behind isn't a command
         if os.path.islink(link):
             if not os.path.exists(link):
                 stale.append(n)

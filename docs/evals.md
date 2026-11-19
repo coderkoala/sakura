@@ -15,6 +15,7 @@ python3 evals/teach.py            # ?teach, graded by sakura-tool's gate and run
 python3 evals/abilities.py        # 60 checks: look, ledger, schema, procwatch, dq, offers, cron, drive, docpack, fleet, tbl, logs, worktrees
 python3 evals/gpu.py              # sakura-gpu, 40 deterministic checks
 python3 evals/torrent.py          # torrent, 19 deterministic checks
+python3 evals/mini.py --gate      # sakura-mini, 21 mechanics against a scripted model (guard, box, limits); --live: real tasks
 python3 evals/injection.py        # the trust boundary: injection detection + egress approval on every way out (http, scp, ssh, nc, DNS, git push, mail, the MCP path), the quarantine reader, the gateway's guard, 55 checks against a local site and planted transcripts
 python3 evals/daily.py            # clip, ?decide/?why, ?morning, pa mail rules, fmt, ?watch, ?pr, ?review, ?try, hear, say: 156 checks, no model (--only NAME)
 python3 evals/paper.py            # paper: templates in English and Nepali, VAT and totals, number words, the register, Devanagari in the PDF, BS dates: 86 checks
