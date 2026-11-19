@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""The browser behind sakura-browser: one Chromium on this machine with its own profile, driven over a private socket.
+"""The browser behind sakura-browser, driven over a private socket: the user's own Firefox when that's their default
+browser (same profile, cookies and logins: firefox_bidi.py), otherwise a Chromium with a profile of its own.
 
 It reads alongside the user, in a window they can see. Bot work goes to the bot and human work to the human: on a CAPTCHA or
 other "are you human" check the agent gets no elements and can't click or type, and it can never type a password. It tells the
@@ -12,7 +13,7 @@ import socket
 import subprocess
 import sys
 
-from playwright.sync_api import sync_playwright
+import firefox_bidi
 
 # A worker runs with nobody watching, so it gets a profile of its own, with none of the user's logins.
 DIR = os.path.expanduser(os.environ.get("SAKURA_BROWSER_DIR") or ("~/.sakura/browser-worker" if os.environ.get("SAKURA_WORKER") else "~/.sakura/browser"))
@@ -50,14 +51,31 @@ ELEMENTS_JS = r"""(max) => {
 }"""
 
 
+def engine():
+    """'firefox': the user's own Firefox, shared. 'own': a Chromium with Sakura's own profile. Workers and hidden runs
+    (evals) always get their own: nobody is watching them, so they don't get the user's logins."""
+    if os.environ.get("SAKURA_WORKER") or os.environ.get("SAKURA_BROWSER_HEADLESS"):
+        return "own"
+    want = (os.environ.get("SAKURA_BROWSER") or "auto").lower()
+    if want in ("own", "isolated", "chromium"):
+        return "own"
+    return "firefox" if want == "firefox" or firefox_bidi.default_is_firefox() else "own"
+
+
 class Browser:
     def __init__(self):
-        self.pw = sync_playwright().start()
-        self.headless = bool(os.environ.get("SAKURA_BROWSER_HEADLESS") or os.environ.get("SAKURA_WORKER")) or not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+        self.engine = engine()
+        self.pw = self.ctx = None
+        self.headless = self.engine == "own" and (bool(os.environ.get("SAKURA_BROWSER_HEADLESS") or os.environ.get("SAKURA_WORKER")) or not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")))
         self.told = None
-        self.launch()
 
     def launch(self):
+        if self.engine == "firefox":
+            self.ctx = firefox_bidi.Firefox.attach()
+            return
+        if self.pw is None:
+            from playwright.sync_api import sync_playwright
+            self.pw = sync_playwright().start()
         self.ctx = self.pw.chromium.launch_persistent_context(PROFILE, headless=self.headless, viewport=None if not self.headless else {"width": 1280, "height": 900})
 
     def relaunch(self, headless):
@@ -140,7 +158,12 @@ class Browser:
 
     def handle(self, req):
         cmd, attended = req.get("cmd"), req.get("attended", True)
-        if attended and self.headless and not os.environ.get("SAKURA_BROWSER_HEADLESS") and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        if self.ctx is None:
+            try:
+                self.launch()
+            except firefox_bidi.NotShared as e:
+                raise Refused(str(e)) from None
+        if self.engine == "own" and attended and self.headless and not os.environ.get("SAKURA_BROWSER_HEADLESS") and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
             self.relaunch(False)  # a worker started this one hidden; the user is here now
         page = self.page()
         if cmd == "open":
@@ -179,7 +202,8 @@ class Browser:
             page.screenshot(path=path)
             return f"screenshot: {path}"
         if cmd == "status":
-            return f"{page.url}\n{'hidden' if self.headless else 'visible window'}"
+            how = "the user's own Firefox (their cookies and logins)" if self.engine == "firefox" else ("hidden" if self.headless else "visible window")
+            return f"{page.url}\n{how}"
         raise Refused(f"unknown command {cmd}")
 
 
@@ -195,8 +219,10 @@ def serve():
     srv = socket.socket(socket.AF_UNIX)
     srv.bind(SOCK)
     srv.listen(4)
-    srv.settimeout(IDLE_EXIT)
     b = Browser()
+    # Chromium is ours and costs memory, so it goes after half an hour idle. The user's Firefox costs this daemon nothing,
+    # and a later session couldn't find Sakura's window again, so that one stays attached until closed.
+    srv.settimeout(None if b.engine == "firefox" else IDLE_EXIT)
     try:
         while True:
             try:
@@ -214,11 +240,12 @@ def serve():
                     out = {"ok": False, "out": f"refused: {e}"}
                 except Exception as e:
                     msg = str(e).split("\n")[0][:300]
-                    if "closed" in msg.lower():  # the user closed the window
+                    if "closed" in msg.lower():  # the user closed the window, or quit Firefox
                         try:
-                            b.launch()
+                            b.ctx.close()
                         except Exception:
                             pass
+                        b.ctx = None  # the next command opens or reattaches it
                         msg = "the browser window was closed. Run sakura-browser open again."
                     out = {"ok": False, "out": msg}
                 conn.sendall(json.dumps(out).encode())
@@ -227,8 +254,10 @@ def serve():
         if os.path.exists(SOCK):
             os.unlink(SOCK)
         try:
-            b.ctx.close()
-            b.pw.stop()
+            if b.ctx is not None:
+                b.ctx.close()  # for Firefox, Sakura's own window and session: the browser is the user's
+            if b.pw is not None:
+                b.pw.stop()
         except Exception:
             pass
 

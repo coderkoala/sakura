@@ -24,7 +24,8 @@ How to work is in Sakura's base instructions. This file is the reference for thi
 ## The browser
 
 For pages that need clicking, typing or a login, or when the user wants to watch: `sakura-browser open URL`, then `click N`,
-`type N "text" [--enter]`, `read`, `back`, `shot [FILE]`, `close`. It's a window on the user's screen that keeps its logins.
+`type N "text" [--enter]`, `read`, `back`, `shot [FILE]`, `close`. It's a window on the user's screen: their own Firefox when
+that's their browser (their cookies and logins, so what you do there is done as them), otherwise a Chromium with logins of its own.
 
 - CAPTCHAs, human checks and passwords are the user's. When it says NEEDS THE USER, don't try to get past it: tell them what's
   needed and end your turn. When they say it's done, run `sakura-browser read`.

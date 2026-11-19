@@ -9,10 +9,14 @@
   sakura-browser shot [FILE]       screenshot
   sakura-browser status
   sakura-browser close
+  sakura-browser share on|off|status   let Sakura use your own Firefox (its launcher gets --remote-debugging-port)
 
-Logins and cookies stay in its own profile (~/.sakura/browser), between commands and sessions. CAPTCHAs, human checks and
-passwords are for the user: the agent is told to ask them, and can't act on that page until they've dealt with it.
-Needs sakura-web-setup. SAKURA_BROWSER_HEADLESS=1 hides the window.
+When Firefox is the default browser and sharing is on, this is the user's own Firefox: Sakura opens a window of its own
+there, with the user's cookies and logins, and touches only the tabs it opened. Otherwise it's a Chromium with its own
+profile (~/.sakura/browser). Workers and SAKURA_BROWSER_HEADLESS=1 runs always get a hidden browser with their own profile.
+SAKURA_BROWSER=own|firefox overrides the choice; SAKURA_FIREFOX_PORT moves the port (9222).
+CAPTCHAs, human checks and passwords are for the user: the agent is told to ask them, and can't act on that page until
+they've dealt with it. Needs sakura-web-setup.
 """
 import json
 import os
@@ -57,6 +61,15 @@ def main():
         print(__doc__)
         return 0
     cmd = a[0] if a else ""
+    if cmd == "share":
+        sys.path.insert(0, os.path.join(ROOT, "mcp", "sakura-web"))
+        import firefox_bidi
+        how = {"on": firefox_bidi.share_on, "off": firefox_bidi.share_off, "status": firefox_bidi.share_status}.get(a[1] if len(a) > 1 else "status")
+        if how is None:
+            sys.exit(__doc__)
+        code, text = how()
+        print(text)
+        return code
     req = {"cmd": cmd, "attended": not os.environ.get("SAKURA_WORKER")}
     try:
         if cmd == "open":
@@ -102,4 +115,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

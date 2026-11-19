@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # sakura-web-setup — install what better web access needs. Safe to run again.
-#   a Python environment with trafilatura and Playwright, plus its headless Chromium
+#   a Python environment with trafilatura, Playwright (its Chromium is for workers and hidden runs) and websockets
+#   when Firefox is the default browser: sakura-browser share on, so Sakura's browser is the user's own Firefox
+#     (SAKURA_BROWSER=own skips it; sakura-browser share off undoes it)
 #   SearXNG in Docker, listening on 127.0.0.1:8888 only
 # Sakura works without these, with plainer fetching and fewer search results.
 set -eu
@@ -15,9 +17,10 @@ mkdir -p "$DATA" "$CONF"
 
 command -v uv >/dev/null || { echo "needs uv: https://docs.astral.sh/uv/" >&2; exit 1; }
 [ -x "$ENVDIR/bin/python" ] || uv venv -q "$ENVDIR"
-uv pip install -q --python "$ENVDIR/bin/python" trafilatura playwright
+uv pip install -q --python "$ENVDIR/bin/python" trafilatura playwright websockets
 "$ENVDIR/bin/python" -m playwright install chromium >/dev/null
 echo "web environment: $ENVDIR"
+case "${SAKURA_BROWSER:-auto}" in own | isolated | chromium) ;; *) "$ROOT/bin/sakura-browser" share on | sed 's/^/browser: /' || true ;; esac
 
 if ! command -v docker >/dev/null; then
     echo "no Docker, so no SearXNG: search falls back to the other sources" >&2

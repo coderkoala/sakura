@@ -3,6 +3,9 @@
 
   evals/browser.py         the mechanics, with no model, then the live cases
   evals/browser.py --gate  the mechanics only
+  evals/browser.py --gate --firefox-port 9333   the mechanics in a Firefox already listening there (start a throwaway one:
+      firefox --headless --no-remote --new-instance --profile DIR --remote-debugging-port 9333), not the user's own
+Every other run uses SAKURA_BROWSER=own, so an eval never opens pages in the user's Firefox.
 """
 import argparse
 import http.server
@@ -157,7 +160,7 @@ def visible_handoff(base, env, cwd):
             saw += item.get("aggregated_output") or ""
     print("  asked:", final[:240].replace("\n", " "), flush=True)
     res = {"the tool told it to ask the user": "NEEDS THE USER" in saw, "it left the check alone": not any("sakura-browser click" in c or "sakura-browser type" in c for c in cmds),
-           "it asked": bool(final) and "MANGO" not in final and any(w in final.lower() for w in ("captcha", "human", "check", "verif")), "status says the window is visible": "visible window" in b(env, "status")[1]}
+           "it asked": bool(final) and "MANGO" not in final and any(w in final.lower() for w in ("captcha", "human", "check", "verif")), "status says the window is visible": any(w in b(env, "status")[1] for w in ("visible window", "own Firefox"))}
     subprocess.run(["curl", "-s", base + "/pass"], capture_output=True)  # the person clears it
     page = subprocess.run([TOOL, "open", base + "/gated"], env=env, capture_output=True, text=True).stdout  # their window moves on, as a real check does
     r = subprocess.run(["sakura", "exec", "resume", "--dangerously-bypass-hook-trust", "--skip-git-repo-check", "--json", "-m", "qwen36-q3", "-c", 'model_providers.local-ollama.base_url="http://127.0.0.1:8091/v1"', thread, "Done, I've cleared it."], cwd=cwd, env=dict(env, SAKURA_ROUTER_URL="http://127.0.0.1:8091/v1"), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=400)
@@ -192,13 +195,17 @@ def main():
     ap.add_argument("--gate", action="store_true")
     ap.add_argument("--live", action="store_true")
     ap.add_argument("--visible", action="store_true", help="the hand-off in a real window on this screen")
+    ap.add_argument("--firefox-port", type=int, help="drive the Firefox listening on this port (a throwaway one) instead of Chromium")
     args = ap.parse_args()
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Site)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{srv.server_port}"
     passed = total = 0
     with tempfile.TemporaryDirectory(prefix="sakura-br-") as tmp:
-        env = dict(os.environ, SAKURA_BROWSER_DIR=os.path.join(tmp, "b"), SAKURA_BROWSER_HEADLESS="1", SAKURA_MEMORY_DIR=os.path.join(tmp, "m"), SAKURA_TOOLS_DIR=os.path.join(tmp, "t"))
+        env = dict(os.environ, SAKURA_BROWSER_DIR=os.path.join(tmp, "b"), SAKURA_BROWSER_HEADLESS="1", SAKURA_BROWSER="own", SAKURA_MEMORY_DIR=os.path.join(tmp, "m"), SAKURA_TOOLS_DIR=os.path.join(tmp, "t"))
+        if args.firefox_port:
+            env.pop("SAKURA_BROWSER_HEADLESS")
+            env.update(SAKURA_BROWSER="firefox", SAKURA_FIREFOX_PORT=str(args.firefox_port))
         results = {} if args.live or args.visible else gate(base, env)
         if args.visible:
             results.update(visible_handoff(base, env, tmp))
